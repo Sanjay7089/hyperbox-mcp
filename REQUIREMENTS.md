@@ -26,12 +26,19 @@ decisions behind these choices.
   2. State persists: set a var in one call, read it in the next.
   3. Broken snippet (raised exception) → `success: false`, real
      traceback in `stderr`, non-zero `exit_code` — not swallowed.
+  4. A snippet that exceeds `timeout` → `success: false` with the
+     timeout legible in `stderr`. A timeout is a structured result like
+     any other failure; it must never escape as an unhandled exception.
 
 ### `destroy_sandbox(sandbox_id) -> dict`
 - Tears the sandbox down. Idempotent — destroying an already-gone
   sandbox is a success, not an error.
+- Returns `{sandbox_id, status}` where `status` is `"destroyed"` or
+  `"already_gone"`. Both are successes, so neither carries a boolean
+  that reads as failure — an agent skimming for `false` must not
+  conclude a working call failed.
 - **Acceptance:** after destroy, the id is gone; a second destroy does
-  not raise.
+  not raise and reports `already_gone`.
 
 ## Non-functional requirements
 
@@ -76,6 +83,10 @@ on it.
   input. The engineer's FIRST job is running `tests/verify.py` against
   a real Docker to confirm the container path works on this machine,
   then fixing whatever the real run surfaces.
+- The language and backend maps ship holding only what has actually
+  been verified — Phase 1 restricts them to `python` + `docker`. An
+  entry is added only after a real run against that combination passes,
+  so the tool can never hand back an environment nothing has exercised.
 - **Gate:** don't start Phase 2 until you've personally watched a
   broken snippet come back with `success: false` and a real traceback
   from an actual container.

@@ -118,6 +118,10 @@ sandbox-mcp (FastMCP, Python)
 | Reset | Chaos/cloud/browser out of core | Real problems, wrong slice for v1 — backlog |
 | Reset | fastmcp pinned 2.14.7, not 4.x | Verified 2.x proxy/mount API directly; 4.x rework under-documented |
 | Reset | No bash/shell in run() | Not a llm-sandbox SupportedLanguage; separate execute_command tool later if needed |
+| 2026-09-04 | uv for env + `uv.lock` committed | Reproducible installs; `.python-version` pins the 3.11 floor so we develop against the minimum we claim to support |
+| 2026-09-04 | CLAUDE/DESIGN/REQUIREMENTS + `.claude/` tracked in git | They are the declared source of truth; a reviewer must see the requirement change behind a code change. Only `settings.local.json` stays ignored |
+| 2026-09-04 | Phase 3 mounting lives in `mounts.py`, not `server.py` | mcp-composer was barred from server.py yet had to mount onto its FastMCP instance; `mounts.register(mcp)` keeps Phases 1 and 3 file-disjoint and genuinely parallel |
+| 2026-09-04 | Language/backend maps ship restricted to what's verified | Code had shipped javascript + podman ahead of their phase gate, so create_sandbox could hand back an environment nothing had ever run |
 
 ## Backlog (parked, not started)
 
