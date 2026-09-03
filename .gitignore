@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+venv2/
+.env
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# CLAUDE.md, DESIGN.md, REQUIREMENTS.md and .claude/ are deliberately
+# tracked: they are the declared source of truth for scope, and a
+# reviewer must be able to see the requirement change behind a code
+# change. Only per-user local settings stay out.
+.claude/settings.local.json

@@ -1,0 +1,144 @@
+"""The llm-sandbox implementation of the Runtime protocol.
+
+THIS IS THE ONLY FILE ALLOWED TO IMPORT llm_sandbox. Every name and
+signature below was verified directly against the installed package
+(not assumed from docs) — see DESIGN.md's decision log:
+
+- create_session(backend=SandboxBackend.X, lang=SupportedLanguage.Y)
+  returns a session with explicit .open() / .close() (verified present),
+  so we can hold it open across many .run() calls — a persistent
+  sandbox, not a one-shot context manager.
+- .run(code, libraries=..., timeout=...) -> ConsoleOutput with
+  .stdout / .stderr / .exit_code.
+- Top-level exceptions actually exported: SandboxError (base),
+  ContainerError, ResourceError, SecurityError, ValidationError.
+  (MissingDependencyError is NOT top-level — do not import it.)
+- There is NO SupportedLanguage for bash/shell. Not our concern here.
+"""
+
+from __future__ import annotations
+
+import uuid
+
+from llm_sandbox import (
+    ContainerError,
+    ResourceError,
+    SandboxBackend,
+    SandboxError,
+    SecurityError,
+    SupportedLanguage,
+    ValidationError,
+    create_session,
+)
+
+from sandbox_mcp.runtime import ExecResult, SandboxHandle
+
+# v1 (Phases 1-2): python + javascript. java/cpp/go/ruby/r exist in
+# llm-sandbox and are cheap to add (Phase 2) — each with its own
+# verified run before being added here.
+_LANGUAGES = {
+    "python": SupportedLanguage.PYTHON,
+    "javascript": SupportedLanguage.JAVASCRIPT,
+}
+
+# v1: docker (Phase 1) + podman (Phase 2). Both assumed rootless.
+_BACKENDS = {
+    "docker": SandboxBackend.DOCKER,
+    "podman": SandboxBackend.PODMAN,
+}
+
+_BACKEND_EXCEPTIONS = (
+    SandboxError,
+    ContainerError,
+    ResourceError,
+    SecurityError,
+    ValidationError,
+)
+
+
+class UnsupportedLanguageError(ValueError):
+    pass
+
+
+class UnsupportedBackendError(ValueError):
+    pass
+
+
+class SandboxRuntimeError(RuntimeError):
+    """Wraps any backend exception so callers never see raw llm-sandbox
+    types — keeps the backend replaceable."""
+
+
+class LLMSandboxRuntime:
+    """Runtime implementation backed by llm-sandbox.
+
+    Holds open sessions in-process, keyed by sandbox_id, so a sandbox
+    persists across multiple run() calls until destroy().
+    """
+
+    def __init__(self) -> None:
+        self._sessions: dict[str, object] = {}
+
+    def create(self, language: str, backend: str) -> SandboxHandle:
+        if language not in _LANGUAGES:
+            raise UnsupportedLanguageError(
+                f"Unsupported language '{language}'. Supported: "
+                f"{', '.join(_LANGUAGES)}"
+            )
+        if backend not in _BACKENDS:
+            raise UnsupportedBackendError(
+                f"Unsupported backend '{backend}'. Supported: "
+                f"{', '.join(_BACKENDS)}"
+            )
+
+        try:
+            session = create_session(
+                backend=_BACKENDS[backend], lang=_LANGUAGES[language]
+            )
+            session.open()
+        except _BACKEND_EXCEPTIONS as exc:
+            raise SandboxRuntimeError(f"{type(exc).__name__}: {exc}") from exc
+
+        sandbox_id = uuid.uuid4().hex[:12]
+        self._sessions[sandbox_id] = session
+        return SandboxHandle(
+            sandbox_id=sandbox_id, language=language, backend=backend
+        )
+
+    def run(
+        self,
+        handle: SandboxHandle,
+        code: str,
+        libraries: list[str] | None = None,
+        timeout: float | None = None,
+    ) -> ExecResult:
+        session = self._sessions.get(handle.sandbox_id)
+        if session is None:
+            raise SandboxRuntimeError(
+                f"No live sandbox '{handle.sandbox_id}'. "
+                "Was it destroyed, or never created?"
+            )
+        try:
+            out = session.run(code, libraries=libraries, timeout=timeout)
+        except _BACKEND_EXCEPTIONS as exc:
+            # A backend error running code is a structured failure the
+            # agent should reason about, not a crash — return it as one.
+            return ExecResult(
+                stdout="",
+                stderr=f"{type(exc).__name__}: {exc}",
+                exit_code=-1,
+            )
+        return ExecResult(
+            stdout=out.stdout,
+            stderr=out.stderr,
+            exit_code=out.exit_code,
+        )
+
+    def destroy(self, handle: SandboxHandle) -> None:
+        session = self._sessions.pop(handle.sandbox_id, None)
+        if session is None:
+            return  # idempotent: already gone
+        try:
+            session.close()
+        except _BACKEND_EXCEPTIONS as exc:
+            raise SandboxRuntimeError(f"{type(exc).__name__}: {exc}") from exc
