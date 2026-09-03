@@ -1,7 +1,7 @@
 """sandbox-mcp: give any MCP client a disposable, persistent computer to
 run code in — create it once, run in it repeatedly, destroy it when done.
 
-Run with: python -m sandbox_mcp.server
+Run with: uv run python -m sandbox_mcp.server
 
 The three tools below talk ONLY to a Runtime (see runtime.py). They must
 never import llm-sandbox directly — that's what keeps the execution
@@ -10,6 +10,8 @@ anything here.
 """
 
 from __future__ import annotations
+
+import importlib.util
 
 from fastmcp import FastMCP
 
@@ -102,14 +104,26 @@ def destroy_sandbox(sandbox_id: str) -> dict:
     return {"sandbox_id": sandbox_id, "destroyed": True}
 
 
-# --- Phase 3 (mcp-composer's scope) -----------------------------------
-# Mount external MCP servers here once available, e.g.:
-#   idx = FastMCP.as_proxy("<codebase indexer connection>")
-#   mcp.mount(idx, prefix="index")
-#   docs = FastMCP.as_proxy("<Context7 connection>")
-#   mcp.mount(docs, prefix="docs")
-# Left unmounted for now — see REQUIREMENTS.md Phase 3. Do not stub
-# these with fake tools; an unmounted capability is simply absent.
+# --- Phase 3 seam (mcp-composer's scope) ------------------------------
+# External MCP servers — a codebase indexer under prefix `index`,
+# Context7 under `docs` — are mounted by `sandbox_mcp/mounts.py`, which
+# owns that wiring end to end (see REQUIREMENTS.md Phase 3). That module
+# does not exist until Phase 3 lands, which is why this is a find_spec
+# check and not a try/except ImportError: an absent module is expected,
+# but a module that exists and fails to import is a real error and must
+# surface loudly rather than being swallowed into a silent no-op.
+#
+# The contract is one function: `mounts.register(mcp)`. Nothing else in
+# this file changes for Phase 3 — keeping the lifecycle tools and the
+# mounting work in separate files is what lets the two phases proceed in
+# parallel without touching each other's code.
+#
+# An unmounted capability is simply absent. Never stub one with a fake
+# tool that returns placeholder data.
+if importlib.util.find_spec("sandbox_mcp.mounts") is not None:
+    from sandbox_mcp import mounts
+
+    mounts.register(mcp)
 
 
 def main() -> None:

@@ -8,7 +8,22 @@ model: inherit
 You wire external MCP servers into sandbox-mcp as mounted proxies. This
 is Phase 3 in REQUIREMENTS.md — read that section first. Your work has
 no dependency on `run()` or the sandbox backend; don't wait on
-sandbox-engineer, and don't touch runtime.py, llm_sandbox_runtime.py, or server.py.
+sandbox-engineer, and don't touch runtime.py, llm_sandbox_runtime.py, or
+server.py.
+
+**Your file is `src/sandbox_mcp/mounts.py`** — you create it, and it is
+the only source file you write. `server.py` already calls into it:
+
+```python
+if importlib.util.find_spec("sandbox_mcp.mounts") is not None:
+    from sandbox_mcp import mounts
+    mounts.register(mcp)
+```
+
+So expose exactly one entry point — `register(mcp: FastMCP) -> None` —
+that does the `as_proxy()` + `mount()` calls. That seam exists so Phase
+3 and Phase 1 never edit the same file; do not "simplify" it by moving
+your mounting code into server.py.
 
 Verified API (tested directly against `fastmcp==2.14.7`, not assumed
 from docs — see DESIGN.md):
