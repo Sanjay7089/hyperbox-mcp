@@ -51,10 +51,15 @@ Phase 1 passes.
 
 ## Commands
 
-- Install: `pip install -e ".[dev]"`
-- Run the server: `python -m sandbox_mcp.server`
-- Verify: the `verify-sandbox-mcp` skill, or `python tests/verify.py`
-  (`python tests/verify.py podman` for the Podman path)
+- Install: `uv sync` (creates `.venv/`, installs the project editable,
+  writes `uv.lock` — commit the lockfile, never the venv)
+- Run the server: `uv run python -m sandbox_mcp.server`
+- Verify: the `verify-sandbox-mcp` skill, or
+  `uv run python tests/verify.py`
+  (`uv run python tests/verify.py podman` for the Podman path)
+
+Always go through `uv run` — a bare `python` picks up whatever
+interpreter is on PATH, not this project's pinned 3.11 environment.
 
 ## Testing
 

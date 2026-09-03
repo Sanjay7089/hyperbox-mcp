@@ -24,11 +24,11 @@ deliberately deferred — see `DESIGN.md`.
 ## Quickstart
 
 ```bash
-pip install -e .
-python -m sandbox_mcp.server   # stdio MCP server
+uv sync
+uv run python -m sandbox_mcp.server   # stdio MCP server
 ```
 
-Point any MCP client at `python -m sandbox_mcp.server`, then:
+Point any MCP client at `uv run python -m sandbox_mcp.server`, then:
 
 > Create a Python sandbox, write a function to parse this log line, run it, and fix it until it works. Then destroy the sandbox.
 
@@ -78,8 +78,8 @@ If that loop works against a real container, you have the foundation.
 ## Verify
 
 ```bash
-python tests/verify.py           # against Docker
-python tests/verify.py podman    # against rootless Podman
+uv run python tests/verify.py           # against Docker
+uv run python tests/verify.py podman    # against rootless Podman
 ```
 
 Runs the real lifecycle against a real container: create, a passing
@@ -94,11 +94,16 @@ destroy. "Done" means this passes.
 
 ## Push to your clean repo
 
+The repo is already initialized, with the scaffold as its first commit
+on `main`. To publish it:
+
 ```bash
 gh repo create sandbox-mcp --public --source=. --remote=origin
-git add -A && git commit -m "Initial scaffold: sandbox lifecycle + phased multi-agent plan"
 git push -u origin main
 ```
+
+After that first push, nothing lands on `main` directly — each phase
+gets its own branch and a PR. See `CLAUDE.md`.
 
 ## License
 

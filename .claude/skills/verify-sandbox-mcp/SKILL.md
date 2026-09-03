@@ -4,7 +4,7 @@ description: Verify the sandbox lifecycle (create/run/destroy) works against a r
 
 ## Run the acceptance test
 
-!`python tests/verify.py`
+!`uv run python tests/verify.py`
 
 ## Instructions
 
