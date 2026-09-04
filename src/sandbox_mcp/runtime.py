@@ -39,7 +39,15 @@ class ExecResult:
 @dataclass
 class SandboxHandle:
     """An opaque reference to a live sandbox. The MCP layer holds these
-    by id; it never holds a backend-specific object directly."""
+    by id; it never holds a backend-specific object directly.
+
+    `meta` is the backend's own reattach payload, opaque above this
+    line. The llm-sandbox implementation stores {"container_ref": "..."}
+    there; a Firecracker one would store something else entirely. The
+    registry persists it verbatim and never interprets it, which is what
+    lets a NEW server process rebuild a working handle for a sandbox it
+    did not create.
+    """
 
     sandbox_id: str
     language: str
@@ -76,5 +84,25 @@ class Runtime(Protocol):
 
     def destroy(self, handle: SandboxHandle) -> None:
         """Tear down the sandbox. Idempotent — destroying an already-gone
-        sandbox is a no-op success, not an error."""
+        sandbox is a no-op success, not an error.
+
+        Must confirm the underlying container is genuinely gone rather
+        than merely absent from this process's memory. Reporting a
+        still-running container as gone is how orphans accumulate.
+        """
+        ...
+
+    def alive(self, handle: SandboxHandle) -> bool:
+        """Whether the sandbox's container actually exists and runs right
+        now — asked of the engine, not of in-process bookkeeping."""
+        ...
+
+    def gc(self, known_ids: set[str]) -> list[str]:
+        """Destroy containers this project created whose sandbox_id is
+        not in `known_ids`, returning the ids reclaimed.
+
+        Only ever touches containers carrying our own labels. A container
+        we did not create is never a candidate, no matter how orphaned it
+        looks — that judgement is not ours to make.
+        """
         ...
