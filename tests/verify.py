@@ -2,7 +2,12 @@
 the real LLMSandboxRuntime, which starts a real Docker (or Podman)
 container. Requires Docker or Podman actually installed and running.
 
-    python tests/verify.py [docker|podman]
+    python tests/verify.py [docker|podman] [language]
+
+Language defaults to python. Every language in the runtime's map is
+expected to clear the SAME bar — that is the point: an entry in
+_LANGUAGES is a promise the tool can deliver that environment, so it is
+added only after this suite passes for it. See REQUIREMENTS.md Phase 2.
 
 Prints PASS/FAIL per case and exits non-zero on any failure. This is
 what the verify-sandbox-mcp skill runs.
@@ -13,7 +18,8 @@ errors, first decide WHICH layer failed before touching code:
   - Is the backend socket reachable (DOCKER_HOST / CONTAINER_HOST)?
     On macOS the podman socket is inside the VM; export the host-side
     path from `podman machine inspect` or podman-py cannot connect.
-  - Is the base image pullable from here?
+  - Is the base image pullable from here? A first run of a compiled
+    language pulls a large toolchain image and can take minutes.
 A create failure is very often the environment, not runtime.py. Don't
 edit the implementation until you've ruled the environment out.
 """
@@ -28,6 +34,86 @@ from sandbox_mcp import llm_sandbox_runtime as lsr  # noqa: E402
 from sandbox_mcp import server  # noqa: E402
 from sandbox_mcp.runtime import Runtime  # noqa: E402
 
+MARKER = "hello from sandbox-mcp"
+STATE_FILE = "/tmp/persisted.txt"
+
+# One snippet set per language. `libraries`/`lib_use` are optional — the
+# package-persistence case is skipped for languages where installing a
+# dependency mid-session isn't a meaningful operation.
+SNIPPETS: dict[str, dict] = {
+    "python": {
+        "hello": f"print('{MARKER}')",
+        "write": f"open('{STATE_FILE}', 'w').write('42')",
+        "read": f"print(open('{STATE_FILE}').read())",
+        "broken": "raise ValueError('deliberately broken')",
+        "spin": "while True: pass",
+        "libraries": ["six"],
+        "lib_use": "import six; print('six', six.__version__)",
+        "lib_marker": "six",
+    },
+    "javascript": {
+        "hello": f"console.log('{MARKER}');",
+        "write": f"require('fs').writeFileSync('{STATE_FILE}', '42');",
+        "read": f"console.log(require('fs').readFileSync('{STATE_FILE}', 'utf8'));",
+        "broken": "throw new Error('deliberately broken');",
+        "spin": "while (true) {}",
+    },
+    "ruby": {
+        "hello": f"puts '{MARKER}'",
+        "write": f"File.write('{STATE_FILE}', '42')",
+        "read": f"puts File.read('{STATE_FILE}')",
+        "broken": "raise 'deliberately broken'",
+        "spin": "loop do end",
+    },
+    "go": {
+        "hello": 'package main\nimport "fmt"\nfunc main() { fmt.Println("' + MARKER + '") }',
+        "write": 'package main\nimport "os"\nfunc main() { os.WriteFile("'
+        + STATE_FILE
+        + '", []byte("42"), 0644) }',
+        "read": 'package main\nimport ("fmt"; "os")\nfunc main() { b, _ := os.ReadFile("'
+        + STATE_FILE
+        + '"); fmt.Println(string(b)) }',
+        "broken": 'package main\nfunc main() { panic("deliberately broken") }',
+        "spin": "package main\nfunc main() { for {} }",
+    },
+    "java": {
+        "hello": 'public class Main { public static void main(String[] a) {'
+        ' System.out.println("' + MARKER + '"); } }',
+        "write": "import java.nio.file.*;\npublic class Main { public static void"
+        ' main(String[] a) throws Exception { Files.write(Paths.get("'
+        + STATE_FILE
+        + '"), "42".getBytes()); } }',
+        "read": "import java.nio.file.*;\npublic class Main { public static void"
+        ' main(String[] a) throws Exception { System.out.println(new'
+        ' String(Files.readAllBytes(Paths.get("' + STATE_FILE + '")))); } }',
+        "broken": "public class Main { public static void main(String[] a) {"
+        ' throw new RuntimeException("deliberately broken"); } }',
+        "spin": "public class Main { public static void main(String[] a) {"
+        " while (true) {} } }",
+    },
+    "cpp": {
+        "hello": '#include <iostream>\nint main() { std::cout << "'
+        + MARKER
+        + '" << std::endl; }',
+        "write": '#include <fstream>\nint main() { std::ofstream f("'
+        + STATE_FILE
+        + '"); f << "42"; }',
+        "read": '#include <iostream>\n#include <fstream>\n#include <string>\n'
+        'int main() { std::ifstream f("' + STATE_FILE + '"); std::string s;'
+        " f >> s; std::cout << s << std::endl; }",
+        "broken": "#include <stdexcept>\nint main() { throw"
+        ' std::runtime_error("deliberately broken"); }',
+        "spin": "int main() { while (true) {} }",
+    },
+    "r": {
+        "hello": f'cat("{MARKER}\\n")',
+        "write": f'writeLines("42", "{STATE_FILE}")',
+        "read": f'cat(readLines("{STATE_FILE}"), "\\n")',
+        "broken": 'stop("deliberately broken")',
+        "spin": "while (TRUE) {}",
+    },
+}
+
 results: list[tuple[str, bool, str]] = []
 
 
@@ -36,8 +122,21 @@ def check(name: str, condition: bool, detail: str = "") -> None:
     print(f"{'PASS' if condition else 'FAIL'}  {name}  {detail}")
 
 
+def summarize() -> int:
+    failed = [r for r in results if not r[1]]
+    print(f"\n{len(results) - len(failed)}/{len(results)} passed")
+    return 1 if failed else 0
+
+
 def main() -> int:
     backend = sys.argv[1] if len(sys.argv) > 1 else "docker"
+    language = sys.argv[2] if len(sys.argv) > 2 else "python"
+    if language not in SNIPPETS:
+        print(f"No snippet set for '{language}'. Known: {', '.join(SNIPPETS)}")
+        return 1
+    snip = SNIPPETS[language]
+    print(f"--- {language} on {backend} ---")
+
     rt: Runtime = lsr.LLMSandboxRuntime()
 
     # 0. Invalid inputs fail fast, before any container is created.
@@ -49,27 +148,22 @@ def main() -> int:
 
     # 1. Create a persistent sandbox.
     try:
-        handle = rt.create(language="python", backend=backend)
-        created = True
+        handle = rt.create(language=language, backend=backend)
     except Exception as exc:  # noqa: BLE001 - surface env failures clearly
-        created = False
         check(
             "create_sandbox succeeds",
             False,
             f"{type(exc).__name__}: {exc}  <-- is {backend} running? see triage note in this file",
         )
-
-    if not created:
-        print(f"\n{sum(1 for r in results if r[1])}/{len(results)} passed")
-        return 1
+        return summarize()
 
     check("create_sandbox returns an id", bool(handle.sandbox_id), handle.sandbox_id)
 
     # 2. Passing run — real stdout, success True.
-    ok = rt.run(handle, "print('hello from sandbox-mcp')")
+    ok = rt.run(handle, snip["hello"])
     check(
         "passing run: success + expected stdout",
-        ok.success and "hello from sandbox-mcp" in ok.stdout,
+        ok.success and MARKER in ok.stdout,
         str(ok),
     )
 
@@ -77,38 +171,37 @@ def main() -> int:
     #    packages, which is what the build→run→fix→re-run loop needs.
     #    Not interpreter memory: each run() is a fresh process. See
     #    DESIGN.md's Decision Log, 2026-09-04.
-    rt.run(handle, "open('/tmp/persisted.txt', 'w').write('42')")
-    from_file = rt.run(handle, "print(open('/tmp/persisted.txt').read())")
+    rt.run(handle, snip["write"])
+    from_file = rt.run(handle, snip["read"])
     check(
         "filesystem persists across run() calls",
         from_file.success and "42" in from_file.stdout,
         str(from_file),
     )
 
-    rt.run(handle, "import six", libraries=["six"])
-    installed = rt.run(handle, "import six; print('six', six.__version__)")
-    check(
-        "installed package persists into a later run that omits libraries",
-        installed.success and "six" in installed.stdout,
-        str(installed),
-    )
+    if "lib_use" in snip:
+        rt.run(handle, snip["lib_use"], libraries=snip["libraries"])
+        installed = rt.run(handle, snip["lib_use"])
+        check(
+            "installed package persists into a later run that omits libraries",
+            installed.success and snip["lib_marker"] in installed.stdout,
+            str(installed),
+        )
 
-    # 4. Broken run — non-zero exit, real traceback, success False.
-    broken = rt.run(handle, "raise ValueError('deliberately broken')")
+    # 4. Broken run — non-zero exit, real error text, success False.
+    broken = rt.run(handle, snip["broken"])
     check(
-        "broken run: not success + real traceback",
-        (not broken.success) and "ValueError" in broken.stderr,
+        "broken run: not success + real error in stderr",
+        (not broken.success) and "deliberately broken" in broken.stderr,
         str(broken),
     )
 
     # 5. Timeout — a structured failure, not a crash and not a silent
     #    success. timed_out must actually be set, or the field is a lie.
-    timed = rt.run(handle, "while True: pass", timeout=2)
+    timed = rt.run(handle, snip["spin"], timeout=5)
     check(
         "timeout: not success + timed_out set + reason in stderr",
-        (not timed.success)
-        and timed.timed_out
-        and "Timeout" in timed.stderr,
+        (not timed.success) and timed.timed_out and "Timeout" in timed.stderr,
         str(timed),
     )
 
@@ -120,12 +213,12 @@ def main() -> int:
     # 7. The destroy TOOL reports an affirmative status on both paths.
     #    Nothing else here exercises the MCP tool layer, and a success
     #    that reports a false boolean invites an agent to retry it.
-    created = server.create_sandbox.fn(language="python", backend=backend)
-    if "error" in created:
-        check("tool-level destroy reports a status", False, str(created))
+    made = server.create_sandbox.fn(language=language, backend=backend)
+    if "error" in made:
+        check("tool-level destroy reports a status", False, str(made))
     else:
-        first = server.destroy_sandbox.fn(created["sandbox_id"])
-        second = server.destroy_sandbox.fn(created["sandbox_id"])
+        first = server.destroy_sandbox.fn(made["sandbox_id"])
+        second = server.destroy_sandbox.fn(made["sandbox_id"])
         check(
             "destroy tool: 'destroyed' then 'already_gone', no false boolean",
             first.get("status") == "destroyed"
@@ -135,9 +228,7 @@ def main() -> int:
             f"first={first} second={second}",
         )
 
-    failed = [r for r in results if not r[1]]
-    print(f"\n{len(results) - len(failed)}/{len(results)} passed")
-    return 1 if failed else 0
+    return summarize()
 
 
 if __name__ == "__main__":

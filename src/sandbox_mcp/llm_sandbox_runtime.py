@@ -48,6 +48,7 @@ from sandbox_mcp.runtime import ExecResult, SandboxHandle
 # real verified run passes. See REQUIREMENTS.md Phase 1.
 _LANGUAGES = {
     "python": SupportedLanguage.PYTHON,
+    "javascript": SupportedLanguage.JAVASCRIPT,
 }
 
 _BACKENDS = {
