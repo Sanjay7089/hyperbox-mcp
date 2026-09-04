@@ -21,6 +21,7 @@ from sandbox_mcp.llm_sandbox_runtime import (
     UnsupportedBackendError,
     UnsupportedLanguageError,
 )
+from sandbox_mcp.registry import Registry
 from sandbox_mcp.runtime import Runtime, SandboxHandle
 
 mcp = FastMCP("sandbox-mcp")
@@ -29,9 +30,44 @@ mcp = FastMCP("sandbox-mcp")
 # execution engines; nothing below it knows or cares which Runtime it is.
 _runtime: Runtime = LLMSandboxRuntime()
 
-# Live handles by id, so `run`/`destroy` can find the sandbox `create`
-# made. In-process only — a sandbox does not survive a server restart.
-_handles: dict[str, SandboxHandle] = {}
+# Sandbox ownership lives in a durable registry shared by every server
+# process, NOT in this process's memory. That is what lets a restarted
+# server, or a second server the client launched, keep using a sandbox
+# it did not create. See REQUIREMENTS.md Phase 5.
+_registry = Registry()
+
+
+def _handle_for(sandbox_id: str) -> SandboxHandle | None:
+    """Rebuild a handle from durable state. The container_ref stored in
+    `meta` is what the runtime reattaches to."""
+    rec = _registry.get(sandbox_id)
+    if rec is None:
+        return None
+    return SandboxHandle(
+        sandbox_id=rec.sandbox_id,
+        language=rec.language,
+        backend=rec.backend,
+        meta={"container_ref": rec.container_ref},
+    )
+
+
+def collect_garbage() -> list[str]:
+    """Reclaim containers we created that the registry no longer knows
+    about, plus any whose inactivity TTL has passed. Only ever touches
+    containers carrying our labels."""
+    for rec in _registry.expired_records():
+        handle = _handle_for(rec.sandbox_id)
+        if handle is not None:
+            try:
+                _runtime.destroy(handle)
+            except Exception:  # noqa: BLE001 - best effort reclamation
+                pass
+        _registry.remove(rec.sandbox_id)
+    known = {r.sandbox_id for r in _registry.all_records()}
+    try:
+        return _runtime.gc(known)
+    except Exception:  # noqa: BLE001 - never let GC break startup
+        return []
 
 
 @mcp.tool()
@@ -59,7 +95,12 @@ def create_sandbox(language: str = "python", backend: str = "docker") -> dict:
         return {"error": f"Failed to create sandbox: {exc}"}
     except Exception as exc:  # noqa: BLE001 — see run() for the rationale
         return {"error": f"Failed to create sandbox: {type(exc).__name__}: {exc}"}
-    _handles[handle.sandbox_id] = handle
+    _registry.add(
+        sandbox_id=handle.sandbox_id,
+        container_ref=handle.meta.get("container_ref", ""),
+        language=handle.language,
+        backend=handle.backend,
+    )
     return {
         "sandbox_id": handle.sandbox_id,
         "language": handle.language,
@@ -83,13 +124,17 @@ def run(
     variables are NOT guaranteed to survive, so persist anything you
     need to a file.
     """
-    handle = _handles.get(sandbox_id)
+    handle = _handle_for(sandbox_id)
     if handle is None:
         return {"error": f"No sandbox '{sandbox_id}'. Create one first."}
     try:
-        result = _runtime.run(
-            handle, code=code, libraries=libraries, timeout=timeout
-        )
+        # Held for the whole call so two processes cannot drive the same
+        # container's session concurrently.
+        with _registry.lock(sandbox_id):
+            result = _runtime.run(
+                handle, code=code, libraries=libraries, timeout=timeout
+            )
+            _registry.touch(sandbox_id)
     except SandboxRuntimeError as exc:
         return {"error": str(exc)}
     except Exception as exc:  # noqa: BLE001
@@ -109,14 +154,25 @@ def run(
 def destroy_sandbox(sandbox_id: str) -> dict:
     """Tear down a sandbox. Idempotent — destroying one that's already
     gone is a success, not an error."""
-    handle = _handles.pop(sandbox_id, None)
+    handle = _handle_for(sandbox_id)
     if handle is None:
         # Idempotent, so this is a success. It reports an affirmative
         # status rather than a boolean: `destroyed: false` on a call
         # that worked invites an agent to retry or error-handle it.
         return {"sandbox_id": sandbox_id, "status": "already_gone"}
     try:
-        _runtime.destroy(handle)
+        with _registry.lock(sandbox_id):
+            _runtime.destroy(handle)
+            # `already_gone` must describe the CONTAINER, not our
+            # bookkeeping. Confirm with the engine before saying so.
+            if _runtime.alive(handle):
+                return {
+                    "error": (
+                        f"Sandbox '{sandbox_id}' container is still running "
+                        "after destroy was attempted."
+                    )
+                }
+            _registry.remove(sandbox_id)
     except SandboxRuntimeError as exc:
         return {"error": str(exc)}
     except Exception as exc:  # noqa: BLE001 — see run() for the rationale
@@ -147,6 +203,8 @@ if importlib.util.find_spec("sandbox_mcp.mounts") is not None:
 
 
 def main() -> None:
+    # Reclaim anything left behind by a previous process before serving.
+    collect_garbage()
     mcp.run()
 
 
