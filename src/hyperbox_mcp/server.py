@@ -11,8 +11,6 @@ anything here.
 
 from __future__ import annotations
 
-import importlib.util
-
 from fastmcp import FastMCP
 
 from hyperbox_mcp.llm_sandbox_runtime import (
@@ -210,28 +208,6 @@ def destroy_sandbox(sandbox_id: str) -> dict:
     except Exception as exc:  # noqa: BLE001 — see run() for the rationale
         return {"error": f"{type(exc).__name__}: {exc}"}
     return {"sandbox_id": sandbox_id, "status": "destroyed"}
-
-
-# --- Phase 3 seam (mcp-composer's scope) ------------------------------
-# External MCP servers — a codebase indexer under prefix `index`,
-# Context7 under `docs` — are mounted by `hyperbox_mcp/mounts.py`, which
-# owns that wiring end to end (see REQUIREMENTS.md Phase 3). That module
-# does not exist until Phase 3 lands, which is why this is a find_spec
-# check and not a try/except ImportError: an absent module is expected,
-# but a module that exists and fails to import is a real error and must
-# surface loudly rather than being swallowed into a silent no-op.
-#
-# The contract is one function: `mounts.register(mcp)`. Nothing else in
-# this file changes for Phase 3 — keeping the lifecycle tools and the
-# mounting work in separate files is what lets the two phases proceed in
-# parallel without touching each other's code.
-#
-# An unmounted capability is simply absent. Never stub one with a fake
-# tool that returns placeholder data.
-if importlib.util.find_spec("hyperbox_mcp.mounts") is not None:
-    from hyperbox_mcp import mounts
-
-    mounts.register(mcp)
 
 
 def main() -> None:
