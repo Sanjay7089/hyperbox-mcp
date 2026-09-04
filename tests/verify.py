@@ -23,6 +23,7 @@ import sys
 sys.path.insert(0, "src")
 
 from sandbox_mcp import llm_sandbox_runtime as lsr  # noqa: E402
+from sandbox_mcp import server  # noqa: E402
 from sandbox_mcp.runtime import Runtime  # noqa: E402
 
 results: list[tuple[str, bool, str]] = []
@@ -87,10 +88,39 @@ def main() -> int:
         str(broken),
     )
 
-    # 5. Destroy, then destroy again — idempotent.
+    # 5. Timeout — a structured failure, not a crash and not a silent
+    #    success. timed_out must actually be set, or the field is a lie.
+    timed = rt.run(handle, "while True: pass", timeout=2)
+    check(
+        "timeout: not success + timed_out set + reason in stderr",
+        (not timed.success)
+        and timed.timed_out
+        and "Timeout" in timed.stderr,
+        str(timed),
+    )
+
+    # 6. Destroy, then destroy again — idempotent.
     rt.destroy(handle)
     rt.destroy(handle)  # must not raise
     check("destroy is idempotent (second call does not raise)", True)
+
+    # 7. The destroy TOOL reports an affirmative status on both paths.
+    #    Nothing else here exercises the MCP tool layer, and a success
+    #    that reports a false boolean invites an agent to retry it.
+    created = server.create_sandbox.fn(language="python", backend=backend)
+    if "error" in created:
+        check("tool-level destroy reports a status", False, str(created))
+    else:
+        first = server.destroy_sandbox.fn(created["sandbox_id"])
+        second = server.destroy_sandbox.fn(created["sandbox_id"])
+        check(
+            "destroy tool: 'destroyed' then 'already_gone', no false boolean",
+            first.get("status") == "destroyed"
+            and second.get("status") == "already_gone"
+            and False not in first.values()
+            and False not in second.values(),
+            f"first={first} second={second}",
+        )
 
     failed = [r for r in results if not r[1]]
     print(f"\n{len(results) - len(failed)}/{len(results)} passed")

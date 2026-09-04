@@ -13,6 +13,13 @@ signature below was verified directly against the installed package
 - Top-level exceptions actually exported: SandboxError (base),
   ContainerError, ResourceError, SecurityError, ValidationError.
   (MissingDependencyError is NOT top-level — do not import it.)
+- SandboxTimeoutError is NOT top-level either; it lives in
+  llm_sandbox.exceptions and subclasses SandboxError, so it must be
+  caught BEFORE the generic backend tuple or it disappears into it.
+- Verified against a real container: each .run() is a fresh process in
+  the SAME container (differing os.getpid(), identical nodename). The
+  filesystem and pip-installed packages persist between runs;
+  interpreter memory does not.
 - There is NO SupportedLanguage for bash/shell. Not our concern here.
 """
 
@@ -30,21 +37,21 @@ from llm_sandbox import (
     ValidationError,
     create_session,
 )
+from llm_sandbox.exceptions import SandboxTimeoutError
 
 from sandbox_mcp.runtime import ExecResult, SandboxHandle
 
-# v1 (Phases 1-2): python + javascript. java/cpp/go/ruby/r exist in
-# llm-sandbox and are cheap to add (Phase 2) — each with its own
-# verified run before being added here.
+# These maps hold ONLY what has actually been run against a real
+# container. javascript (and java/cpp/go/ruby/r) are free from
+# llm-sandbox, and podman is Phase 2 — but an entry here is a promise
+# the tool can deliver that environment, so nothing is added until a
+# real verified run passes. See REQUIREMENTS.md Phase 1.
 _LANGUAGES = {
     "python": SupportedLanguage.PYTHON,
-    "javascript": SupportedLanguage.JAVASCRIPT,
 }
 
-# v1: docker (Phase 1) + podman (Phase 2). Both assumed rootless.
 _BACKENDS = {
     "docker": SandboxBackend.DOCKER,
-    "podman": SandboxBackend.PODMAN,
 }
 
 _BACKEND_EXCEPTIONS = (
@@ -120,6 +127,17 @@ class LLMSandboxRuntime:
             )
         try:
             out = session.run(code, libraries=libraries, timeout=timeout)
+        except SandboxTimeoutError as exc:
+            # Caught before _BACKEND_EXCEPTIONS, which would otherwise
+            # swallow it (it subclasses SandboxError). A timeout is a
+            # distinct outcome: the code hung rather than failed, and
+            # the agent's next move differs accordingly.
+            return ExecResult(
+                stdout="",
+                stderr=f"{type(exc).__name__}: {exc}",
+                exit_code=-1,
+                timed_out=True,
+            )
         except _BACKEND_EXCEPTIONS as exc:
             # A backend error running code is a structured failure the
             # agent should reason about, not a crash — return it as one.

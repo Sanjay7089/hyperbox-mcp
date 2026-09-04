@@ -41,9 +41,15 @@ def create_sandbox(language: str = "python", backend: str = "docker") -> dict:
     Call this once, then call `run` against the returned sandbox_id as
     many times as you need, then `destroy_sandbox` when finished.
 
-    language: "python" or "javascript" (v1). backend: "docker" or
-    "podman", both rootless. Invalid values fail here, before anything
-    is allocated.
+    language: "python". backend: "docker". Those are the combinations
+    verified against a real container; others are added only once they
+    pass the same bar. Invalid values fail here, before anything is
+    allocated.
+
+    The sandbox persists: its filesystem and any packages installed via
+    `run(libraries=...)` survive between calls. Interpreter memory is
+    NOT guaranteed to — write state to a file rather than expecting
+    variables to carry over.
     """
     try:
         handle = _runtime.create(language=language, backend=backend)
@@ -51,6 +57,8 @@ def create_sandbox(language: str = "python", backend: str = "docker") -> dict:
         return {"error": str(exc)}
     except SandboxRuntimeError as exc:
         return {"error": f"Failed to create sandbox: {exc}"}
+    except Exception as exc:  # noqa: BLE001 — see run() for the rationale
+        return {"error": f"Failed to create sandbox: {type(exc).__name__}: {exc}"}
     _handles[handle.sandbox_id] = handle
     return {
         "sandbox_id": handle.sandbox_id,
@@ -70,8 +78,10 @@ def run(
     stdout, stderr, exit_code, success — never a bare 'it failed' string,
     so the agent can reason about exactly what happened and fix it.
 
-    Safe to call repeatedly on the same sandbox_id; state persists
-    between calls until the sandbox is destroyed.
+    Safe to call repeatedly on the same sandbox_id. The sandbox's
+    filesystem and installed packages persist between calls; in-memory
+    variables are NOT guaranteed to survive, so persist anything you
+    need to a file.
     """
     handle = _handles.get(sandbox_id)
     if handle is None:
@@ -82,6 +92,11 @@ def run(
         )
     except SandboxRuntimeError as exc:
         return {"error": str(exc)}
+    except Exception as exc:  # noqa: BLE001
+        # REQUIREMENTS.md: results are ALWAYS structured. An unexpected
+        # backend exception must reach the agent as something it can
+        # reason about, not as a crashed tool call.
+        return {"error": f"{type(exc).__name__}: {exc}"}
     return {
         "stdout": result.stdout,
         "stderr": result.stderr,
@@ -96,12 +111,17 @@ def destroy_sandbox(sandbox_id: str) -> dict:
     gone is a success, not an error."""
     handle = _handles.pop(sandbox_id, None)
     if handle is None:
-        return {"sandbox_id": sandbox_id, "destroyed": False, "note": "already gone"}
+        # Idempotent, so this is a success. It reports an affirmative
+        # status rather than a boolean: `destroyed: false` on a call
+        # that worked invites an agent to retry or error-handle it.
+        return {"sandbox_id": sandbox_id, "status": "already_gone"}
     try:
         _runtime.destroy(handle)
     except SandboxRuntimeError as exc:
         return {"error": str(exc)}
-    return {"sandbox_id": sandbox_id, "destroyed": True}
+    except Exception as exc:  # noqa: BLE001 — see run() for the rationale
+        return {"error": f"{type(exc).__name__}: {exc}"}
+    return {"sandbox_id": sandbox_id, "status": "destroyed"}
 
 
 # --- Phase 3 seam (mcp-composer's scope) ------------------------------
