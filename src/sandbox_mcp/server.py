@@ -36,6 +36,24 @@ _runtime: Runtime = LLMSandboxRuntime()
 # it did not create. See REQUIREMENTS.md Phase 5.
 _registry = Registry()
 
+# Server policy. An agent cannot raise these; see REQUIREMENTS.md Phase 6.
+MAX_TIMEOUT_SECONDS = 60.0
+MAX_OUTPUT_CHARS = 20_000
+
+
+def _cap_output(text: str) -> str:
+    """Bound a single stream so one run cannot fill the caller's context.
+    Truncation is always marked — silently shortened output would make an
+    agent reason about evidence it cannot see."""
+    if len(text) <= MAX_OUTPUT_CHARS:
+        return text
+    dropped = len(text) - MAX_OUTPUT_CHARS
+    return (
+        text[:MAX_OUTPUT_CHARS]
+        + f"\n...[truncated {dropped} chars of {len(text)}; "
+        "server cap is {MAX_OUTPUT_CHARS}]".format(MAX_OUTPUT_CHARS=MAX_OUTPUT_CHARS)
+    )
+
 
 def _handle_for(sandbox_id: str) -> SandboxHandle | None:
     """Rebuild a handle from durable state. The container_ref stored in
@@ -123,7 +141,21 @@ def run(
     filesystem and installed packages persist between calls; in-memory
     variables are NOT guaranteed to survive, so persist anything you
     need to a file.
+
+    The sandbox has NO network access while your code runs. Passing
+    `libraries` installs them in a brief, separate network-enabled step
+    before your code executes sealed. `timeout` is capped by the server
+    and may not be null.
     """
+    if timeout is None:
+        return {
+            "error": (
+                "timeout=None is not permitted; execution time is server "
+                f"policy. Pass a number up to {MAX_TIMEOUT_SECONDS:g} seconds."
+            )
+        }
+    timeout = min(float(timeout), MAX_TIMEOUT_SECONDS)
+
     handle = _handle_for(sandbox_id)
     if handle is None:
         return {"error": f"No sandbox '{sandbox_id}'. Create one first."}
@@ -143,8 +175,8 @@ def run(
         # reason about, not as a crashed tool call.
         return {"error": f"{type(exc).__name__}: {exc}"}
     return {
-        "stdout": result.stdout,
-        "stderr": result.stderr,
+        "stdout": _cap_output(result.stdout),
+        "stderr": _cap_output(result.stderr),
         "exit_code": result.exit_code,
         "success": result.success,
     }

@@ -72,6 +72,20 @@ _BACKENDS = {
 LABEL_MANAGED = "sandbox-mcp.managed"
 LABEL_ID = "sandbox-mcp.id"
 
+# Server policy, not an agent's choice. See REQUIREMENTS.md Phase 6.
+MEM_LIMIT = "1g"
+NANO_CPUS = 1_000_000_000  # 1 CPU
+PIDS_LIMIT = 128
+
+# A no-op per language, used to run a dependency install without also
+# running the caller's code while the network is briefly attached.
+_NOOP = {
+    "python": "pass",
+    "javascript": "0;",
+    "ruby": "nil",
+    "go": "package main\nfunc main() {}",
+}
+
 _BACKEND_EXCEPTIONS = (
     SandboxError,
     ContainerError,
@@ -135,6 +149,44 @@ class LLMSandboxRuntime:
                 f"{', '.join(_BACKENDS)}"
             )
 
+    # --- network sealing ----------------------------------------------
+    #
+    # `network_disabled=True` is NOT usable here: it creates the container
+    # with no network sandbox at all, and Docker then refuses to attach one
+    # later (404 "network sandbox not found"). `network_mode="none"` fails
+    # the same way with a 400 on connect. Both were tried against a real
+    # container. What works is to let the container start on its normal
+    # network and immediately detach it, so a network can be re-attached
+    # for a build phase and detached again.
+    #
+    # This leaves a brief window between container start and _seal() in
+    # which the container has a network. No caller-supplied code runs in
+    # that window — only llm-sandbox's own environment setup — so nothing
+    # an agent submits is ever executed unsealed.
+
+    def _networks(self, handle: SandboxHandle):
+        client = _engine_client(handle.backend)
+        container = client.containers.get(handle.meta["container_ref"])
+        container.reload()
+        return client, container
+
+    def _seal(self, handle: SandboxHandle) -> None:
+        """Detach every network. Fails closed: if we cannot seal, the
+        caller must not be handed a sandbox we claim is sealed."""
+        try:
+            client, container = self._networks(handle)
+            for name in list(container.attrs["NetworkSettings"]["Networks"]):
+                client.networks.get(name).disconnect(container)
+        except Exception as exc:  # noqa: BLE001
+            raise SandboxRuntimeError(
+                f"Could not seal network for '{handle.sandbox_id}': "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+
+    def _unseal(self, handle: SandboxHandle) -> None:
+        client, container = self._networks(handle)
+        client.networks.get("bridge").connect(container)
+
     def _session_for(self, handle: SandboxHandle):
         """Return a live session for `handle`, reattaching to its
         container if this process has never seen it."""
@@ -176,7 +228,10 @@ class LLMSandboxRuntime:
                 backend=_BACKENDS[backend],
                 lang=_LANGUAGES[language],
                 runtime_configs={
-                    "labels": {LABEL_MANAGED: "true", LABEL_ID: sandbox_id}
+                    "labels": {LABEL_MANAGED: "true", LABEL_ID: sandbox_id},
+                    "mem_limit": MEM_LIMIT,
+                    "nano_cpus": NANO_CPUS,
+                    "pids_limit": PIDS_LIMIT,
                 },
             )
             session.open()
@@ -198,12 +253,20 @@ class LLMSandboxRuntime:
             )
 
         self._sessions[sandbox_id] = session
-        return SandboxHandle(
+        handle = SandboxHandle(
             sandbox_id=sandbox_id,
             language=language,
             backend=backend,
             meta={"container_ref": container_ref},
         )
+        # Sealed by default. If this fails the sandbox is destroyed rather
+        # than returned with network access nobody asked for.
+        try:
+            self._seal(handle)
+        except SandboxRuntimeError:
+            self.destroy(handle)
+            raise
+        return handle
 
     def run(
         self,
@@ -213,8 +276,37 @@ class LLMSandboxRuntime:
         timeout: float | None = None,
     ) -> ExecResult:
         session = self._session_for(handle)
+
+        # Build phase: the ONLY time a network exists. Dependencies are
+        # installed with the network attached and the caller's code is not
+        # run yet; the network is detached before the code executes, so
+        # submitted code never runs with network access.
+        if libraries:
+            try:
+                self._unseal(handle)
+                install = session.run(
+                    _NOOP.get(handle.language, "pass"),
+                    libraries=libraries,
+                    timeout=timeout,
+                )
+            except _BACKEND_EXCEPTIONS as exc:
+                self._seal(handle)
+                return ExecResult(
+                    stdout="",
+                    stderr=f"Dependency install failed: {type(exc).__name__}: {exc}",
+                    exit_code=-1,
+                )
+            finally:
+                self._seal(handle)
+            if install.exit_code != 0:
+                return ExecResult(
+                    stdout=install.stdout,
+                    stderr=f"Dependency install failed:\n{install.stderr}",
+                    exit_code=install.exit_code,
+                )
+
         try:
-            out = session.run(code, libraries=libraries, timeout=timeout)
+            out = session.run(code, timeout=timeout)
         except SandboxTimeoutError as exc:
             # Caught before _BACKEND_EXCEPTIONS, which would otherwise
             # swallow it (it subclasses SandboxError). A timeout is a
@@ -234,10 +326,34 @@ class LLMSandboxRuntime:
                 stderr=f"{type(exc).__name__}: {exc}",
                 exit_code=-1,
             )
+        stderr = out.stderr
+        if out.exit_code == 137 and not stderr.strip():
+            # A cgroup OOM kill arrives as a bare SIGKILL with no output at
+            # all, which tells a reasoning agent nothing about why its code
+            # died. Ask the engine what happened and say so.
+            stderr = self._explain_sigkill(handle)
         return ExecResult(
             stdout=out.stdout,
-            stderr=out.stderr,
+            stderr=stderr,
             exit_code=out.exit_code,
+        )
+
+    def _explain_sigkill(self, handle: SandboxHandle) -> str:
+        """Turn a bare 137 into something actionable."""
+        try:
+            _, container = self._networks(handle)
+            if container.attrs.get("State", {}).get("OOMKilled"):
+                return (
+                    f"Killed (SIGKILL): the sandbox exceeded its memory limit "
+                    f"of {MEM_LIMIT}. Reduce the working set, or process the "
+                    "data in chunks."
+                )
+        except Exception:  # noqa: BLE001 - explanation is best-effort
+            pass
+        return (
+            "Killed (SIGKILL): the process was terminated by the sandbox, "
+            f"most likely for exceeding the memory limit of {MEM_LIMIT} "
+            f"or the process limit of {PIDS_LIMIT}."
         )
 
     def alive(self, handle: SandboxHandle) -> bool:
