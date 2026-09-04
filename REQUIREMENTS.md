@@ -38,6 +38,11 @@ decisions behind these choices.
   4. A snippet that exceeds `timeout` → `success: false` with the
      timeout legible in `stderr`. A timeout is a structured result like
      any other failure; it must never escape as an unhandled exception.
+  5. `timeout=None` is REJECTED, and any requested timeout above the
+     server cap is clamped to it. Execution time is server policy, not
+     an agent's choice.
+  6. `stdout`/`stderr` are capped and explicitly marked when truncated,
+     so a single run cannot fill the caller's context window.
 
 ### `destroy_sandbox(sandbox_id) -> dict`
 - Tears the sandbox down. Idempotent — destroying an already-gone
@@ -46,8 +51,12 @@ decisions behind these choices.
   `"already_gone"`. Both are successes, so neither carries a boolean
   that reads as failure — an agent skimming for `false` must not
   conclude a working call failed.
-- **Acceptance:** after destroy, the id is gone; a second destroy does
-  not raise and reports `already_gone`.
+- `already_gone` must reflect the REAL container state, not merely an
+  absent in-process handle. A container that is still running must
+  never be reported as gone.
+- **Acceptance:** after destroy, the id is gone AND the container is
+  actually stopped; a second destroy does not raise and reports
+  `already_gone`.
 
 ## Non-functional requirements
 
@@ -117,6 +126,45 @@ starts.
 ### Phase 4 — **parallel-safe** — owner: `context-scaffolder`
 A skill (not a tool) that scaffolds a starter `AGENTS.md` for a repo
 without one. Small — not its own milestone.
+
+### Phase 5 — sequential — owner: `sandbox-engineer`
+**Persistent sandbox registry.** Sandbox ownership currently lives only
+in one Python process (`_handles` in server.py, `_sessions` in
+llm_sandbox_runtime.py), so a restart, a duplicate client launch, or a
+second MCP process loses the handle while leaving the container running.
+Diagnostics confirmed all three: a stale id after restart, a 5/10 failure
+rate alternating between two live server processes, and orphaned
+containers reported as `already_gone` while still up.
+
+- Registry in SQLite holding `sandbox_id`, container id, language,
+  backend, created-at, last-used-at, expiry.
+- Every managed container labelled `sandbox-mcp.managed=true` and
+  `sandbox-mcp.id=<id>`.
+- A new process reopens a sandbox from its stored container id rather
+  than an in-memory object. llm-sandbox supports this via
+  `container_id=` / `_connect_to_existing_container`.
+- Per-sandbox lock so concurrent calls cannot corrupt one session.
+- Startup and periodic GC destroying expired or lost containers —
+  matching OUR labels only, never a container we did not create.
+- **Acceptance:** create → kill the server → run and destroy through a
+  NEW process; two concurrent processes share one sandbox safely;
+  `destroy_sandbox` reports `already_gone` only when the container is
+  genuinely gone.
+
+### Phase 6 — sequential (depends on Phase 5) — owner: `sandbox-engineer`
+**Resource policy enforced in the runtime, never in prompts.** Diagnostics
+measured a container OOM-killed at ~1.6 GB reporting only a bare
+`exit_code 137` with empty stderr, and `timeout=None` running unbounded
+for 123 s.
+
+- Per-sandbox `mem_limit`, CPU cap, and PID cap.
+- Network disabled by default (`sealed`); a scoped `build` phase enables
+  network only to install declared `libraries`, then returns to sealed.
+- TTL on inactivity; capped stdout/stderr with truncation marked.
+- No host filesystem or container-engine socket may be mounted.
+- **Acceptance:** a memory bomb is killed at the configured ceiling with
+  a legible reason (not a bare 137); a CPU/PID bomb is contained; network
+  is unreachable under `sealed`; oversized output is truncated and marked.
 
 ### Cross-cutting — owner: `scope-guard`
 Invoked before any agent builds something not already described here.
