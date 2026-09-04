@@ -22,6 +22,23 @@ code runs and what a result means.
 That's v1. Chaos testing, cloud emulation, and browser testing are
 deliberately deferred — see `DESIGN.md`.
 
+## Mounted capabilities
+
+Two external MCP servers are mounted as live proxies, so their tools
+appear alongside the lifecycle tools on one connection:
+
+- `index_*` — codebase search, from `semantic-search-mcp` (local; no
+  external service needed). Override with `HYPERBOX_MCP_INDEX_CMD`.
+- `docs_*` — up-to-date library docs, from Context7. Override with
+  `HYPERBOX_MCP_DOCS_URL`.
+
+Set either to `off` to skip that mount. We don't build an indexer or a
+docs service — we mount ones that already exist.
+
+```bash
+uv run python tests/verify_mounts.py   # real round-trip through each prefix
+```
+
 ## Quickstart
 
 ```bash

@@ -14,3 +14,6 @@ build/
 # reviewer must be able to see the requirement change behind a code
 # change. Only per-user local settings stay out.
 .claude/settings.local.json
+
+# Local index cache written by the mounted semantic-search server
+.semantic-search/
