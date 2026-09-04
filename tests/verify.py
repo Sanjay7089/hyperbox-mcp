@@ -213,12 +213,12 @@ def main() -> int:
     # 7. The destroy TOOL reports an affirmative status on both paths.
     #    Nothing else here exercises the MCP tool layer, and a success
     #    that reports a false boolean invites an agent to retry it.
-    made = server.create_sandbox.fn(language=language, backend=backend)
+    made = server.create_sandbox(language=language, backend=backend)
     if "error" in made:
         check("tool-level destroy reports a status", False, str(made))
     else:
-        first = server.destroy_sandbox.fn(made["sandbox_id"])
-        second = server.destroy_sandbox.fn(made["sandbox_id"])
+        first = server.destroy_sandbox(made["sandbox_id"])
+        second = server.destroy_sandbox(made["sandbox_id"])
         check(
             "destroy tool: 'destroyed' then 'already_gone', no false boolean",
             first.get("status") == "destroyed"

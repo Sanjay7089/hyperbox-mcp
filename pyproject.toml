@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 dependencies = [
-    "fastmcp==2.14.7",
+    "fastmcp>=4.0.2,<5",
     "llm-sandbox[docker,podman]>=0.3",
 ]
 
