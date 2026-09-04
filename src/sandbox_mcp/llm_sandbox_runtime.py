@@ -72,6 +72,10 @@ _BACKENDS = {
 LABEL_MANAGED = "sandbox-mcp.managed"
 LABEL_ID = "sandbox-mcp.id"
 
+# The default network each backend attaches containers to. Docker names
+# it "bridge", Podman names it "podman" — verified against both engines.
+_DEFAULT_NETWORK = {"docker": "bridge", "podman": "podman"}
+
 # Server policy, not an agent's choice. See REQUIREMENTS.md Phase 6.
 MEM_LIMIT = "1g"
 NANO_CPUS = 1_000_000_000  # 1 CPU
@@ -170,12 +174,23 @@ class LLMSandboxRuntime:
         container.reload()
         return client, container
 
+    @staticmethod
+    def _attached_networks(container) -> list[str]:
+        """Names of networks attached right now.
+
+        Docker and Podman both expose NetworkSettings.Networks, but the key
+        vanishes entirely once the last network is detached, so this must
+        tolerate its absence rather than KeyError.
+        """
+        settings = container.attrs.get("NetworkSettings") or {}
+        return list((settings.get("Networks") or {}).keys())
+
     def _seal(self, handle: SandboxHandle) -> None:
         """Detach every network. Fails closed: if we cannot seal, the
         caller must not be handed a sandbox we claim is sealed."""
         try:
             client, container = self._networks(handle)
-            for name in list(container.attrs["NetworkSettings"]["Networks"]):
+            for name in self._attached_networks(container):
                 client.networks.get(name).disconnect(container)
         except Exception as exc:  # noqa: BLE001
             raise SandboxRuntimeError(
@@ -184,8 +199,26 @@ class LLMSandboxRuntime:
             ) from exc
 
     def _unseal(self, handle: SandboxHandle) -> None:
+        """Attach the backend's default network for a build phase.
+
+        Docker calls it "bridge"; Podman calls it "podman". Hardcoding
+        either one breaks the other backend, so the name is chosen per
+        backend and verified against the engine before use.
+        """
         client, container = self._networks(handle)
-        client.networks.get("bridge").connect(container)
+        preferred = _DEFAULT_NETWORK.get(handle.backend, "bridge")
+        try:
+            network = client.networks.get(preferred)
+        except Exception:  # noqa: BLE001 - fall back to whatever exists
+            available = [getattr(n, "name", "") for n in client.networks.list()]
+            usable = [n for n in available if n and n != "none"]
+            if not usable:
+                raise SandboxRuntimeError(
+                    f"No usable network on backend '{handle.backend}' for a "
+                    "dependency install."
+                ) from None
+            network = client.networks.get(usable[0])
+        network.connect(container)
 
     def _session_for(self, handle: SandboxHandle):
         """Return a live session for `handle`, reattaching to its
