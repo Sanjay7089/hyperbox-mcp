@@ -1,5 +1,5 @@
 [project]
-name = "sandbox-mcp"
+name = "hyperbox-mcp"
 version = "0.1.0"
 description = "MCP server that lets any agent run code in a disposable Docker/Podman container before it touches your real project."
 readme = "README.md"
@@ -14,7 +14,7 @@ dependencies = [
 dev = ["pytest>=8.0"]
 
 [project.scripts]
-sandbox-mcp = "sandbox_mcp.server:main"
+hyperbox = "hyperbox_mcp.server:main"
 
 [build-system]
 requires = ["setuptools>=68"]

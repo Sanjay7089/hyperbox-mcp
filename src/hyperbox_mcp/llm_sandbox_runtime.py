@@ -48,7 +48,7 @@ from llm_sandbox import (
 )
 from llm_sandbox.exceptions import SandboxTimeoutError
 
-from sandbox_mcp.runtime import ExecResult, SandboxHandle
+from hyperbox_mcp.runtime import ExecResult, SandboxHandle
 
 # These maps hold ONLY what has actually been run against a real
 # container. java/cpp/r are free from llm-sandbox and have snippet sets
@@ -69,8 +69,8 @@ _BACKENDS = {
 
 # Every container we create carries both labels. GC matches on them and
 # ONLY on them — a container without our label is never ours to remove.
-LABEL_MANAGED = "sandbox-mcp.managed"
-LABEL_ID = "sandbox-mcp.id"
+LABEL_MANAGED = "hyperbox-mcp.managed"
+LABEL_ID = "hyperbox-mcp.id"
 
 # The default network each backend attaches containers to. Docker names
 # it "bridge", Podman names it "podman" — verified against both engines.

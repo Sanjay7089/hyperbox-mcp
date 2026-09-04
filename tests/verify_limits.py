@@ -26,8 +26,8 @@ sys.path.insert(0, "src")
 from fastmcp import Client  # noqa: E402
 from fastmcp.client.transports import StdioTransport  # noqa: E402
 
-from sandbox_mcp.llm_sandbox_runtime import MEM_LIMIT, NANO_CPUS, PIDS_LIMIT  # noqa: E402
-from sandbox_mcp.registry import Registry  # noqa: E402
+from hyperbox_mcp.llm_sandbox_runtime import MEM_LIMIT, NANO_CPUS, PIDS_LIMIT  # noqa: E402
+from hyperbox_mcp.registry import Registry  # noqa: E402
 
 results: list[tuple[str, bool, str]] = []
 
@@ -45,13 +45,13 @@ def data(r) -> dict:
 def transport() -> StdioTransport:
     return StdioTransport(
         command=sys.executable,
-        args=["-m", "sandbox_mcp.server"],
+        args=["-m", "hyperbox_mcp.server"],
         env={
             "PATH": os.environ.get("PATH", ""),
             "HOME": os.path.expanduser("~"),
             "PYTHONPATH": os.path.abspath("src"),
-            "SANDBOX_MCP_INDEX_CMD": "off",
-            "SANDBOX_MCP_DOCS_URL": "off",
+            "HYPERBOX_MCP_INDEX_CMD": "off",
+            "HYPERBOX_MCP_DOCS_URL": "off",
         },
     )
 

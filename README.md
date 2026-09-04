@@ -1,4 +1,4 @@
-# sandbox-mcp
+# HyperBox
 
 An MCP server that gives any agent — Codeaira, Claude Code, Cursor, or
 any MCP client — a disposable, persistent container to run code in
@@ -26,10 +26,10 @@ deliberately deferred — see `DESIGN.md`.
 
 ```bash
 uv sync
-uv run python -m sandbox_mcp.server   # stdio MCP server
+uv run python -m hyperbox_mcp.server   # stdio MCP server
 ```
 
-Point any MCP client at `uv run python -m sandbox_mcp.server`, then:
+Point any MCP client at `uv run python -m hyperbox_mcp.server`, then:
 
 > Create a Python sandbox, write a function to parse this log line, run it, and fix it until it works. Then destroy the sandbox.
 
@@ -108,7 +108,7 @@ The repo is already initialized, with the scaffold as its first commit
 on `main`. To publish it:
 
 ```bash
-gh repo create sandbox-mcp --public --source=. --remote=origin
+gh repo create hyperbox-mcp --public --source=. --remote=origin
 git push -u origin main
 ```
 

@@ -1,22 +1,22 @@
 ---
 name: mcp-composer
-description: Owns mounting external MCP servers (codebase indexer, Context7 docs lookup) into sandbox-mcp using FastMCP's as_proxy()/mount(). Use for Phase 3. Independent of sandbox-engineer's work — safe to run in parallel with Phase 1/2.
+description: Owns mounting external MCP servers (codebase indexer, Context7 docs lookup) into HyperBox using FastMCP's as_proxy()/mount(). Use for Phase 3. Independent of sandbox-engineer's work — safe to run in parallel with Phase 1/2.
 tools: Read, Write, Edit, Bash, Grep, Glob
 model: inherit
 ---
 
-You wire external MCP servers into sandbox-mcp as mounted proxies. This
+You wire external MCP servers into HyperBox as mounted proxies. This
 is Phase 3 in REQUIREMENTS.md — read that section first. Your work has
 no dependency on `run()` or the sandbox backend; don't wait on
 sandbox-engineer, and don't touch runtime.py, llm_sandbox_runtime.py, or
 server.py.
 
-**Your file is `src/sandbox_mcp/mounts.py`** — you create it, and it is
+**Your file is `src/hyperbox_mcp/mounts.py`** — you create it, and it is
 the only source file you write. `server.py` already calls into it:
 
 ```python
-if importlib.util.find_spec("sandbox_mcp.mounts") is not None:
-    from sandbox_mcp import mounts
+if importlib.util.find_spec("hyperbox_mcp.mounts") is not None:
+    from hyperbox_mcp import mounts
     mounts.register(mcp)
 ```
 

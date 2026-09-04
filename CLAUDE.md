@@ -1,4 +1,4 @@
-# sandbox-mcp
+# HyperBox
 
 An MCP server that gives any agent — Codeaira, Claude Code, Cursor, or
 any MCP client — a disposable, persistent container to run code in
@@ -21,8 +21,8 @@ both first — most "should we also add X" questions are already answered.
 ## The one architectural rule that must not break
 
 The three lifecycle tools talk ONLY to the `Runtime` protocol
-(`src/sandbox_mcp/runtime.py`). `llm_sandbox` may be imported ONLY in
-`src/sandbox_mcp/llm_sandbox_runtime.py`. A `from llm_sandbox import`
+(`src/hyperbox_mcp/runtime.py`). `llm_sandbox` may be imported ONLY in
+`src/hyperbox_mcp/llm_sandbox_runtime.py`. A `from llm_sandbox import`
 anywhere else defeats the replaceable-backend design and is a bug. If
 you're about to add one, stop and reconsider.
 
@@ -45,7 +45,7 @@ Phase 1 passes.
 
 ## Stack
 
-- Python 3.11+, package under `src/sandbox_mcp/`
+- Python 3.11+, package under `src/hyperbox_mcp/`
 - `fastmcp==2.14.7` pinned — see DESIGN.md's decision log for why not 4.x
 - `llm-sandbox[docker,podman]` — behind the Runtime interface
 
@@ -53,8 +53,8 @@ Phase 1 passes.
 
 - Install: `uv sync` (creates `.venv/`, installs the project editable,
   writes `uv.lock` — commit the lockfile, never the venv)
-- Run the server: `uv run python -m sandbox_mcp.server`
-- Verify: the `verify-sandbox-mcp` skill, or
+- Run the server: `uv run python -m hyperbox_mcp.server`
+- Verify: the `verify-hyperbox` skill, or
   `uv run python tests/verify.py`
   (`uv run python tests/verify.py podman` for the Podman path — on
   macOS export `CONTAINER_HOST` from `podman machine inspect` first,

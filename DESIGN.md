@@ -1,4 +1,4 @@
-# sandbox-mcp — Design Doc
+# HyperBox — Design Doc
 
 Living document. Any scope or architecture change gets a line in the
 Decision Log before it gets code.
@@ -105,7 +105,7 @@ don't drift onto 4.x by accident.
 LLM / agent (Codeaira, Claude Code, Cursor, any MCP client)
         │ MCP
         ▼
-sandbox-mcp (FastMCP, Python)
+HyperBox (FastMCP, Python)
    ├── create_sandbox / run / destroy_sandbox
    │        │ (talks only to the Runtime protocol)
    │        ▼

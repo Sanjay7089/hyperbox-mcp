@@ -1,7 +1,7 @@
-"""sandbox-mcp: give any MCP client a disposable, persistent computer to
+"""hyperbox-mcp: give any MCP client a disposable, persistent computer to
 run code in — create it once, run in it repeatedly, destroy it when done.
 
-Run with: uv run python -m sandbox_mcp.server
+Run with: uv run python -m hyperbox_mcp.server
 
 The three tools below talk ONLY to a Runtime (see runtime.py). They must
 never import llm-sandbox directly — that's what keeps the execution
@@ -15,16 +15,16 @@ import importlib.util
 
 from fastmcp import FastMCP
 
-from sandbox_mcp.llm_sandbox_runtime import (
+from hyperbox_mcp.llm_sandbox_runtime import (
     LLMSandboxRuntime,
     SandboxRuntimeError,
     UnsupportedBackendError,
     UnsupportedLanguageError,
 )
-from sandbox_mcp.registry import Registry
-from sandbox_mcp.runtime import Runtime, SandboxHandle
+from hyperbox_mcp.registry import Registry
+from hyperbox_mcp.runtime import Runtime, SandboxHandle
 
-mcp = FastMCP("sandbox-mcp")
+mcp = FastMCP("HyperBox")
 
 # The one place a concrete backend is chosen. Swap this line to change
 # execution engines; nothing below it knows or cares which Runtime it is.
@@ -214,7 +214,7 @@ def destroy_sandbox(sandbox_id: str) -> dict:
 
 # --- Phase 3 seam (mcp-composer's scope) ------------------------------
 # External MCP servers — a codebase indexer under prefix `index`,
-# Context7 under `docs` — are mounted by `sandbox_mcp/mounts.py`, which
+# Context7 under `docs` — are mounted by `hyperbox_mcp/mounts.py`, which
 # owns that wiring end to end (see REQUIREMENTS.md Phase 3). That module
 # does not exist until Phase 3 lands, which is why this is a find_spec
 # check and not a try/except ImportError: an absent module is expected,
@@ -228,8 +228,8 @@ def destroy_sandbox(sandbox_id: str) -> dict:
 #
 # An unmounted capability is simply absent. Never stub one with a fake
 # tool that returns placeholder data.
-if importlib.util.find_spec("sandbox_mcp.mounts") is not None:
-    from sandbox_mcp import mounts
+if importlib.util.find_spec("hyperbox_mcp.mounts") is not None:
+    from hyperbox_mcp import mounts
 
     mounts.register(mcp)
 

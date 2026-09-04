@@ -1,4 +1,4 @@
-# sandbox-mcp — Requirements & Execution Plan
+# HyperBox — Requirements & Execution Plan
 
 Source of truth for scope. Update this file before adding a tool or a
 phase, not after. See `DESIGN.md` for non-goals and the architecture
@@ -138,8 +138,8 @@ containers reported as `already_gone` while still up.
 
 - Registry in SQLite holding `sandbox_id`, container id, language,
   backend, created-at, last-used-at, expiry.
-- Every managed container labelled `sandbox-mcp.managed=true` and
-  `sandbox-mcp.id=<id>`.
+- Every managed container labelled `hyperbox-mcp.managed=true` and
+  `hyperbox-mcp.id=<id>`.
 - A new process reopens a sandbox from its stored container id rather
   than an in-memory object. llm-sandbox supports this via
   `container_id=` / `_connect_to_existing_container`.

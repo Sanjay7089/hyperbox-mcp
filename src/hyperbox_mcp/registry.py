@@ -30,7 +30,7 @@ from typing import Iterator
 
 # Inactivity TTL. A sandbox untouched for this long is reclaimable by the
 # garbage collector; see REQUIREMENTS.md Phase 5.
-DEFAULT_TTL_SECONDS = float(os.environ.get("SANDBOX_MCP_TTL_SECONDS", 30 * 60))
+DEFAULT_TTL_SECONDS = float(os.environ.get("HYPERBOX_MCP_TTL_SECONDS", 30 * 60))
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sandboxes (
@@ -62,13 +62,13 @@ class SandboxRecord:
 
 def state_dir() -> Path:
     """Where registry state lives. Never inside the repo."""
-    override = os.environ.get("SANDBOX_MCP_STATE_DIR")
+    override = os.environ.get("HYPERBOX_MCP_STATE_DIR")
     if override:
         return Path(override).expanduser()
     xdg = os.environ.get("XDG_STATE_HOME")
     if xdg:
-        return Path(xdg) / "sandbox-mcp"
-    return Path.home() / ".local" / "state" / "sandbox-mcp"
+        return Path(xdg) / "hyperbox-mcp"
+    return Path.home() / ".local" / "state" / "hyperbox-mcp"
 
 
 class Registry:

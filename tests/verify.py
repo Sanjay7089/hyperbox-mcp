@@ -10,7 +10,7 @@ _LANGUAGES is a promise the tool can deliver that environment, so it is
 added only after this suite passes for it. See REQUIREMENTS.md Phase 2.
 
 Prints PASS/FAIL per case and exits non-zero on any failure. This is
-what the verify-sandbox-mcp skill runs.
+what the verify-hyperbox-mcp skill runs.
 
 IMPORTANT — failure triage (see DESIGN.md): if create_sandbox itself
 errors, first decide WHICH layer failed before touching code:
@@ -30,11 +30,11 @@ import sys
 
 sys.path.insert(0, "src")
 
-from sandbox_mcp import llm_sandbox_runtime as lsr  # noqa: E402
-from sandbox_mcp import server  # noqa: E402
-from sandbox_mcp.runtime import Runtime  # noqa: E402
+from hyperbox_mcp import llm_sandbox_runtime as lsr  # noqa: E402
+from hyperbox_mcp import server  # noqa: E402
+from hyperbox_mcp.runtime import Runtime  # noqa: E402
 
-MARKER = "hello from sandbox-mcp"
+MARKER = "hello from hyperbox-mcp"
 STATE_FILE = "/tmp/persisted.txt"
 
 # One snippet set per language. `libraries`/`lib_use` are optional — the

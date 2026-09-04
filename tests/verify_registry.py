@@ -11,7 +11,7 @@ here corresponds to a failure the diagnostics actually measured:
     reported as `already_gone`
 
 Triage before editing code: is the engine running? is the registry
-directory writable (SANDBOX_MCP_STATE_DIR)? A create failure is still
+directory writable (HYPERBOX_MCP_STATE_DIR)? A create failure is still
 far more often the environment than the code.
 """
 
@@ -26,7 +26,7 @@ sys.path.insert(0, "src")
 from fastmcp import Client  # noqa: E402
 from fastmcp.client.transports import StdioTransport  # noqa: E402
 
-from sandbox_mcp.registry import Registry  # noqa: E402
+from hyperbox_mcp.registry import Registry  # noqa: E402
 
 results: list[tuple[str, bool, str]] = []
 
@@ -45,13 +45,13 @@ def transport() -> StdioTransport:
     """A fresh server PROCESS each time this is used."""
     return StdioTransport(
         command=sys.executable,
-        args=["-m", "sandbox_mcp.server"],
+        args=["-m", "hyperbox_mcp.server"],
         env={
             "PATH": os.environ.get("PATH", ""),
             "HOME": os.path.expanduser("~"),
             "PYTHONPATH": os.path.abspath("src"),
-            "SANDBOX_MCP_INDEX_CMD": "off",  # keep this test about the registry
-            "SANDBOX_MCP_DOCS_URL": "off",
+            "HYPERBOX_MCP_INDEX_CMD": "off",  # keep this test about the registry
+            "HYPERBOX_MCP_DOCS_URL": "off",
         },
     )
 
@@ -125,7 +125,7 @@ async def main() -> int:
     reg.remove(oid)
     check("orphan container exists before GC", container_exists(oref), oref[:12])
 
-    import sandbox_mcp.server as srv
+    import hyperbox_mcp.server as srv
 
     reclaimed = srv.collect_garbage()
     check("GC reclaimed the orphan", oid in reclaimed, f"reclaimed={reclaimed}")
@@ -137,9 +137,9 @@ async def main() -> int:
 
     unlabelled = [
         c.name for c in docker.from_env().containers.list()
-        if "sandbox-mcp.managed" not in (c.labels or {})
+        if "hyperbox-mcp.managed" not in (c.labels or {})
     ]
-    check("GC left every non-sandbox-mcp container alone",
+    check("GC left every non-hyperbox-mcp container alone",
           True, f"untouched: {unlabelled}")
 
     failed = [r for r in results if not r[1]]
