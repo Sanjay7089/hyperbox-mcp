@@ -31,9 +31,11 @@ from __future__ import annotations
 
 import os
 import shlex
+from pathlib import Path
 
 from fastmcp import FastMCP
 from fastmcp.client.transports import StdioTransport, StreamableHttpTransport
+from fastmcp.tools.tool_transform import ToolTransformConfig
 
 _OFF = {"off", "none", "disabled", ""}
 
@@ -57,6 +59,10 @@ def register(mcp: FastMCP) -> list[str]:
             StdioTransport(command=parts[0], args=parts[1:]),
             name="index",
         )
+        # Must be applied to the PROXY using the tool's UNPREFIXED name.
+        # Registering on the parent with the prefixed name is silently
+        # ignored — verified against fastmcp 2.14.7.
+        _describe_index(index_proxy, workspace_root())
         mcp.mount(index_proxy, prefix="index")
         mounted.append("index")
 
@@ -69,3 +75,55 @@ def register(mcp: FastMCP) -> list[str]:
         mounted.append("docs")
 
     return mounted
+
+
+def workspace_root() -> Path:
+    """The directory the indexer actually indexes.
+
+    The backing indexer indexes its own process cwd, which it inherits
+    from this server. Resolving it here (rather than assuming) means the
+    value we advertise is the value that is真 indexed.
+    """
+    return Path(os.getcwd()).resolve()
+
+
+def _describe_index(proxy: FastMCP, root: Path) -> None:
+    """Name the indexed directory in the tools' own descriptions.
+
+    Measured, not guessed: with the stock description — "Search the
+    codebase by semantic meaning" — a client asked about "the
+    votify-party codebase" declined to search at all and asked the user
+    to upload the repo, because nothing connected that project name to
+    this tool. Naming the root is what makes the tool selectable, since
+    an MCP client routes purely on names and descriptions; there is no
+    dispatcher to fix this anywhere else.
+
+    Applied to the proxy under the tool's own (unprefixed) name: the
+    parent server ignores transformations keyed by the mounted prefix.
+    """
+    proxy.add_tool_transformation(
+        "semantic_search",
+        ToolTransformConfig(
+            description=(
+                f"Search the codebase at {root} by semantic meaning, over a "
+                f"pre-built index of its source files. Use this to LOCATE "
+                f"code when you do not already know the file path — e.g. "
+                f"'where is authentication handled'. If you already know the "
+                f"path, read the file directly instead; this tool searches, "
+                f"it does not read. Covers only {root.name}/ and nothing "
+                f"outside it."
+            )
+        ),
+    )
+    proxy.add_tool_transformation(
+        "get_status",
+        ToolTransformConfig(
+            description=(
+                f"Report readiness of the code index for {root}. Note: when "
+                f"the index is served from cache, the upstream server "
+                f"reports its chunk count in the 'files' field, so 'files' "
+                f"and 'chunks' being equal means the real file count is "
+                f"unknown, not that they match."
+            )
+        ),
+    )
