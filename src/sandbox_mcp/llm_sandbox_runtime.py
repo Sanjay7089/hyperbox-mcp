@@ -49,6 +49,12 @@ from sandbox_mcp.runtime import ExecResult, SandboxHandle
 _LANGUAGES = {
     "python": SupportedLanguage.PYTHON,
     "javascript": SupportedLanguage.JAVASCRIPT,
+    "ruby": SupportedLanguage.RUBY,
+    "go": SupportedLanguage.GO,
+    # java, cpp and r are available from llm-sandbox and have snippet
+    # sets ready in tests/verify.py, but have NOT been run against a
+    # container yet. They go in only after `verify.py docker <lang>`
+    # passes — an entry here is a promise the tool can deliver.
 }
 
 _BACKENDS = {
