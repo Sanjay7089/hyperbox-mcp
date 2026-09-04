@@ -10,7 +10,9 @@ what the verify-sandbox-mcp skill runs.
 IMPORTANT — failure triage (see DESIGN.md): if create_sandbox itself
 errors, first decide WHICH layer failed before touching code:
   - Is Docker/Podman actually running on this machine?
-  - Is the backend socket reachable (DOCKER_HOST)?
+  - Is the backend socket reachable (DOCKER_HOST / CONTAINER_HOST)?
+    On macOS the podman socket is inside the VM; export the host-side
+    path from `podman machine inspect` or podman-py cannot connect.
   - Is the base image pullable from here?
 A create failure is very often the environment, not runtime.py. Don't
 edit the implementation until you've ruled the environment out.

@@ -83,6 +83,15 @@ uv run python tests/verify.py           # against Docker
 uv run python tests/verify.py podman    # against rootless Podman
 ```
 
+On macOS the Podman path needs the host-side socket exported first —
+podman-py's `from_env()` reads it, and without it you get a connection
+error that looks like a code bug:
+
+```bash
+export CONTAINER_HOST="unix://$(podman machine inspect \
+  --format '{{.ConnectionInfo.PodmanSocket.Path}}')"
+```
+
 Runs the real lifecycle against a real container: create, a passing
 run, sandbox persistence, a deliberately-broken run, a timeout, and
 idempotent destroy. "Done" means this passes.

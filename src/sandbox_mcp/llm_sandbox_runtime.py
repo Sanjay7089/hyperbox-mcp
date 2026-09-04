@@ -52,6 +52,7 @@ _LANGUAGES = {
 
 _BACKENDS = {
     "docker": SandboxBackend.DOCKER,
+    "podman": SandboxBackend.PODMAN,
 }
 
 _BACKEND_EXCEPTIONS = (

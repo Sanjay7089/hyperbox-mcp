@@ -56,7 +56,10 @@ Phase 1 passes.
 - Run the server: `uv run python -m sandbox_mcp.server`
 - Verify: the `verify-sandbox-mcp` skill, or
   `uv run python tests/verify.py`
-  (`uv run python tests/verify.py podman` for the Podman path)
+  (`uv run python tests/verify.py podman` for the Podman path — on
+  macOS export `CONTAINER_HOST` from `podman machine inspect` first,
+  see README; the podman binary may also live at `/opt/podman/bin`
+  without being on PATH)
 
 Always go through `uv run` — a bare `python` picks up whatever
 interpreter is on PATH, not this project's pinned 3.11 environment.
