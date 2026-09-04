@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Iterator
 
 # Inactivity TTL. A sandbox untouched for this long is reclaimable by the
-# garbage collector; see REQUIREMENTS.md Phase 5.
+# garbage collector; see DESIGN.md.
 DEFAULT_TTL_SECONDS = float(os.environ.get("HYPERBOX_MCP_TTL_SECONDS", 30 * 60))
 
 _SCHEMA = """

@@ -1,139 +1,136 @@
 # HyperBox
 
-An MCP server that gives any agent —  Claude Code, Cursor, or
-any MCP client — a disposable, persistent container to run code in
-before it touches your real project. The agent creates a sandbox, runs
-code in it repeatedly (build → run → observe the failure → fix →
-re-run), and destroys it when done. It writes the final, working code
-to your project using its *own* editing tools — not ours.
+**Your AI agent can run terminal commands. HyperBox gives it somewhere safe to do that.**
 
-**Guiding principle:** the LLM should not be the most trusted
-component. The agent reasons and proposes; this server controls where
-code runs and what a result means.
+Claude Code, Cursor, and any agent with shell access will happily execute
+the code they just wrote — on your machine, against your files, with your
+credentials. Usually that's fine. Occasionally it's `rm -rf`, a global
+install that breaks another project, or a script that quietly talks to
+production.
 
-## The three tools
+HyperBox is an MCP server that gives the agent a disposable container to
+run code in first, and — the part that actually matters — makes the agent
+*understand* when to use it.
 
-- `create_sandbox(language, backend)` → a persistent sandbox id
-- `run(sandbox_id, code, ...)` → `{stdout, stderr, exit_code, success}`,
-  callable repeatedly; the sandbox's filesystem and installed packages
-  persist between calls (each call is a fresh process)
-- `destroy_sandbox(sandbox_id)` → tear it down (idempotent)
+## It contains hostile code. Here's the proof, not the promise.
 
-That's v1. Chaos testing, cloud emulation, and browser testing are
-deliberately deferred — see `DESIGN.md`.
+`tests/verify_containment.py` runs genuinely dangerous code in a real
+container. Actual output:
 
-## Mounted capabilities
-
-Two external MCP servers are mounted as live proxies, so their tools
-appear alongside the lifecycle tools on one connection:
-
-- `index_*` — codebase search, from `semantic-search-mcp` (local; no
-  external service needed). Override with `HYPERBOX_MCP_INDEX_CMD`.
-- `docs_*` — up-to-date library docs, from Context7. **Off by default**:
-  its tool definitions cost ~1163 tokens on every message (59% of the tool
-  budget) and went unused in evaluation. Enable with
-  `HYPERBOX_MCP_DOCS_URL=https://mcp.context7.com/mcp`, or connect Context7
-  as its own MCP server so you don't pay for it inside every request.
-
-Set either to `off` to skip that mount. We don't build an indexer or a
-docs service — we mount ones that already exist.
-
-```bash
-uv run python tests/verify_mounts.py   # real round-trip through each prefix
 ```
+sandbox: bf4ea26ec5a5
+
+PASS  host filesystem is unreachable from inside
+        stdout: 'DENIED: FileNotFoundError'
+PASS  network is unreachable from inside
+        stdout: 'DENIED: OSError'
+PASS  container engine socket is not mounted
+        stdout: 'docker.sock present: False'
+PASS  memory exhaustion is capped, with a legible reason
+        exit_code: 137 | stderr: Killed (SIGKILL): the sandbox exceeded its memory limit of 1g.
+PASS  process explosion is capped by the PID limit
+        stdout: 'DENIED after 126 processes: BlockingIOError'
+PASS  sandbox is destroyed cleanly afterwards
+
+6/6 contained
+```
+
+The fork bomb stopped at 126 processes against a ceiling of 128. Run it
+yourself — that is the point of shipping it as a test.
 
 ## Quickstart
 
 ```bash
 uv sync
-uv run python -m hyperbox_mcp.server   # stdio MCP server
+uv run python -m hyperbox_mcp.server     # stdio MCP server
 ```
 
-Point any MCP client at `uv run python -m hyperbox_mcp.server`, then:
+Then point an MCP client at it. For Claude Desktop, in
+`claude_desktop_config.json`:
 
-> Create a Python sandbox, write a function to parse this log line, run it, and fix it until it works. Then destroy the sandbox.
-
-## Architecture (why this isn't just a wrapper)
-
-The three tools talk to a `Runtime` protocol, never to the execution
-backend directly. `llm-sandbox` is one implementation of that protocol,
-living in a single file (`llm_sandbox_runtime.py`) — the only file
-allowed to import it. Swap that one file (for Firecracker, a raw
-podman-py wrapper, anything) and the MCP layer never notices. The
-contract and the abstraction are the project's IP; the current backend
-is replaceable.
-
-## How this repo is meant to be built (with Claude Code)
-
-The whole destination is documented up front; the work is divided into
-independently executable sub-agent tasks with explicit dependencies.
-Plan, owners, and dependencies live in `REQUIREMENTS.md`; each owner is
-a sub-agent in `.claude/agents/`, and each has a hard "do NOT" list to
-stop scope creep.
-
-- `sandbox-engineer` → Runtime + lifecycle tools (Phases 1-2, sequential)
-- `mcp-composer` → mount indexer + Context7 (Phase 3, parallel-safe)
-- `context-scaffolder` → AGENTS.md skill (Phase 4, parallel-safe)
-- `scope-guard` → read-only scope check before building anything new
-
-Suggested first session (orchestrating thread):
-
-> Read CLAUDE.md, REQUIREMENTS.md, and DESIGN.md. Do not write code yet — validate the plan is internally consistent and flag any contradiction. Then dispatch Phase 1 to sandbox-engineer, and Phases 3 and 4 to mcp-composer and context-scaffolder in parallel. Do not let Phase 2 start until Phase 1's acceptance criteria pass against a real container.
-
-The Phase 1 starter code is already written and verified to import,
-register exactly the three tools, satisfy the Runtime protocol, and
-fast-fail on bad input. The container path itself needs your real
-Docker/Podman — that's Phase 1's gate.
-
-## The gate that matters
-
-Before moving to the bigger roadmap, this must work reliably:
-
-```
-create_sandbox() → run(broken code) → success:false + real traceback
-  → agent fixes → run() → success:true → destroy_sandbox()
+```json
+{
+  "mcpServers": {
+    "HyperBox": {
+      "command": "/absolute/path/to/uv",
+      "args": ["run", "--project", "/absolute/path/to/hyperbox",
+               "python", "-m", "hyperbox_mcp.server"],
+      "env": { "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" }
+    }
+  }
+}
 ```
 
-If that loop works against a real container, you have the foundation.
+Requires Docker or rootless Podman running. On macOS with Podman, export
+`CONTAINER_HOST` from `podman machine inspect` first — without it
+podman-py connects but silently returns empty output.
+
+## The tools
+
+| Tool | What it does |
+|---|---|
+| `create_sandbox(language, backend)` | A persistent, disposable container. Returns a `sandbox_id`. |
+| `run(sandbox_id, code, libraries, timeout)` | Executes code. Returns `{stdout, stderr, exit_code, success}` — never a bare "it failed". |
+| `destroy_sandbox(sandbox_id)` | Tears it down. Idempotent, and verified against the engine before it claims success. |
+
+Languages: `python`, `javascript`, `ruby`, `go`. Backends: `docker`,
+`podman`. Each combination is in the map only after passing the suite
+against a real container — an entry is a promise the tool can deliver it.
+
+## What the sandbox enforces
+
+Set by the server, not negotiable by the agent:
+
+| | |
+|---|---|
+| Memory | 1 GB, OOM-killed with a legible reason rather than a bare exit 137 |
+| CPU | 1 core |
+| Processes | 128 PIDs |
+| Network | **disabled while your code runs** |
+| Timeout | capped at 60s; `timeout=None` is rejected |
+| Output | capped per stream, and marked when truncated |
+| Host FS / engine socket | never mounted |
+
+Declaring `libraries=[...]` opens the network for a separate install step,
+then re-seals before your code executes.
+
+## Why this isn't a thin wrapper
+
+**The agent has to understand it, or it won't use it.** An MCP client has
+no dispatcher — it decides from tool names, descriptions and annotations
+alone. Measured here: a working search tool described only as "search the
+codebase" was *refused* by a client that asked the user to upload files by
+hand; naming what it covered turned the same tool into a correct answer.
+So HyperBox ships tool annotations (`run` is marked not host-destructive;
+`destroy_sandbox` destructive but idempotent), a `hyperbox://capabilities`
+resource so limits are discoverable before they're hit, and a `run_safely`
+prompt that makes the safe path the easy path.
+
+**Sandboxes outlive the process that made them.** Ownership lives in a
+SQLite registry outside the repo, and containers carry
+`hyperbox-mcp.managed` labels. A restarted server — or a second one your
+client launched — reattaches by container id instead of losing the
+sandbox and leaking the container. Before this existed, alternating calls
+between two server processes failed 5 times in 10.
+
+**The backend is replaceable.** Everything above `runtime.py` talks to a
+`Runtime` protocol. `llm-sandbox` is one implementation, in the only file
+allowed to import it. The contract is the project; the backend is a
+detail.
 
 ## Verify
 
 ```bash
-uv run python tests/verify.py           # against Docker
-uv run python tests/verify.py podman    # against rootless Podman
+uv run python tests/verify.py              # 14 — lifecycle + MCP surface
+uv run python tests/verify_registry.py     # 11 — ownership across processes
+uv run python tests/verify_limits.py       # 12 — enforced resource policy
+uv run python tests/verify_containment.py  #  6 — the safety proof
+uv run python tests/verify.py podman       # 9  — second backend
 ```
 
-On macOS the Podman path needs the host-side socket exported first —
-podman-py's `from_env()` reads it, and without it you get a connection
-error that looks like a code bug:
-
-```bash
-export CONTAINER_HOST="unix://$(podman machine inspect \
-  --format '{{.ConnectionInfo.PodmanSocket.Path}}')"
-```
-
-Runs the real lifecycle against a real container: create, a passing
-run, sandbox persistence, a deliberately-broken run, a timeout, and
-idempotent destroy. "Done" means this passes.
-
-## Docs
-
-- `DESIGN.md` — principle, non-goals, and why each dependency was chosen
-- `REQUIREMENTS.md` — the tool specs and the full phased plan
-- `CLAUDE.md` — instructions Claude Code reads every session
-
-## Push to your clean repo
-
-The repo is already initialized, with the scaffold as its first commit
-on `main`. To publish it:
-
-```bash
-gh repo create hyperbox-mcp --public --source=. --remote=origin
-git push -u origin main
-```
-
-After that first push, nothing lands on `main` directly — each phase
-gets its own branch and a PR. See `CLAUDE.md`.
+43 checks, all against real containers. There are no mocked tests for the
+sandbox path on purpose: mocking Docker would prove only that the mock
+works.
 
 ## License
 

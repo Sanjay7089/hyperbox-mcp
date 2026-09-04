@@ -6,6 +6,8 @@ description: Verify the sandbox lifecycle (create/run/destroy) works against a r
 
 !`uv run python tests/verify.py`
 
+!`uv run python tests/verify_containment.py`
+
 ## Instructions
 
 The output above is the real result of driving actual containers — not

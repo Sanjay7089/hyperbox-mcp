@@ -7,7 +7,7 @@ container. Requires Docker or Podman actually installed and running.
 Language defaults to python. Every language in the runtime's map is
 expected to clear the SAME bar — that is the point: an entry in
 _LANGUAGES is a promise the tool can deliver that environment, so it is
-added only after this suite passes for it. See REQUIREMENTS.md Phase 2.
+added only after this suite passes for it. See DESIGN.md.
 
 Prints PASS/FAIL per case and exits non-zero on any failure. This is
 what the verify-hyperbox-mcp skill runs.

@@ -1,4 +1,4 @@
-"""Acceptance test for the persistent sandbox registry (Phase 5).
+"""Acceptance test for the persistent sandbox registry.
 
     python tests/verify_registry.py
 

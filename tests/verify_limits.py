@@ -1,4 +1,4 @@
-"""Acceptance test for the resource policy (Phase 6).
+"""Acceptance test for the enforced resource policy.
 
     python tests/verify_limits.py
 

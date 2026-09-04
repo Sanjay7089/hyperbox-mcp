@@ -54,7 +54,7 @@ from hyperbox_mcp.runtime import ExecResult, SandboxHandle
 # container. java/cpp/r are free from llm-sandbox and have snippet sets
 # ready in tests/verify.py, but an entry here is a promise the tool can
 # deliver that environment, so nothing is added until a real verified
-# run passes. See REQUIREMENTS.md Phase 1.
+# run passes. See DESIGN.md's tool contract.
 _LANGUAGES = {
     "python": SupportedLanguage.PYTHON,
     "javascript": SupportedLanguage.JAVASCRIPT,
@@ -76,7 +76,7 @@ LABEL_ID = "hyperbox-mcp.id"
 # it "bridge", Podman names it "podman" — verified against both engines.
 _DEFAULT_NETWORK = {"docker": "bridge", "podman": "podman"}
 
-# Server policy, not an agent's choice. See REQUIREMENTS.md Phase 6.
+# Server policy, not an agent's choice. See DESIGN.md.
 MEM_LIMIT = "1g"
 NANO_CPUS = 1_000_000_000  # 1 CPU
 PIDS_LIMIT = 128
