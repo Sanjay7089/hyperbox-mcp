@@ -1,6 +1,6 @@
 # HyperBox
 
-An MCP server that gives any agent — Codeaira, Claude Code, Cursor, or
+An MCP server that gives any agent —  Claude Code, Cursor, or
 any MCP client — a disposable, persistent container to run code in
 before it touches your real project. The agent creates a sandbox, runs
 code in it repeatedly (build → run → observe the failure → fix →
@@ -29,8 +29,11 @@ appear alongside the lifecycle tools on one connection:
 
 - `index_*` — codebase search, from `semantic-search-mcp` (local; no
   external service needed). Override with `HYPERBOX_MCP_INDEX_CMD`.
-- `docs_*` — up-to-date library docs, from Context7. Override with
-  `HYPERBOX_MCP_DOCS_URL`.
+- `docs_*` — up-to-date library docs, from Context7. **Off by default**:
+  its tool definitions cost ~1163 tokens on every message (59% of the tool
+  budget) and went unused in evaluation. Enable with
+  `HYPERBOX_MCP_DOCS_URL=https://mcp.context7.com/mcp`, or connect Context7
+  as its own MCP server so you don't pay for it inside every request.
 
 Set either to `off` to skip that mount. We don't build an indexer or a
 docs service — we mount ones that already exist.

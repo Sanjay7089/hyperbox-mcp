@@ -31,16 +31,23 @@ from __future__ import annotations
 
 import os
 import shlex
+import time
 from pathlib import Path
 
 from fastmcp import FastMCP
 from fastmcp.client.transports import StdioTransport, StreamableHttpTransport
+from fastmcp.server.middleware import Middleware
 from fastmcp.tools.tool_transform import ToolTransformConfig
 
 _OFF = {"off", "none", "disabled", ""}
 
-# Context7's hosted endpoint. Override to point at a self-hosted one.
-DOCS_URL = os.environ.get("HYPERBOX_MCP_DOCS_URL", "https://mcp.context7.com/mcp")
+# Context7's hosted endpoint, OFF by default. Measured: the docs_* tools
+# add ~1163 tokens of tool definitions to every single message (59% of the
+# whole tool budget) and were called zero times across a full evaluation
+# session, while index_* cost ~289 tokens and did the useful work. Enable
+# it deliberately by setting this to the endpoint, or connect Context7 as
+# its own MCP server so its cost is not paid inside every HyperBox request.
+DOCS_URL = os.environ.get("HYPERBOX_MCP_DOCS_URL", "off")
 
 # The indexer is a stdio server. Override to swap in mcp-code-indexer,
 # e.g. HYPERBOX_MCP_INDEX_CMD="mcp-code-indexer --qdrant-url http://...".
@@ -64,6 +71,7 @@ def register(mcp: FastMCP) -> list[str]:
         # ignored — verified against fastmcp 2.14.7.
         _describe_index(index_proxy, workspace_root())
         mcp.mount(index_proxy, prefix="index")
+        mcp.add_middleware(IndexFreshnessMiddleware(workspace_root()))
         mounted.append("index")
 
     if DOCS_URL.strip().lower() not in _OFF:
@@ -127,3 +135,89 @@ def _describe_index(proxy: FastMCP, root: Path) -> None:
             )
         ),
     )
+
+
+# Extensions the backing indexer actually reads (defaults.mjs) — anything
+# else changing on disk cannot affect the index, so it must not count as
+# staleness or every save of a .md file would raise a false alarm.
+_INDEXED_SUFFIXES = {
+    ".php", ".js", ".jsx", ".ts", ".tsx", ".vue", ".py", ".rb", ".go",
+    ".rs", ".java", ".cs", ".swift", ".kt", ".css", ".scss", ".less",
+    ".mjs", ".cjs",
+}
+_SKIP_DIRS = {
+    "node_modules", "vendor", ".git", "dist", "build", ".cache", ".turbo",
+    ".next", "public", "storage", "target", "__pycache__", ".venv", "venv",
+    "env", "bower_components", ".semantic-search",
+}
+_STALENESS_DEBOUNCE_SECONDS = 5.0
+
+
+class IndexFreshnessMiddleware(Middleware):
+    """Tell the caller when search results are older than the code.
+
+    The backing indexer builds once and then serves its cache forever with
+    no staleness check of any kind, so a search can confidently return a
+    path that no longer exists. That is exactly what happened here: after a
+    package rename, the index kept returning `src/sandbox_mcp/server.py`
+    for nine hours, with nothing to indicate it was wrong.
+
+    This does not make the index fresh — it makes it HONEST, which is the
+    part that matters for an agent reasoning on the result. Comparing file
+    mtimes against the cache's own mtime costs a stat walk (milliseconds at
+    this repo size) and is debounced, because agents fire several searches
+    in a row while reasoning.
+    """
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.cache = root / ".semantic-search" / "cache" / "index.json"
+        self._last_check = 0.0
+        self._last_result: tuple[int, str | None] = (0, None)
+
+    def _stale_count(self) -> tuple[int, str | None]:
+        now = time.time()
+        if now - self._last_check < _STALENESS_DEBOUNCE_SECONDS:
+            return self._last_result
+        self._last_check = now
+        try:
+            built = self.cache.stat().st_mtime
+        except OSError:
+            self._last_result = (0, "no index cache found; results may be empty")
+            return self._last_result
+        changed = 0
+        for dirpath, dirnames, filenames in os.walk(self.root):
+            dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+            for name in filenames:
+                if Path(name).suffix not in _INDEXED_SUFFIXES:
+                    continue
+                try:
+                    if os.stat(os.path.join(dirpath, name)).st_mtime > built:
+                        changed += 1
+                except OSError:
+                    continue
+        self._last_result = (changed, None)
+        return self._last_result
+
+    async def on_call_tool(self, context, call_next):
+        result = await call_next(context)
+        if getattr(context, "message", None) is None:
+            return result
+        if getattr(context.message, "name", "") != "index_semantic_search":
+            return result
+
+        changed, problem = self._stale_count()
+        if not changed and not problem:
+            return result
+        note = problem or (
+            f"{changed} indexed file(s) have changed since this index was "
+            f"built; results may reference stale or deleted paths. Verify a "
+            f"path before relying on it, or rebuild the index."
+        )
+        try:
+            from mcp.types import TextContent
+
+            result.content.append(TextContent(type="text", text=f"[index freshness] {note}"))
+        except Exception:  # noqa: BLE001 - never break a search over a warning
+            pass
+        return result

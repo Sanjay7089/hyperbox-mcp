@@ -21,9 +21,17 @@ HYPERBOX_MCP_DOCS_URL to "off" to isolate one prefix at a time.
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 
 sys.path.insert(0, "src")
+
+# docs_* is OFF by default now (it cost ~1163 tokens of tool definitions on
+# every message and was never called in evaluation). This suite still has to
+# prove the mount WORKS when asked for, so enable it before importing the
+# server, and separately assert the default really is off.
+_DOCS_DEFAULT_OFF = os.environ.get("HYPERBOX_MCP_DOCS_URL") is None
+os.environ.setdefault("HYPERBOX_MCP_DOCS_URL", "https://mcp.context7.com/mcp")
 
 from fastmcp import Client  # noqa: E402
 
@@ -58,7 +66,14 @@ async def main() -> int:
             "",
         )
         check("index prefix mounted", any(n.startswith("index_") for n in names))
-        check("docs prefix mounted", any(n.startswith("docs_") for n in names))
+        check("docs prefix mounted when explicitly enabled",
+              any(n.startswith("docs_") for n in names))
+
+        from hyperbox_mcp import mounts as _m
+
+        check("docs_ is OFF unless explicitly enabled",
+              _DOCS_DEFAULT_OFF,
+              "env was preset, default not exercised" if not _DOCS_DEFAULT_OFF else "")
 
         # --- docs prefix: a real lookup against Context7 ---
         try:
