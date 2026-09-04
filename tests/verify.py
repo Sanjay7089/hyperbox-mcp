@@ -26,6 +26,7 @@ edit the implementation until you've ruled the environment out.
 
 from __future__ import annotations
 
+import asyncio
 import sys
 
 sys.path.insert(0, "src")
@@ -210,15 +211,49 @@ def main() -> int:
     rt.destroy(handle)  # must not raise
     check("destroy is idempotent (second call does not raise)", True)
 
-    # 7. The destroy TOOL reports an affirmative status on both paths.
-    #    Nothing else here exercises the MCP tool layer, and a success
-    #    that reports a false boolean invites an agent to retry it.
-    made = server.create_sandbox(language=language, backend=backend)
-    if "error" in made:
-        check("tool-level destroy reports a status", False, str(made))
-    else:
-        first = server.destroy_sandbox(made["sandbox_id"])
-        second = server.destroy_sandbox(made["sandbox_id"])
+    # 7. The MCP tool layer end to end, driven through a real client so
+    #    Context injection and the declared surface are exercised too —
+    #    calling the functions directly would skip both.
+    asyncio.run(_check_tool_layer(language, backend))
+
+    return summarize()
+
+
+async def _check_tool_layer(language: str, backend: str) -> None:
+    from fastmcp import Client
+
+    async with Client(server.mcp) as client:
+        names = {t.name for t in await client.list_tools()}
+        check("tool surface is exactly the three lifecycle tools",
+              names == {"create_sandbox", "run", "destroy_sandbox"},
+              str(sorted(names)))
+
+        # The comprehension layer: an agent must be able to discover the
+        # limits without first crashing into them.
+        resources = [str(r.uri) for r in await client.list_resources()]
+        check("capabilities resource is published",
+              "hyperbox://capabilities" in resources, str(resources))
+        prompts = [p.name for p in await client.list_prompts()]
+        check("run_safely prompt is published", "run_safely" in prompts, str(prompts))
+
+        by_name = {t.name: t for t in await client.list_tools()}
+        ann = by_name["destroy_sandbox"].annotations
+        check("destroy_sandbox is annotated destructive + idempotent",
+              bool(ann and ann.destructiveHint and ann.idempotentHint),
+              str(ann))
+        ann_run = by_name["run"].annotations
+        check("run is annotated NOT host-destructive",
+              bool(ann_run and ann_run.destructiveHint is False),
+              str(ann_run))
+
+        made = (await client.call_tool(
+            "create_sandbox", {"language": language, "backend": backend})).data
+        if not isinstance(made, dict) or "sandbox_id" not in made:
+            check("tool-level destroy reports a status", False, str(made))
+            return
+        sid = made["sandbox_id"]
+        first = (await client.call_tool("destroy_sandbox", {"sandbox_id": sid})).data
+        second = (await client.call_tool("destroy_sandbox", {"sandbox_id": sid})).data
         check(
             "destroy tool: 'destroyed' then 'already_gone', no false boolean",
             first.get("status") == "destroyed"
@@ -227,8 +262,6 @@ def main() -> int:
             and False not in second.values(),
             f"first={first} second={second}",
         )
-
-    return summarize()
 
 
 if __name__ == "__main__":
