@@ -56,10 +56,18 @@ are ours; the current backend is replaceable.
 
 ### Persistent sandboxes, not one-shot runs
 Three tools: `create_sandbox` → `run` (repeatable) → `destroy_sandbox`.
-A sandbox is created once and run in many times, so state persists
-across the build→run→observe→fix→re-run loop. Verified directly that
-llm-sandbox sessions expose explicit `.open()` / `.close()`, so holding
-one open across calls is supported — not a hack.
+A sandbox is created once and run in many times, so the environment
+persists across the build→run→observe→fix→re-run loop. Verified
+directly that llm-sandbox sessions expose explicit `.open()` /
+`.close()`, so holding one open across calls is supported — not a hack.
+
+Be precise about what that buys, because the imprecise version of this
+sentence produced a wrong acceptance criterion: session-open gives
+continuity of the container, its filesystem, and installed packages.
+Each `run()` is still a fresh process, so interpreter memory does not
+carry over. The loop this section protects doesn't need it to — the
+agent resubmits corrected code rather than depending on a live
+variable.
 
 ### Structured results, never bare strings
 `run` returns `{stdout, stderr, exit_code, success}`. The agent has to
@@ -122,6 +130,7 @@ sandbox-mcp (FastMCP, Python)
 | 2026-09-04 | CLAUDE/DESIGN/REQUIREMENTS + `.claude/` tracked in git | They are the declared source of truth; a reviewer must see the requirement change behind a code change. Only `settings.local.json` stays ignored |
 | 2026-09-04 | Phase 3 mounting lives in `mounts.py`, not `server.py` | mcp-composer was barred from server.py yet had to mount onto its FastMCP instance; `mounts.register(mcp)` keeps Phases 1 and 3 file-disjoint and genuinely parallel |
 | 2026-09-04 | Language/backend maps ship restricted to what's verified | Code had shipped javascript + podman ahead of their phase gate, so create_sandbox could hand back an environment nothing had ever run |
+| 2026-09-04 | "Persistent" narrowed to container + filesystem + installed packages; interpreter memory documented as not guaranteed | The original criterion ("set a var in one call, read it in the next") encoded a wrong assumption about llm-sandbox's execution model, not a bug. Measured against a real container: both calls share one container (identical `os.uname().nodename`) but run as different processes (`os.getpid()` 45 then 58), because each snippet is executed as its own `/sandbox/<uuid>.py`. A file written in one call and a package installed in one call both survive into later calls. Narrowed rather than negated, so a future kernel-backed Runtime stays conformant |
 
 ## Backlog (parked, not started)
 

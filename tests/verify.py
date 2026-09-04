@@ -71,13 +71,24 @@ def main() -> int:
         str(ok),
     )
 
-    # 3. State persists across runs (the whole point of a persistent sandbox).
-    rt.run(handle, "x = 41")
-    persisted = rt.run(handle, "print(x + 1)")
+    # 3. The SANDBOX persists across runs — filesystem and installed
+    #    packages, which is what the build→run→fix→re-run loop needs.
+    #    Not interpreter memory: each run() is a fresh process. See
+    #    DESIGN.md's Decision Log, 2026-09-04.
+    rt.run(handle, "open('/tmp/persisted.txt', 'w').write('42')")
+    from_file = rt.run(handle, "print(open('/tmp/persisted.txt').read())")
     check(
-        "state persists across run() calls",
-        persisted.success and "42" in persisted.stdout,
-        str(persisted),
+        "filesystem persists across run() calls",
+        from_file.success and "42" in from_file.stdout,
+        str(from_file),
+    )
+
+    rt.run(handle, "import six", libraries=["six"])
+    installed = rt.run(handle, "import six; print('six', six.__version__)")
+    check(
+        "installed package persists into a later run that omits libraries",
+        installed.success and "six" in installed.stdout,
+        str(installed),
     )
 
     # 4. Broken run — non-zero exit, real traceback, success False.

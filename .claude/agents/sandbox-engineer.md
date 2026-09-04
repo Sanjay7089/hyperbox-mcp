@@ -32,8 +32,11 @@ Hard boundaries — do NOT, without a scope-guard check:
 - Do NOT build any part of the reasoning/agent loop — that's the host.
 
 Phase 1 is Python + Docker only, on purpose. Prove it against a REAL
-container — a passing case, a state-persistence case, AND a
-deliberately-broken case with a real traceback — before Phase 2. When a
+container — a passing case, a sandbox-persistence case (a file written
+in one call readable in the next; a package installed in one call
+importable later), AND a deliberately-broken case with a real traceback
+— before Phase 2. Note that each `run()` is a fresh process: the
+container and its filesystem persist, interpreter memory does not. When a
 container operation fails, triage the layer first (is Docker running? is
 the socket reachable? is the image pullable?) before assuming the code
 is wrong — see the note in tests/verify.py.

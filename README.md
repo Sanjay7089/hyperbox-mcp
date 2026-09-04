@@ -15,7 +15,8 @@ code runs and what a result means.
 
 - `create_sandbox(language, backend)` → a persistent sandbox id
 - `run(sandbox_id, code, ...)` → `{stdout, stderr, exit_code, success}`,
-  callable repeatedly; state persists between calls
+  callable repeatedly; the sandbox's filesystem and installed packages
+  persist between calls (each call is a fresh process)
 - `destroy_sandbox(sandbox_id)` → tear it down (idempotent)
 
 That's v1. Chaos testing, cloud emulation, and browser testing are
@@ -83,8 +84,8 @@ uv run python tests/verify.py podman    # against rootless Podman
 ```
 
 Runs the real lifecycle against a real container: create, a passing
-run, state persistence, a deliberately-broken run, and idempotent
-destroy. "Done" means this passes.
+run, sandbox persistence, a deliberately-broken run, a timeout, and
+idempotent destroy. "Done" means this passes.
 
 ## Docs
 

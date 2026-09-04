@@ -20,10 +20,19 @@ decisions behind these choices.
 - Runs `code` in the named sandbox; returns
   `{stdout, stderr, exit_code, success}` or `{error}` for an
   unknown/dead sandbox.
-- Repeatable on the same `sandbox_id`; state persists between calls.
+- Repeatable on the same `sandbox_id`. What persists between calls is
+  the SANDBOX — the container, its filesystem, and any packages
+  installed via `libraries` — not interpreter memory: each `run` is a
+  fresh process. Interpreter memory is documented as not guaranteed
+  rather than guaranteed absent, so a future kernel-backed Runtime
+  could offer more without breaking this contract.
 - **Acceptance, all against a REAL container (never mocked):**
   1. Passing snippet → `success: true`, expected stdout.
-  2. State persists: set a var in one call, read it in the next.
+  2. The sandbox persists: a file written in one call is readable in
+     the next, and a package installed via `libraries` in one call is
+     importable in a later call that does not name it. (This replaced
+     a variable-persistence check that llm-sandbox cannot satisfy —
+     see DESIGN.md's Decision Log, 2026-09-04.)
   3. Broken snippet (raised exception) → `success: false`, real
      traceback in `stderr`, non-zero `exit_code` — not swallowed.
   4. A snippet that exceeds `timeout` → `success: false` with the
