@@ -121,9 +121,15 @@ def check_engines(report: Report) -> dict[str, engine.EngineStatus]:
                 "engine; sandboxes refuse to start rather than return "
                 "empty output. Prefer docker."
             )
+        product = status.extra.get("product")
+        label = (
+            f"{backend} engine reachable"
+            if not product or product == backend
+            else f"{backend} endpoint reachable — served by {product}"
+        )
         report.add(
             Check(
-                name=f"{backend} engine reachable",
+                name=label,
                 # One engine is enough, so a single unreachable engine is a
                 # warning. "No engine at all" is failed separately below.
                 status=OK if status.reachable else WARN,
@@ -160,7 +166,7 @@ def check_selection(report: Report, statuses: dict) -> str:
             detail=(
                 f"'auto' resolves to {chosen} "
                 f"(reachable: {', '.join(others) or chosen}); "
-                "docker is preferred when both are available"
+                "docker is preferred when both are genuinely available"
             ),
             notes=(
                 [

@@ -224,7 +224,7 @@ def main() -> int:
     #     and a cached client keeps the dead one. Treating that as an
     #     unreachable engine made destroy() refuse to confirm removal and
     #     leave the container running.
-    stale = lsr.LLMSandboxRuntime()
+    from hyperbox_mcp import engine as eng
     from hyperbox_mcp.engine import EngineUnavailableError
 
     dropped = EngineUnavailableError(
@@ -236,9 +236,9 @@ def main() -> int:
     )
     check(
         "a dropped socket is retried, a real outage is not",
-        stale._is_stale_connection(dropped) and not stale._is_stale_connection(down),
-        f"dropped={stale._is_stale_connection(dropped)} "
-        f"down={stale._is_stale_connection(down)}",
+        eng.is_stale_connection(dropped) and not eng.is_stale_connection(down),
+        f"dropped={eng.is_stale_connection(dropped)} "
+        f"down={eng.is_stale_connection(down)}",
     )
 
     # 6. Destroy, then destroy again — idempotent.

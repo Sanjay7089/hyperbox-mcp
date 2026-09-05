@@ -114,6 +114,29 @@ marked not host-destructive; `destroy_sandbox` destructive but
 idempotent), and a `hyperbox://capabilities` resource publishes the limits
 so an agent can discover them without first crashing into them.
 
+## How a client should use it
+
+One sandbox per task, many runs, destroyed when the task finishes:
+
+```
+create_sandbox()  →  run()  →  run()  →  run()  →  destroy_sandbox()
+```
+
+Anything abandoned is reclaimed by the inactivity TTL, so a client that
+crashes mid-task does not leak a container.
+
+**Do not share one sandbox across unrelated tasks.** Inside a sandbox the
+filesystem, installed packages and `/work` are shared, so two tasks in one
+sandbox see each other's files and dependencies. That is useful within a
+task and a liability across them.
+
+Each stdio MCP client launches its own server process — a stdio server is
+one connection, not a shared service — so two editors open at once means
+two processes. That is safe because ownership lives in the registry rather
+than in either process's memory: they can create separate sandboxes
+without interfering, and either can destroy a sandbox the other created.
+Both properties are asserted in `tests/verify_registry.py`.
+
 ## What "persistent" means
 
 Verified against a real container, and narrower than it first appears:

@@ -288,10 +288,17 @@ async def create_sandbox(
     own machine; you only need to read a file (use your own file tools);
     or the command's whole purpose is to change the user's project.
 
+    Create ONE sandbox per task and reuse it: call `run` against the
+    returned sandbox_id as many times as you need, then `destroy_sandbox`
+    when the task is done. Do not create a sandbox per snippet, and do not
+    carry one across unrelated tasks — files, installed packages and
+    scratch state are shared inside a sandbox, so reusing one across
+    unrelated work leaks state between them.
+
     `backend` defaults to "auto", which picks whichever container engine
-    is actually running. Then call `run` against the returned sandbox_id
-    as many times as you need, and `destroy_sandbox` when finished. First
-    use of a language may take a minute while its image is pulled.
+    is actually running and reports which one it was. First use of a
+    language may take a minute while its image is pulled; progress is
+    reported while that happens.
 
     Read the `hyperbox://capabilities` resource for exact limits.
     """
@@ -390,7 +397,8 @@ def run(
     failed", so you can read the real traceback and fix the actual cause.
     Prefer this over running generated code on the user's machine.
 
-    Safe to call repeatedly on one sandbox_id. The filesystem and installed
+    Safe to call repeatedly on one sandbox_id, and that is the intended
+    shape: one sandbox per task, many runs. The filesystem and installed
     packages persist between calls; in-memory variables do NOT — each run
     is a fresh process, so write anything you need to keep to a file.
     Write working files to /work: it is scratch space, size-limited, and

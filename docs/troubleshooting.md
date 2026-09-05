@@ -17,6 +17,59 @@ skip the live round trip.
 
 ---
 
+## doctor says "docker reachable" but Docker is not installed
+
+Podman serves a Docker-compatible endpoint. On Windows it commonly owns
+`npipe:////./pipe/docker_engine`, so a Docker client connects happily to
+what is really Podman.
+
+HyperBox now identifies the engine from the API rather than from the pipe
+that answered, so `doctor` reports which product is running:
+
+```
+PASS  docker endpoint reachable — served by podman
+        product: podman
+        note: this endpoint is served by podman, not docker
+```
+
+`auto` resolves to the real engine, so a sandbox created on a
+Podman-only machine reports `backend: "podman"`. Asking explicitly for
+`backend="docker"` there is refused with a message naming what actually
+answered, rather than succeeding under the wrong name.
+
+## `backend="podman"` fails while `backend="auto"` works
+
+Fixed. HyperBox used to try a fixed list of Podman pipe names, none of
+which matched a Podman that had taken over `docker_engine`. It now asks
+Podman where it listens (`podman machine inspect`,
+`podman system connection list`) and, failing that, tries the
+Docker-compatible pipe — accepting it only if the engine on the other
+end really is Podman.
+
+If it still fails, `hyperbox doctor` prints every pipe that was tried and
+what answered on each.
+
+## "The pipe is being closed" / "Remote end closed connection"
+
+Container engines close idle connections, and Docker Desktop on Windows
+does it within seconds on a named pipe. A cached client keeps the dead
+handle, so the *next* call fails while the engine is perfectly healthy.
+
+Every engine call now retries once against a freshly built client when
+the failure looks like a dropped connection — including the Windows
+phrasings (`WinError 232`, `WinError 109`, "pipe is being closed", "pipe
+has been ended"). A genuinely unreachable engine still fails twice and is
+reported as unreachable, which is the distinction the registry depends on:
+`destroy_sandbox` must never claim a cleanup it could not verify.
+
+If you saw containers left behind by an earlier version:
+
+```
+docker ps -a --filter label=hyperbox-mcp.managed=true
+```
+
+They are reclaimed automatically the next time a server starts.
+
 ## "No container engine is reachable"
 
 Nothing is running that can host a container.

@@ -190,7 +190,7 @@ class LLMSandboxRuntime:
         configured and is not, which is why every one of them is read
         back off the container afterwards.
         """
-        if engine.client_flavour(backend) == "podman":
+        if engine.client_dialect(backend) == "podman":
             return {
                 "cpu_period": CPU_PERIOD,
                 "cpu_quota": CPU_QUOTA,
@@ -274,50 +274,19 @@ class LLMSandboxRuntime:
                 "that is not actually limited."
             )
 
-    #: Substrings of the errors a dead-but-cached connection produces.
-    #: Docker Desktop on Windows closes idle named-pipe connections after
-    #: a few seconds, and macOS/Linux sockets can be dropped the same way
-    #: by a restarted engine. The cached client keeps the dead socket, so
-    #: the NEXT call fails even though the engine is perfectly healthy —
-    #: which is how a destroy() came to report the engine as unreachable
-    #: and leave a container running.
-    _STALE_CONNECTION_MARKERS = (
-        "connection aborted",
-        "remote end closed connection",
-        "remotedisconnected",
-        "connection reset",
-        "broken pipe",
-    )
-
-    @classmethod
-    def _is_stale_connection(cls, exc: BaseException) -> bool:
-        text = str(exc).lower()
-        return any(marker in text for marker in cls._STALE_CONNECTION_MARKERS)
-
     def _container(self, handle: SandboxHandle):
-        """Look up this sandbox's container, surviving a dropped socket.
+        """Look up this sandbox's container.
 
-        A cached client whose connection has been closed underneath it
-        looks exactly like an unreachable engine, and treating it as one
-        is worse than useless here: destroy() would refuse to confirm
-        removal and leave the container running with its registry row
-        intact. So a connection-shaped failure drops the cached clients
-        and is retried once. A genuinely unreachable engine fails the
-        same way twice and propagates, which is the behaviour that
-        matters for truthfulness.
+        Recovery from a connection the engine closed underneath us lives
+        in engine.with_retry, so every engine call gets it rather than
+        just this one.
         """
         ref = handle.meta.get("container_ref")
         if not ref:
             raise ContainerGoneError(
                 f"Sandbox '{handle.sandbox_id}' has no container reference."
             )
-        try:
-            return engine.get_container(handle.backend, ref)
-        except EngineUnavailableError as exc:
-            if not self._is_stale_connection(exc):
-                raise
-            engine.reset_clients()
-            return engine.get_container(handle.backend, ref)
+        return engine.get_container(handle.backend, ref)
 
     # --- network sealing ----------------------------------------------
     #
@@ -348,12 +317,15 @@ class LLMSandboxRuntime:
     def _seal(self, handle: SandboxHandle) -> None:
         """Detach every network. Fails closed: if we cannot seal, the
         caller must not be handed a sandbox we claim is sealed."""
-        try:
+        def seal_once():
             client = engine.client(handle.backend)
             container = self._container(handle)
             container.reload()
             for name in self._attached_networks(container):
                 client.networks.get(name).disconnect(container)
+
+        try:
+            engine.with_retry(seal_once, "network sealing")
         except (EngineUnavailableError, ContainerGoneError):
             raise
         except Exception as exc:  # noqa: BLE001

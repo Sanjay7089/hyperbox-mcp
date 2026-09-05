@@ -159,23 +159,86 @@ def main() -> int:
     )
 
     # --- 6. the Windows-specific routing is correct ------------------
-    flavour = engine.client_flavour("podman")
+    dialect = engine.client_dialect("podman")
     if WINDOWS:
         check(
             "Podman is routed through the Docker-compatible client",
-            flavour == "docker"
+            dialect == "docker"
             and engine.session_kwargs("podman").get("session_backend") == "docker"
             if "podman" in reachable
-            else flavour == "docker",
+            else dialect == "docker",
             "podman-py has no named-pipe transport, so Windows uses "
             "Podman's Docker-compatible API",
         )
     else:
         check(
             "Podman uses its own client off Windows",
-            flavour == "podman" and not engine.session_kwargs("podman"),
-            f"client_flavour('podman') = {flavour}",
+            dialect == "podman" and not engine.session_kwargs("podman"),
+            f"client_dialect('podman') = {dialect}",
         )
+
+    # --- 6b. the engine reported is the engine running ---------------
+    #
+    # Podman serves a Docker-compatible endpoint, so "something answered
+    # the docker pipe" says nothing about what is running. A machine with
+    # Podman and no Docker used to be told "docker engine reachable".
+    for backend, status in statuses.items():
+        if not status.reachable:
+            continue
+        product = status.extra.get("product")
+        check(
+            f"{backend} probe names the engine actually running",
+            product in ("docker", "podman"),
+            f"asked for {backend}, answered by {product}"
+            + ("" if product == backend else "  <- endpoint is shared"),
+        )
+
+    # The selection logic under a shared endpoint, exercised without
+    # needing a machine where that is true. This is the case that made
+    # backend="podman" fail while backend="auto" worked.
+    real_identify = engine.identify
+    try:
+        engine.identify = lambda _client: "podman"
+        engine.reset_clients()
+        resolved = engine.detect("auto")
+        check(
+            "auto reports the real engine when one serves another's endpoint",
+            resolved == "podman",
+            f"auto resolved to {resolved!r} with every endpoint served by podman",
+        )
+        refused = False
+        try:
+            engine.detect("docker")
+        except engine.EngineUnavailableError as exc:
+            refused = "podman" in str(exc)
+        check(
+            "asking for the wrong engine is refused, not silently honoured",
+            refused,
+            "requesting docker on a podman-only machine names podman in the error",
+        )
+    finally:
+        engine.identify = real_identify
+        engine.reset_clients()
+
+    # --- 6c. a dropped connection is not an outage -------------------
+    stale_cases = {
+        "The pipe is being closed": True,
+        "[WinError 232] The pipe is being closed": True,
+        "[WinError 109] The pipe has been ended": True,
+        "('Connection aborted.', RemoteDisconnected('Remote end closed'))": True,
+        "Error while fetching server API version: FileNotFoundError(2)": False,
+        "404 Client Error: Not Found": False,
+    }
+    wrong = [
+        text
+        for text, expected in stale_cases.items()
+        if engine.is_stale_connection(Exception(text)) is not expected
+    ]
+    check(
+        "dropped connections are retried and real outages are not",
+        not wrong,
+        "; ".join(wrong) or f"{len(stale_cases)} cases classified correctly",
+    )
 
     # --- 7. no POSIX-only calls left on an import path ---------------
     offenders = []

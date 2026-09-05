@@ -14,6 +14,7 @@ asserts the sandbox stopped it.
 from __future__ import annotations
 
 import asyncio
+import getpass
 import os
 import sys
 
@@ -37,7 +38,17 @@ def check(name: str, condition: bool, detail: str = "") -> None:
 
 # A file that certainly exists on the host, addressed absolutely. If the
 # sandbox could read the host filesystem, this would succeed.
+#
+# This probe is weaker on Windows than it looks: the path is `C:\...`,
+# which a Linux container could never resolve whatever its mounts were,
+# so it proves the claim only on POSIX hosts. The account-name probe
+# below holds everywhere, and tests/verify_security.py asserts the real
+# guarantee structurally — that no mount reaches the host at all.
 HOST_FILE = os.path.abspath("pyproject.toml")
+
+# The name of the account running these tests. It appears in the host's
+# user database and must NOT appear in the container's.
+HOST_USER = getpass.getuser()
 
 PROBES = {
     "read the host filesystem": (
@@ -45,6 +56,12 @@ PROBES = {
         f"    print(open({HOST_FILE!r}).read()[:40])\n"
         f"except Exception as e:\n"
         f"    print('DENIED:', type(e).__name__)\n"
+    ),
+    "read the host user database": (
+        "try:\n"
+        "    print(open('/etc/passwd').read())\n"
+        "except Exception as e:\n"
+        "    print('DENIED:', type(e).__name__)\n"
     ),
     "reach the network": (
         "import socket\n"
@@ -98,8 +115,23 @@ async def main() -> int:
 
         r = await probe("read the host filesystem")
         out = (r.get("stdout") or "").strip()
-        check("host filesystem is unreachable from inside",
+        check("a host path is unreachable from inside",
               out.startswith("DENIED"), f"stdout: {out!r}")
+
+        # Reading /etc/passwd inside a container proves nothing on its
+        # own — every Linux image ships one. What matters is WHOSE it is.
+        # The host's account name must not appear in it.
+        r = await probe("read the host user database")
+        out = (r.get("stdout") or "")
+        accounts = [
+            line.split(":", 1)[0]
+            for line in out.splitlines()
+            if ":" in line
+        ]
+        check("the user database inside is the container's, not the host's",
+              HOST_USER not in accounts,
+              f"host account {HOST_USER!r} absent; container has "
+              f"{len(accounts)} accounts e.g. {accounts[:4]}")
 
         r = await probe("reach the network")
         out = (r.get("stdout") or "").strip()

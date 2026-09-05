@@ -222,6 +222,62 @@ async def main() -> int:
     finally:
         srv._registry.remove(reserved_id)
 
+    # --- 5a. two clients, two sandboxes, no cross-talk ----------------
+    #
+    # The realistic shape: each MCP client gets its own stdio server
+    # process, and each task gets its own sandbox. The earlier case
+    # deliberately shares one sandbox between processes; this one proves
+    # the opposite property, that two sandboxes stay strictly separate.
+    async with Client(transport()) as p1, Client(transport()) as p2:
+        made1 = data(await p1.call_tool(
+            "create_sandbox", {"language": "python", "backend": BACKEND}))
+        made2 = data(await p2.call_tool(
+            "create_sandbox", {"language": "python", "backend": BACKEND}))
+        sid1, sid2 = made1.get("sandbox_id"), made2.get("sandbox_id")
+        check(
+            "two processes each get their own sandbox",
+            bool(sid1) and bool(sid2) and sid1 != sid2,
+            f"A={sid1} B={sid2}",
+        )
+        if sid1 and sid2:
+            await p1.call_tool("run", {
+                "sandbox_id": sid1,
+                "code": "open('/work/who','w').write('process-A')"})
+            await p2.call_tool("run", {
+                "sandbox_id": sid2,
+                "code": "open('/work/who','w').write('process-B')"})
+            read_code = (
+                "import os\n"
+                "print(open('/work/who').read() if os.path.exists('/work/who')"
+                " else 'MISSING')\n"
+            )
+            back1 = data(await p1.call_tool(
+                "run", {"sandbox_id": sid1, "code": read_code}))
+            back2 = data(await p2.call_tool(
+                "run", {"sandbox_id": sid2, "code": read_code}))
+            check(
+                "neither sandbox sees the other's files",
+                "process-A" in (back1.get("stdout") or "")
+                and "process-B" in (back2.get("stdout") or ""),
+                f"A read {(back1.get('stdout') or '').strip()!r}, "
+                f"B read {(back2.get('stdout') or '').strip()!r}",
+            )
+            # Each process destroys only its own, and the other survives.
+            d1 = data(await p1.call_tool(
+                "destroy_sandbox", {"sandbox_id": sid1}))
+            still = data(await p2.call_tool(
+                "run", {"sandbox_id": sid2, "code": "print('B still alive')"}))
+            d2 = data(await p2.call_tool(
+                "destroy_sandbox", {"sandbox_id": sid2}))
+            check(
+                "destroying one sandbox leaves the other working",
+                d1.get("status") == "destroyed"
+                and still.get("success") is True
+                and d2.get("status") == "destroyed",
+                f"A={d1.get('status')} B-run={still.get('success')} "
+                f"B={d2.get('status')}",
+            )
+
     # --- 5b. abandoned reservations do not accumulate -----------------
     #
     # A create killed between reserve() and finalize() leaves a `creating`

@@ -240,17 +240,52 @@ def ensure_podman_transport() -> str:
     return ""
 
 
-def client_flavour(backend: str) -> str:
-    """Which client library actually talks to this backend.
+def identify(engine_client: Any) -> str:
+    """Which engine is actually answering — the product, not the pipe.
 
-    Everywhere except Windows this is the backend's own name. On Windows
-    Podman is reached through its Docker-compatible API, because
-    podman-py has no named-pipe transport at all — so the *client* is
-    docker-py even though the *engine* is Podman.
+    Podman serves a Docker-compatible endpoint, so "something answered
+    the docker pipe" says nothing about what is running. On a machine
+    with Podman and no Docker installed at all, the old code reported
+    "docker engine reachable, version 6.1.1", which is the same class of
+    untruth as reporting a limit that was never applied.
+
+    The API distinguishes them plainly, verified against both engines:
+
+        docker  Components: ['Engine', 'containerd', 'runc', ...]
+        podman  Components: ['Podman Engine', 'Conmon', 'OCI Runtime']
+
+    Falls back to "docker" when the field is missing, because the
+    Docker-shaped API is what we are speaking at that point.
+    """
+    try:
+        raw = engine_client.version() or {}
+    except Exception:  # noqa: BLE001 - identity is best effort
+        return "docker"
+    components = raw.get("Components") or []
+    names = " ".join(str(c.get("Name", "")) for c in components).lower()
+    blob = f"{names} {raw.get('Version', '')} {raw.get('Platform', '')}".lower()
+    return "podman" if "podman" in blob else "docker"
+
+
+def client_dialect(backend: str) -> str:
+    """Which client library and API shape talks to this backend.
+
+    This is the DIALECT, not the product, and the difference matters:
+    Podman's Docker-compatible endpoint accepts Docker's HostConfig
+    (`nano_cpus`, `tmpfs`), while podman-py's libpod API rejects both and
+    wants `cpu_quota` and `mounts` instead. Container configuration must
+    follow whichever API is being spoken.
+
+    So this deliberately does NOT consult `identify()`. On Windows,
+    Podman is reached through docker-py over its compatible pipe, and the
+    correct config there is the Docker spelling even though the engine is
+    Podman. Changing this to follow the product reintroduces silently
+    unapplied limits.
     """
     if backend == "podman" and WINDOWS:
         return "docker"
     return backend
+
 
 
 def _docker_client(base_url: str | None = None) -> Any:
@@ -264,16 +299,68 @@ def _docker_client(base_url: str | None = None) -> Any:
     return client
 
 
+def _windows_podman_pipes() -> list[str]:
+    """Named pipes that might be serving Podman, best candidate first.
+
+    Guessing from a fixed list was the bug: on a machine with Podman and
+    no Docker, Podman answers `docker_engine` and nothing else, so an
+    explicit backend="podman" failed while backend="auto" worked. Ask
+    Podman where it actually listens, then fall back to the known names —
+    including the Docker-compatible one, which is checked by identity
+    rather than trusted by name.
+    """
+    candidates: list[str] = []
+    binary = podman_binary()
+    if binary:
+        for args, prefix in (
+            (["machine", "inspect", "--format",
+              "{{.ConnectionInfo.PodmanPipe.Path}}"], ""),
+            (["system", "connection", "list", "--format", "{{.URI}}"], ""),
+        ):
+            try:
+                out = subprocess.run(
+                    [binary, *args], capture_output=True, text=True, timeout=15
+                )
+            except (OSError, subprocess.SubprocessError):
+                continue
+            if out.returncode != 0:
+                continue
+            for line in out.stdout.splitlines():
+                value = line.strip()
+                if not value or value in ("<no value>", "<nil>"):
+                    continue
+                if not value.startswith("npipe://"):
+                    value = f"npipe://{value}" if value.startswith("\\\\") else value
+                if value.startswith("npipe://") and value not in candidates:
+                    candidates.append(prefix + value)
+
+    for pipe in (*_WINDOWS_PODMAN_PIPES, *_WINDOWS_DOCKER_PIPES):
+        if pipe not in candidates:
+            candidates.append(pipe)
+    return candidates
+
+
 def _build_windows_podman_client() -> Any:
-    """Reach Podman on Windows over its Docker-compatible named pipe."""
+    """Reach Podman on Windows, whichever pipe it happens to serve.
+
+    The Docker-compatible pipe is a legitimate way to reach Podman, so it
+    is tried — but only accepted if the engine on the other end really is
+    Podman. Accepting it on name alone would hand back Docker when the
+    caller asked for Podman.
+    """
     tried: list[str] = []
-    for pipe in _WINDOWS_PODMAN_PIPES:
+    for pipe in _windows_podman_pipes():
         try:
-            return _docker_client(pipe)
+            candidate = _docker_client(pipe)
         except Exception as exc:  # noqa: BLE001 - try the next pipe
             tried.append(f"{pipe} ({type(exc).__name__})")
+            continue
+        product = identify(candidate)
+        if product == "podman":
+            return candidate
+        tried.append(f"{pipe} (answered by {product}, not podman)")
     raise EngineUnavailableError(
-        "Podman is not reachable on any known named pipe: "
+        "Podman is not reachable on any named pipe it advertises: "
         + ", ".join(tried)
         + ".",
         "Start the Podman machine: `podman machine start` (first time: "
@@ -334,14 +421,76 @@ def _build_client(backend: str) -> Any:
 
 _clients: dict[str, Any] = {}
 
+#: Substrings of the errors a dead-but-cached connection produces.
+#:
+#: Engines close idle connections. Docker Desktop on Windows does it
+#: within seconds on its named pipe, and a restarted engine drops unix
+#: sockets the same way. The cached client keeps the dead handle, so the
+#: NEXT call fails while the engine is perfectly healthy — which is how a
+#: destroy() came to report an unreachable engine and leave a container
+#: running.
+#:
+#: The Windows phrasings are here because a real run hit them: a named
+#: pipe reports "The pipe is being closed" (WinError 232) or "The pipe
+#: has been ended" (109) rather than anything resembling a socket error.
+_STALE_CONNECTION_MARKERS = (
+    "connection aborted",
+    "remote end closed connection",
+    "remotedisconnected",
+    "connection reset",
+    "broken pipe",
+    "pipe is being closed",
+    "pipe has been ended",
+    "no process is on the other end",
+    "winerror 232",
+    "winerror 109",
+    "cannot connect to host",
+)
+
+
+def is_stale_connection(exc: BaseException) -> bool:
+    """Whether `exc` looks like a dropped connection rather than an outage.
+
+    The distinction is the whole point: a dropped connection is worth
+    retrying against a fresh client, an unreachable engine is not, and
+    conflating them would let a real outage be retried into a false
+    success. The registry's correctness rests on that line.
+    """
+    text = f"{exc} {getattr(exc, '__cause__', '')}".lower()
+    return any(marker in text for marker in _STALE_CONNECTION_MARKERS)
+
+
+def with_retry(operation, what: str = ""):
+    """Run `operation`, once more against fresh clients if the connection
+    was merely stale.
+
+    Every engine call goes through here rather than each caller
+    remembering to handle it. Sealing a network, listing our containers
+    and garbage collection are all as exposed to an idle pipe as looking
+    up a container is — a lesson learned by protecting exactly one of
+    them and watching a benchmark die on the others.
+    """
+    try:
+        return operation()
+    except EngineUnavailableError as exc:
+        if not is_stale_connection(exc):
+            raise
+        reset_clients()
+    except Exception as exc:  # noqa: BLE001 - classified by the caller
+        if not is_stale_connection(exc):
+            raise
+        reset_clients()
+    # One retry, on a client rebuilt from scratch. A second failure is
+    # reported as-is: an engine that drops two fresh connections is not
+    # having a transient problem.
+    return operation()
+
 
 def client(backend: str) -> Any:
     """A live, verified client for `backend`.
 
     Cached after the first successful ping so routine operations do not
-    pay a round trip each. A cached client whose engine later dies still
-    fails correctly: the operation raises, and `classify` maps it to
-    EngineUnavailableError.
+    pay a round trip each.
     """
     existing = _clients.get(backend)
     if existing is not None:
@@ -352,14 +501,14 @@ def client(backend: str) -> Any:
 
 
 def reset_clients() -> None:
-    """Drop cached clients. For tests that change engine availability."""
+    """Drop cached clients, so the next call builds a fresh connection."""
     _clients.clear()
 
 
 def _not_found_types(backend: str) -> tuple[type[BaseException], ...]:
     """The exception types that mean, authoritatively, 'no such thing'."""
     types: list[type[BaseException]] = []
-    backend = client_flavour(backend)
+    backend = client_dialect(backend)
     if backend == "docker":
         try:
             from docker.errors import ImageNotFound, NotFound
@@ -424,21 +573,27 @@ def get_container(backend: str, ref: str) -> Any:
     Raises ContainerGoneError only when the engine said so, and
     EngineUnavailableError whenever it could not be asked.
     """
-    engine = client(backend)  # may raise EngineUnavailableError
-    try:
-        return engine.containers.get(ref)
-    except Exception as exc:  # noqa: BLE001 - classified immediately below
-        raise classify(backend, exc, f"container {ref[:12]}") from exc
+    def op():
+        engine = client(backend)  # may raise EngineUnavailableError
+        try:
+            return engine.containers.get(ref)
+        except Exception as exc:  # noqa: BLE001 - classified immediately below
+            raise classify(backend, exc, f"container {ref[:12]}") from exc
+
+    return with_retry(op, f"container {ref[:12]}")
 
 
 def list_managed(backend: str, label: str) -> list[Any]:
     """Every container carrying `label`. Raises if the engine is down —
     an empty list must mean 'none', never 'could not ask'."""
-    engine = client(backend)
-    try:
-        return list(engine.containers.list(all=True, filters={"label": label}))
-    except Exception as exc:  # noqa: BLE001
-        raise classify(backend, exc, "the managed container list") from exc
+    def op():
+        engine = client(backend)
+        try:
+            return list(engine.containers.list(all=True, filters={"label": label}))
+        except Exception as exc:  # noqa: BLE001
+            raise classify(backend, exc, "the managed container list") from exc
+
+    return with_retry(op, "the managed container list")
 
 
 def image_present(backend: str, image: str) -> bool:
@@ -448,14 +603,17 @@ def image_present(backend: str, image: str) -> bool:
     client's request timeout. Raises if the engine cannot be reached, so
     "absent" never silently means "could not ask".
     """
-    engine_client = client(backend)
-    try:
-        engine_client.images.get(image)
-        return True
-    except Exception as exc:  # noqa: BLE001
-        if is_not_found(backend, exc):
-            return False
-        raise classify(backend, exc, f"image {image}") from exc
+    def op():
+        engine_client = client(backend)
+        try:
+            engine_client.images.get(image)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            if is_not_found(backend, exc):
+                return False
+            raise classify(backend, exc, f"image {image}") from exc
+
+    return with_retry(op, f"image {image}")
 
 
 def probe(backend: str) -> EngineStatus:
@@ -493,6 +651,15 @@ def probe(backend: str) -> EngineStatus:
     status = EngineStatus(
         backend=backend, reachable=True, version=version, binary=binary
     )
+    # Which engine actually answered. Worth stating whenever it differs
+    # from what was asked for, because that is exactly the case a person
+    # would otherwise misread.
+    product = identify(engine)
+    status.extra["product"] = product
+    if product != backend:
+        status.extra["note"] = (
+            f"this endpoint is served by {product}, not {backend}"
+        )
     if backend == "podman":
         status.extra["machine"] = _podman_machine_state(binary) or "not reported"
         if WINDOWS:
@@ -527,16 +694,33 @@ def detect(preferred: str = "auto") -> str:
                 f"Unsupported backend '{preferred}'. Supported: "
                 f"auto, {', '.join(BACKENDS)}"
             )
-        client(preferred)  # raises EngineUnavailableError with a fix
+        engine_client = client(preferred)  # raises, with a fix
+        product = identify(engine_client)
+        if product != preferred:
+            # Asking for Docker and being handed Podman is not a
+            # successful resolution, it is a wrong answer that would then
+            # be reported under the wrong name for the sandbox's whole
+            # life.
+            raise EngineUnavailableError(
+                f"'{preferred}' was requested, but the engine answering is "
+                f"{product}. Use backend='{product}', or 'auto'."
+            )
         return preferred
 
     problems: list[str] = []
     for backend in BACKENDS:
         try:
-            client(backend)
-            return backend
+            engine_client = client(backend)
         except EngineUnavailableError as exc:
             problems.append(f"  {backend}: {exc}")
+            continue
+        # Report what is actually running, not which client reached it.
+        # Podman commonly answers the Docker pipe; calling that "docker"
+        # misleads every later message about the sandbox.
+        product = identify(engine_client)
+        if product != backend:
+            _clients.setdefault(product, engine_client)
+        return product
     raise EngineUnavailableError(
         "No container engine is reachable, so there is nowhere to run code.\n"
         + "\n".join(problems)
