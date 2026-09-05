@@ -43,7 +43,7 @@ lock is already stale.
 
 ```bash
 uv run python tests/run_all.py docker     # every suite, one summary
-uv run python tests/run_all.py podman     # experimental; see below
+uv run python tests/run_all.py podman     # second engine, also supported
 
 # or individually
 uv run python tests/verify.py             # lifecycle, validation, MCP surface
@@ -77,14 +77,20 @@ process at a socket where nothing is listening. A real outage, no mock.
 
 ## Podman status
 
-Experimental, and currently failing. `podman-py`'s `exec_run` returns no
-output at all on the versions tested, so results never reach the server.
-Sandboxes refuse to start on Podman rather than reporting success with
-empty output. `auto` prefers Docker.
+Supported. `tests/run_all.py podman` passes every suite against real
+containers.
 
-To promote Podman to supported: get `tests/run_all.py podman` passing
-three times consecutively, then remove it from `EXPERIMENTAL_BACKENDS` in
-`policy.py` and update the README and `docs/security-model.md`.
+Getting there needed one non-obvious thing, kept in
+`engine.ensure_podman_transport`: the client must talk to the machine's
+**unix socket**, never the TCP port it forwards. Over the forward, exec
+returns correct exit codes and zero bytes of output — verified against
+the raw HTTP API, so it is below every client library. On macOS the
+socket path also has to be found without relying on `$TMPDIR`, because
+MCP clients launch servers without it and Podman then reports the wrong
+path. Do not "simplify" that function back to `PodmanClient.from_env()`.
+
+`auto` still prefers Docker, as a stable default rather than a judgement
+about Podman.
 
 ## Promoting a language
 

@@ -93,11 +93,21 @@ differences were failure-shaped rather than cosmetic:
 - **`podman-py` rejects the `tmpfs` keyword** and wants tmpfs entries
   inside `mounts`.
 - **Privilege flags differ**: `security_opt` versus `no_new_privileges`.
+- **Podman's transport has to be chosen deliberately.** A `podman
+  machine` publishes both a unix socket and a forwarded TCP port, and
+  `PodmanClient.from_env()` picks the TCP forward. Over it, container
+  create, start, inspect and exit codes all work correctly — and every
+  exec returns **zero bytes of output**. Measured directly against the
+  HTTP API, bypassing every client library: `/exec/{id}/start` returns
+  200 with an empty body while `/exec/{id}/json` reports the right exit
+  code; the same exec over the unix socket returns a properly framed
+  `\x01...` stdout stream. HyperBox now resolves the socket itself
+  before building any Podman client.
 
-The general lesson is the reason the post-create verification exists: an
-engine that accepts a configuration and applies none of it is worse than
-one that refuses it, because the server would keep describing the sandbox
-as limited.
+The general lesson is the reason the post-create verification and the
+startup canary exist: an engine that accepts a request and quietly does
+none of it is worse than one that refuses, because the server would keep
+describing the sandbox as working. Both engines now pass every suite.
 
 ## Failure is never reported as success
 

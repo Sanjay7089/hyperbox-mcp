@@ -26,12 +26,12 @@ LANGUAGES = ("python",)
 
 BACKENDS = ("docker", "podman")
 
-#: Reachable, wired up, and NOT proven. Podman is experimental: on the
-#: versions tested, podman-py's exec_run returns no output at all in any
-#: mode, so results never reach the server. Sandboxes refuse to start on
-#: it rather than answering every run with empty output — see
-#: docs/troubleshooting.md. `auto` prefers docker for this reason.
-EXPERIMENTAL_BACKENDS = ("podman",)
+#: Backends that are wired up but not proven by the full suite. Empty:
+#: both engines pass every suite against real containers. Podman needs
+#: its transport chosen deliberately (see engine.ensure_podman_transport)
+#: — over a TCP forward it returns correct exit codes and no output at
+#: all. `auto` still prefers docker, purely as a stable default.
+EXPERIMENTAL_BACKENDS: tuple[str, ...] = ()
 
 #: Accepted by `create_sandbox`; "auto" resolves to the first reachable
 #: engine. Never a passthrough for arbitrary engine options.

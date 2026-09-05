@@ -51,9 +51,10 @@ real path rather than claiming Podman is missing. The API connection does
 not use the CLI at all, so Podman can be perfectly usable while `which
 podman` finds nothing.
 
-**The socket cannot be found.** `podman-py` reads `CONTAINER_HOST` first
-and otherwise falls back to Podman's own connection config, so a missing
-`CONTAINER_HOST` is often fine. When it is not:
+**The socket cannot be found.** HyperBox sets `CONTAINER_HOST` itself,
+preferring the machine's unix socket over the TCP forward that Podman's
+own connection config advertises — see the next section for why that
+matters. To override it by hand:
 
 ```bash
 export CONTAINER_HOST="unix://$(podman machine inspect \
@@ -68,18 +69,31 @@ this server ... Every run in this sandbox would report success with
 empty output, so it is refused rather than handed back.
 ```
 
-This is Podman being **experimental**, working as intended.
+This means the Podman client connected over the **forwarded TCP port**
+instead of the machine's **unix socket**.
 
-On the Podman versions tested, `podman-py`'s `exec_run` returns no output
-at all — with demux on or off, streaming or not — and its streaming exit
-code is `None`, which becomes `0`. A sandbox built on it would answer
-every run with "success, no output", which is worse than failing: an
-agent would conclude its code printed nothing and start debugging code
-that was fine.
+A `podman machine` publishes both, and `PodmanClient.from_env()` prefers
+the TCP forward. Over it, containers create and start, inspect works, and
+exit codes are correct — but every exec returns zero bytes. That was
+confirmed against the raw HTTP API with no client library involved:
+`/exec/{id}/start` returns `200` with an empty body while the exit code
+comes back fine, and the identical exec over the unix socket returns a
+properly framed stdout stream.
 
-So HyperBox runs a marker through the container at creation and refuses
-the sandbox if it does not come back. **Use `backend="docker"`, or
-`"auto"`, which prefers Docker.**
+HyperBox resolves the socket itself before building a Podman client, so
+this should not happen. If it does, set the transport explicitly:
+
+```bash
+export CONTAINER_HOST="unix://$(podman machine inspect \
+  --format '{{.ConnectionInfo.PodmanSocket.Path}}')"
+```
+
+**One caveat on macOS:** Podman derives that path from `$TMPDIR`. A
+process launched without `TMPDIR` — which is how MCP clients launch their
+servers — is told the socket is at `/tmp/podman/...` when it is really
+under `/var/folders/.../T/podman/`. HyperBox handles this by searching
+both locations, so `hyperbox doctor` is the quickest way to see which
+socket is actually in use.
 
 ## "The container engine did not apply this server's resource policy"
 

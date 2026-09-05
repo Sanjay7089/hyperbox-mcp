@@ -20,6 +20,7 @@ what keeps the execution backend replaceable.
 
 from __future__ import annotations
 
+import glob
 import os
 import shutil
 import subprocess
@@ -71,6 +72,22 @@ _PODMAN_MACHINE_FIX = (
     "--format '{{.ConnectionInfo.PodmanSocket.Path}}')\""
 )
 
+# Rootless socket locations to try when there is no Podman VM (Linux).
+_PODMAN_NATIVE_SOCKETS = (
+    "/run/user/{uid}/podman/podman.sock",
+    "/run/podman/podman.sock",
+)
+
+# macOS gives each user a private temp directory and Podman puts its
+# machine socket inside it. Podman derives that location from $TMPDIR, so
+# a process launched without TMPDIR — which is how MCP clients launch
+# their servers — is told the socket is at /tmp/podman/... when it is
+# really under /var/folders. Globbing finds it either way.
+_PODMAN_SOCKET_GLOBS = (
+    "/var/folders/*/*/T/podman/*-api.sock",
+    "/tmp/podman/*-api.sock",
+)
+
 
 @dataclass
 class EngineStatus:
@@ -119,6 +136,86 @@ def _podman_machine_state(binary: str) -> str:
     return out.stdout.strip() if out.returncode == 0 else ""
 
 
+def podman_socket(binary: str = "") -> str:
+    """The unix socket path for the local Podman service, if there is one.
+
+    Asks the CLI where its machine put the socket, then falls back to the
+    rootless locations used when Podman runs natively.
+    """
+    reported = ""
+    binary = binary or podman_binary()
+    if binary:
+        try:
+            out = subprocess.run(
+                [
+                    binary,
+                    "machine",
+                    "inspect",
+                    "--format",
+                    "{{.ConnectionInfo.PodmanSocket.Path}}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+        except (OSError, subprocess.SubprocessError):
+            out = None
+        if out is not None and out.returncode == 0 and out.stdout.strip():
+            reported = out.stdout.strip().splitlines()[0].strip()
+
+    if reported and os.path.exists(reported):
+        return reported
+
+    # The reported path can be wrong without TMPDIR, but its basename
+    # still names the right machine, so prefer a glob hit that matches it.
+    wanted = os.path.basename(reported) if reported else ""
+    fallbacks: list[str] = []
+    for pattern in _PODMAN_SOCKET_GLOBS:
+        fallbacks.extend(sorted(glob.glob(pattern)))
+    for candidate in fallbacks:
+        if wanted and os.path.basename(candidate) == wanted:
+            return candidate
+    if fallbacks:
+        return fallbacks[0]
+
+    for template in _PODMAN_NATIVE_SOCKETS:
+        candidate = template.format(uid=os.getuid())
+        if os.path.exists(candidate):
+            return candidate
+    return ""
+
+
+def ensure_podman_transport() -> str:
+    """Point podman-py at the unix socket rather than a TCP forward.
+
+    This is not a preference, it is a correctness fix. `PodmanClient.from_env()`
+    will happily pick the TCP port that `podman machine` forwards, and over
+    that forward Podman answers every request EXCEPT the one that matters:
+    the hijacked exec stream comes back with zero bytes. Containers start,
+    exit codes are correct, and every command appears to succeed while
+    producing no output whatsoever.
+
+    Measured on Podman 6.1.1 / API 1.44: over the TCP forward an exec
+    returns `b''` with the right exit code; over the unix socket the same
+    exec returns a correctly framed `\x01...` stdout stream.
+
+    Setting CONTAINER_HOST in this process's environment fixes it for
+    every podman client created afterwards, including the ones the
+    execution backend builds internally.
+
+    Returns the socket in use, or "" if none could be found. An explicit
+    unix:// CONTAINER_HOST from the user is always left alone.
+    """
+    current = os.environ.get("CONTAINER_HOST", "")
+    if current.startswith("unix://"):
+        return current[len("unix://") :]
+    socket_path = podman_socket()
+    if socket_path:
+        os.environ["CONTAINER_HOST"] = f"unix://{socket_path}"
+        return socket_path
+    return ""
+
+
 def _build_client(backend: str) -> Any:
     """Construct a client and prove it can talk. A client object that
     constructs but cannot reach its engine is precisely the failure that
@@ -149,6 +246,9 @@ def _build_client(backend: str) -> Any:
                 "The podman client library is not installed.",
                 "Reinstall the project: `uv sync`.",
             ) from exc
+        # Must happen before the client is built: over a TCP forward,
+        # exec output never arrives. See ensure_podman_transport.
+        ensure_podman_transport()
         try:
             client = PodmanClient.from_env()
             client.ping()
@@ -296,8 +396,16 @@ def probe(backend: str) -> EngineStatus:
     )
     if backend == "podman":
         status.extra["machine"] = _podman_machine_state(binary) or "not reported"
-        host = os.environ.get("CONTAINER_HOST")
-        status.extra["CONTAINER_HOST"] = host or "unset (using podman's own config)"
+        host = os.environ.get("CONTAINER_HOST", "")
+        status.extra["CONTAINER_HOST"] = host or "unset"
+        if host.startswith("unix://"):
+            status.extra["transport"] = "unix socket (exec output works)"
+        else:
+            status.extra["transport"] = (
+                "NOT a unix socket — exec output will be empty over a TCP "
+                "forward. Export CONTAINER_HOST as shown below."
+            )
+            status.fix = _PODMAN_MACHINE_FIX
     return status
 
 

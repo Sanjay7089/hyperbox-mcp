@@ -20,7 +20,9 @@ create_sandbox()  →  run(code)  →  run(fixed code)  →  destroy_sandbox()
 - **Generated code runs somewhere other than your MCP client's process.**
   No access to your filesystem, your project, or the container engine.
 - **Resource limits are set by the server**, not negotiable by the model:
-  1 GB memory, 1 CPU, 128 processes, a 60-second ceiling, capped output.
+  1 GB memory, 1 CPU, 128 processes, a 60-second ceiling, capped output —
+  and they are read back off the real container, so a sandbox is never
+  described as limited when it is not.
 - **The network is sealed** before any submitted code runs. Declared
   dependencies install in a separate step that closes again afterwards.
 - **Cleanup survives restarts.** Ownership lives in a registry outside
@@ -97,8 +99,9 @@ CLI — MCP clients often launch servers with a trimmed environment.
 There is also a `hyperbox://capabilities` resource publishing the exact
 limits, so an agent can read them instead of discovering them by failing.
 
-**Language:** `python`. **Engine:** Docker. Podman is wired up but
-**experimental** — see [limits](#what-it-does-not-do).
+**Language:** `python`. **Engines:** Docker and Podman, both passing the
+full suite against real containers. `auto` picks whichever is running,
+preferring Docker.
 
 Within one sandbox the filesystem and installed packages persist between
 runs; variables do not, because each run is a fresh process. Write what
@@ -119,10 +122,6 @@ Be clear-eyed about the boundary:
   boundary, `no-new-privileges` and the resource limits are what confine
   it. The reasoning is in
   [docs/security-model.md](docs/security-model.md).
-- **Podman is experimental.** Its client returns no output at all on the
-  versions tested, so a sandbox would report success with empty results.
-  HyperBox refuses to start one rather than lie about it; `auto` prefers
-  Docker.
 - **Dependencies come from the public index** and are not vetted.
 
 If you need a hard boundary for genuinely adversarial code, you want a VM

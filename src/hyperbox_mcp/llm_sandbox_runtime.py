@@ -96,13 +96,15 @@ _NOOP = {"python": "pass"}
 
 #: Proof that results actually round-trip out of this container.
 #:
-#: This exists because of a measured failure: on Podman, podman-py's
-#: exec_run returns no output at all in every mode (demux on or off,
-#: streaming or not), and its streaming exit code is None, which the
-#: backend turns into 0. The result is a run that reports success with
-#: empty stdout — a sandbox that silently discards every result it is
-#: asked to produce. An agent reading that would conclude its code
-#: printed nothing, and go on to debug code that was fine.
+#: This exists because of a measured failure: talking to Podman over the
+#: TCP port its machine forwards, every exec returns the correct exit
+#: code and zero bytes of output. The result is a run that reports
+#: success with empty stdout — a sandbox that silently discards every
+#: result it is asked to produce. An agent reading that would conclude
+#: its code printed nothing, and go on to debug code that was fine.
+#: engine.ensure_podman_transport now prevents that transport from being
+#: chosen; this check stays because it catches the whole class, and it
+#: is what caught this one.
 #:
 #: So every sandbox proves it can return a result before it is handed
 #: out, on every backend. One extra exec at creation is cheap; a
@@ -442,9 +444,11 @@ class LLMSandboxRuntime:
             f"'{CANARY_MARKER}' and returned exit code {result.exit_code} with "
             f"stdout={result.stdout!r} stderr={result.stderr!r}. Every run in "
             "this sandbox would report success with empty output, so it is "
-            "refused rather than handed back. This is a known limitation of "
-            "the podman client against some Podman versions; use "
-            "backend='docker' (or 'auto') instead."
+            "refused rather than handed back. On Podman this means the "
+            "client is talking over a TCP forward instead of the machine's "
+            "unix socket: export CONTAINER_HOST=\"unix://$(podman machine "
+            "inspect --format '{{.ConnectionInfo.PodmanSocket.Path}}')\" "
+            "and retry, or use backend='docker'."
         )
 
     def _close_quietly(self, session) -> None:
