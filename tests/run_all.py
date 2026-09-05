@@ -19,6 +19,9 @@ sys.path.insert(0, "src")
 from hyperbox_mcp import engine, policy  # noqa: E402
 
 SUITES = (
+    # First: the host side. If this fails, nothing below can pass, and
+    # the reason is the platform rather than the sandbox.
+    ("platform portability", "tests/verify_platform.py"),
     ("lifecycle + MCP surface", "tests/verify.py"),
     ("ownership across processes", "tests/verify_registry.py"),
     ("enforced resource policy", "tests/verify_limits.py"),

@@ -29,7 +29,6 @@ Two invariants make the lifecycle race-safe:
 
 from __future__ import annotations
 
-import fcntl
 import os
 import sqlite3
 import time
@@ -38,6 +37,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
+from hyperbox_mcp.filelock import FileLock
 from hyperbox_mcp.policy import DEFAULT_TTL_SECONDS
 
 STATE_CREATING = "creating"
@@ -133,9 +133,10 @@ class Registry:
         """Exclusive lock for one sandbox, held across processes.
 
         A separate lock file per sandbox, so work on one sandbox never
-        blocks another. flock is released by the OS if the holder dies,
-        which matters here: a killed server must not wedge a sandbox
-        permanently.
+        blocks another. The lock is owned by an open file handle, so the
+        OS releases it if the holder dies — a killed server must not
+        wedge a sandbox permanently. See filelock.py for how each
+        platform provides that.
 
         Ids are validated upstream, but never trust one straight into a
         path.
@@ -145,16 +146,8 @@ class Registry:
         safe = "".join(ch for ch in sandbox_id if ch.isalnum() or ch in "-_")
         if not safe:
             raise ValueError(f"Unusable sandbox id for locking: {sandbox_id!r}")
-        lock_path = lock_dir / f"{safe}.lock"
-        fh = lock_path.open("w")
-        try:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        with FileLock(lock_dir / f"{safe}.lock"):
             yield
-        finally:
-            try:
-                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-            finally:
-                fh.close()
 
     # --- records ------------------------------------------------------
 

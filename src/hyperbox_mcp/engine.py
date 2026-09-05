@@ -24,6 +24,7 @@ import glob
 import os
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -50,6 +51,8 @@ class UnsupportedBackendError(ValueError):
     pass
 
 
+WINDOWS = sys.platform == "win32"
+
 # Podman ships outside PATH on macOS often enough that a "not installed"
 # diagnosis would be wrong. These are the real install locations, checked
 # only to produce an accurate message.
@@ -57,6 +60,21 @@ _PODMAN_BIN_CANDIDATES = (
     "/opt/podman/bin/podman",
     "/opt/homebrew/bin/podman",
     "/usr/local/bin/podman",
+    # Windows installs, for the same reason.
+    r"C:\Program Files\RedHat\Podman\podman.exe",
+    r"C:\Program Files\Podman\podman.exe",
+)
+
+# Windows has no unix sockets; both engines are reached over named pipes.
+# docker-py speaks npipe (docker/transport/npipeconn.py). podman-py does
+# NOT — its only transports are unix, ssh and tcp — so Podman on Windows
+# is reached through the Docker-compatible API it already serves, using
+# the docker client against Podman's own pipe. Podman exists to be API
+# compatible; this is that compatibility being used as intended.
+_WINDOWS_DOCKER_PIPES = (r"npipe:////./pipe/docker_engine",)
+_WINDOWS_PODMAN_PIPES = (
+    r"npipe:////./pipe/podman-machine-default",
+    r"npipe:////./pipe/podman",
 )
 
 _DOCKER_FIX = (
@@ -178,10 +196,12 @@ def podman_socket(binary: str = "") -> str:
     if fallbacks:
         return fallbacks[0]
 
-    for template in _PODMAN_NATIVE_SOCKETS:
-        candidate = template.format(uid=os.getuid())
-        if os.path.exists(candidate):
-            return candidate
+    # POSIX-only: Windows has no unix sockets, and getuid does not exist.
+    if not WINDOWS:
+        for template in _PODMAN_NATIVE_SOCKETS:
+            candidate = template.format(uid=os.getuid())
+            if os.path.exists(candidate):
+                return candidate
     return ""
 
 
@@ -206,6 +226,10 @@ def ensure_podman_transport() -> str:
     Returns the socket in use, or "" if none could be found. An explicit
     unix:// CONTAINER_HOST from the user is always left alone.
     """
+    if WINDOWS:
+        # Nothing to choose: there is no unix socket to prefer, and the
+        # named-pipe route goes through the docker client instead.
+        return ""
     current = os.environ.get("CONTAINER_HOST", "")
     if current.startswith("unix://"):
         return current[len("unix://") :]
@@ -216,10 +240,56 @@ def ensure_podman_transport() -> str:
     return ""
 
 
+def client_flavour(backend: str) -> str:
+    """Which client library actually talks to this backend.
+
+    Everywhere except Windows this is the backend's own name. On Windows
+    Podman is reached through its Docker-compatible API, because
+    podman-py has no named-pipe transport at all — so the *client* is
+    docker-py even though the *engine* is Podman.
+    """
+    if backend == "podman" and WINDOWS:
+        return "docker"
+    return backend
+
+
+def _docker_client(base_url: str | None = None) -> Any:
+    """A pinged docker-py client, optionally against an explicit URL."""
+    import docker
+
+    client = (
+        docker.DockerClient(base_url=base_url) if base_url else docker.from_env()
+    )
+    client.ping()
+    return client
+
+
+def _build_windows_podman_client() -> Any:
+    """Reach Podman on Windows over its Docker-compatible named pipe."""
+    tried: list[str] = []
+    for pipe in _WINDOWS_PODMAN_PIPES:
+        try:
+            return _docker_client(pipe)
+        except Exception as exc:  # noqa: BLE001 - try the next pipe
+            tried.append(f"{pipe} ({type(exc).__name__})")
+    raise EngineUnavailableError(
+        "Podman is not reachable on any known named pipe: "
+        + ", ".join(tried)
+        + ".",
+        "Start the Podman machine: `podman machine start` (first time: "
+        "`podman machine init`). Podman Desktop must be running, and its "
+        "Docker-compatible endpoint enabled — that is the only transport "
+        "the Python client can use on Windows.",
+    )
+
+
 def _build_client(backend: str) -> Any:
     """Construct a client and prove it can talk. A client object that
     constructs but cannot reach its engine is precisely the failure that
     produced empty output with exit code 0."""
+    if backend == "podman" and WINDOWS:
+        return _build_windows_podman_client()
+
     if backend == "docker":
         try:
             import docker
@@ -229,14 +299,12 @@ def _build_client(backend: str) -> Any:
                 "Reinstall the project: `uv sync`.",
             ) from exc
         try:
-            client = docker.from_env()
-            client.ping()
+            return _docker_client()
         except Exception as exc:  # noqa: BLE001 - any failure here is "unreachable"
             raise EngineUnavailableError(
                 f"Docker is not reachable ({type(exc).__name__}: {exc}).",
                 _DOCKER_FIX,
             ) from exc
-        return client
 
     if backend == "podman":
         try:
@@ -291,6 +359,7 @@ def reset_clients() -> None:
 def _not_found_types(backend: str) -> tuple[type[BaseException], ...]:
     """The exception types that mean, authoritatively, 'no such thing'."""
     types: list[type[BaseException]] = []
+    backend = client_flavour(backend)
     if backend == "docker":
         try:
             from docker.errors import ImageNotFound, NotFound
@@ -334,6 +403,19 @@ def classify(backend: str, exc: BaseException, what: str) -> BaseException:
         f"({type(exc).__name__}: {exc}).",
         fix,
     )
+
+
+def session_kwargs(backend: str) -> dict:
+    """Extra arguments the execution backend needs for this engine.
+
+    On Windows a Podman sandbox runs through llm-sandbox's Docker session
+    class with a client pointed at Podman's pipe, because that is the
+    only transport available. Everywhere else the backend speaks for
+    itself and this is empty.
+    """
+    if backend == "podman" and WINDOWS:
+        return {"session_backend": "docker", "client": client("podman")}
+    return {}
 
 
 def get_container(backend: str, ref: str) -> Any:
@@ -396,6 +478,12 @@ def probe(backend: str) -> EngineStatus:
     )
     if backend == "podman":
         status.extra["machine"] = _podman_machine_state(binary) or "not reported"
+        if WINDOWS:
+            status.extra["transport"] = (
+                "named pipe via Podman's Docker-compatible API — the only "
+                "transport the Python client supports on Windows"
+            )
+            return status
         host = os.environ.get("CONTAINER_HOST", "")
         status.extra["CONTAINER_HOST"] = host or "unset"
         if host.startswith("unix://"):

@@ -178,7 +178,7 @@ class LLMSandboxRuntime:
         configured and is not, which is why every one of them is read
         back off the container afterwards.
         """
-        if backend == "podman":
+        if engine.client_flavour(backend) == "podman":
             return {
                 "cpu_period": CPU_PERIOD,
                 "cpu_quota": CPU_QUOTA,
@@ -353,11 +353,14 @@ class LLMSandboxRuntime:
         # to attach, so an unreachable engine surfaces as itself rather
         # than as a confusing backend error.
         self._container(handle)
+        extra = engine.session_kwargs(handle.backend)
+        session_backend = extra.pop("session_backend", handle.backend)
         try:
             session = create_session(
-                backend=_BACKENDS[handle.backend],
+                backend=_BACKENDS[session_backend],
                 lang=_LANGUAGES[handle.language],
                 container_id=container_ref,
+                **extra,
             )
             session.open()
         except _BACKEND_EXCEPTIONS as exc:
@@ -378,11 +381,17 @@ class LLMSandboxRuntime:
         # that engine's own actionable fix rather than a generic error.
         engine.client(backend)
 
+        # On Windows a Podman sandbox runs through the Docker session
+        # class against Podman's Docker-compatible pipe; everywhere else
+        # this is empty and the backend speaks for itself.
+        extra = engine.session_kwargs(backend)
+        session_backend = extra.pop("session_backend", backend)
         try:
             session = create_session(
-                backend=_BACKENDS[backend],
+                backend=_BACKENDS[session_backend],
                 lang=_LANGUAGES[language],
                 runtime_configs=self._runtime_configs(sandbox_id, backend),
+                **extra,
             )
             session.open()
         except _BACKEND_EXCEPTIONS as exc:

@@ -96,7 +96,8 @@ def check_environment(report: Report) -> None:
             name="Python interpreter",
             status=status,
             detail=(
-                f"Python {py} on {platform.system()} {platform.machine()}; "
+                f"Python {py} on {platform.system()} {platform.machine()} "
+                f"({'named pipes' if engine.WINDOWS else 'unix sockets'}); "
                 f"hyperbox-mcp {_version('hyperbox-mcp')}, "
                 f"llm-sandbox {_version('llm-sandbox')}, "
                 f"fastmcp {_version('fastmcp')}"

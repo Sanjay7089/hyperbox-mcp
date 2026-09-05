@@ -42,6 +42,7 @@ lock is already stale.
 ## Testing
 
 ```bash
+uv run python tests/verify_platform.py    # host side only, no container
 uv run python tests/run_all.py docker     # every suite, one summary
 uv run python tests/run_all.py podman     # second engine, also supported
 
@@ -136,9 +137,10 @@ src/hyperbox_mcp/
   registry.py        durable ownership, shared across processes
   runtime.py         the Runtime protocol
   llm_sandbox_runtime.py   the one implementation of it
+  filelock.py        cross-process locking, POSIX and Windows
   doctor.py, cli.py  terminal subcommands
 tests/               acceptance suites, all against real containers
-docs/                architecture, security model, troubleshooting, this
+docs/                architecture, security, troubleshooting, deployment
 ```
 
 ## Manual check before releasing

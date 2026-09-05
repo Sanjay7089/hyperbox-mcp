@@ -1,0 +1,210 @@
+"""Platform portability checks — the parts that differ off Linux/macOS.
+
+    python tests/verify_platform.py
+
+Everything here is about the HOST side: file locking, engine discovery,
+transport selection and path handling. It needs no container for most
+cases, so it is the first thing to run on a machine HyperBox has never
+been tried on. `hyperbox doctor` covers the container round trip.
+
+This exists because the code has POSIX habits that are easy to
+reintroduce: `fcntl`, `os.getuid`, unix socket paths. Each one of those
+is a crash on Windows rather than a degradation, so they get a test.
+"""
+
+from __future__ import annotations
+
+import os
+import platform
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from pathlib import Path
+
+sys.path.insert(0, "src")
+
+from hyperbox_mcp import engine, policy  # noqa: E402
+from hyperbox_mcp.filelock import WINDOWS, FileLock  # noqa: E402
+from hyperbox_mcp.registry import Registry  # noqa: E402
+
+results: list[tuple[str, bool, str]] = []
+
+
+def check(name: str, condition: bool, detail: str = "") -> None:
+    results.append((name, bool(condition), detail))
+    print(f"{'PASS' if condition else 'FAIL'}  {name}", flush=True)
+    if detail:
+        print(f"        {detail}")
+
+
+def main() -> int:
+    print(f"--- platform checks on {platform.system()} {platform.machine()} ---")
+    print(f"    Python {platform.python_version()}, "
+          f"lock backend: {'msvcrt' if WINDOWS else 'fcntl'}\n")
+
+    # --- 1. the package imports at all ------------------------------
+    #
+    # On Windows this is the whole ballgame: a POSIX-only import here
+    # means the MCP server cannot start, and the client shows no tools
+    # with no useful error.
+    try:
+        import hyperbox_mcp.server  # noqa: F401
+
+        check("the MCP server module imports on this platform", True)
+    except Exception as exc:  # noqa: BLE001
+        check(
+            "the MCP server module imports on this platform",
+            False,
+            f"{type(exc).__name__}: {exc}",
+        )
+        return summarize()
+
+    # --- 2. the lock actually excludes, in separate processes --------
+    lock_path = Path(tempfile.mkdtemp()) / "portable.lock"
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import sys,time; sys.path.insert(0,'src');"
+            "from hyperbox_mcp.filelock import FileLock;"
+            f"lock=FileLock(r'{lock_path}')\n"
+            "with lock:\n"
+            "    print('held', flush=True); time.sleep(3)",
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert holder.stdout is not None
+    holder.stdout.readline()  # wait until the child really holds it
+    started = time.time()
+    with FileLock(lock_path, timeout=30):
+        waited = time.time() - started
+    holder.wait(timeout=30)
+    check(
+        "a lock held by another PROCESS blocks this one",
+        waited > 1.5,
+        f"waited {waited:.1f}s for a lock the child held for 3s",
+    )
+
+    # --- 3. the lock survives its holder being killed ----------------
+    #
+    # The property that matters most: a server killed mid-operation must
+    # not wedge a sandbox forever. Both platforms get this from the OS
+    # releasing the handle, not from cleanup code.
+    victim = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import sys,time; sys.path.insert(0,'src');"
+            "from hyperbox_mcp.filelock import FileLock;"
+            f"lock=FileLock(r'{lock_path}')\n"
+            "with lock:\n"
+            "    print('held', flush=True); time.sleep(60)",
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert victim.stdout is not None
+    victim.stdout.readline()
+    victim.kill()
+    victim.wait(timeout=15)
+    started = time.time()
+    try:
+        with FileLock(lock_path, timeout=20):
+            reclaimed = True
+    except Exception as exc:  # noqa: BLE001
+        reclaimed = False
+        print(f"        {type(exc).__name__}: {exc}")
+    check(
+        "a killed holder's lock is released by the OS",
+        reclaimed,
+        f"reclaimed in {time.time() - started:.1f}s after SIGKILL",
+    )
+
+    # --- 4. state lives somewhere writable, off the repo -------------
+    try:
+        reg = Registry()
+        reg.reserve("ffffffffffff", language="python", backend="docker")
+        found = reg.get("ffffffffffff")
+        reg.remove("ffffffffffff")
+        ok = found is not None and not found.ready
+    except Exception as exc:  # noqa: BLE001
+        ok, found = False, None
+        print(f"        {type(exc).__name__}: {exc}")
+    check(
+        "the registry opens and round-trips a record",
+        ok,
+        f"state dir: {Registry().dir}",
+    )
+
+    # --- 5. engine discovery, without POSIX assumptions --------------
+    statuses = {b: engine.probe(b) for b in policy.BACKENDS}
+    for backend, status in statuses.items():
+        check(
+            f"{backend} probe returns a verdict without raising",
+            isinstance(status.reachable, bool),
+            (
+                f"reachable={status.reachable} version={status.version or '-'} "
+                f"transport={status.extra.get('transport', 'n/a')}"
+            ),
+        )
+
+    reachable = [b for b, s in statuses.items() if s.reachable]
+    check(
+        "at least one container engine is reachable",
+        bool(reachable),
+        f"reachable: {', '.join(reachable) or 'NONE — see the fix lines above'}",
+    )
+
+    # --- 6. the Windows-specific routing is correct ------------------
+    flavour = engine.client_flavour("podman")
+    if WINDOWS:
+        check(
+            "Podman is routed through the Docker-compatible client",
+            flavour == "docker"
+            and engine.session_kwargs("podman").get("session_backend") == "docker"
+            if "podman" in reachable
+            else flavour == "docker",
+            "podman-py has no named-pipe transport, so Windows uses "
+            "Podman's Docker-compatible API",
+        )
+    else:
+        check(
+            "Podman uses its own client off Windows",
+            flavour == "podman" and not engine.session_kwargs("podman"),
+            f"client_flavour('podman') = {flavour}",
+        )
+
+    # --- 7. no POSIX-only calls left on an import path ---------------
+    offenders = []
+    for path in Path("src/hyperbox_mcp").glob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        for needle in ("import fcntl", "os.getuid(", "import pwd", "import termios"):
+            if needle in text and "WINDOWS" not in text and "filelock" not in path.name:
+                offenders.append(f"{path.name}: {needle}")
+    check(
+        "no unguarded POSIX-only calls in the package",
+        not offenders,
+        "; ".join(offenders) or "checked fcntl, getuid, pwd, termios",
+    )
+
+    return summarize()
+
+
+def summarize() -> int:
+    failed = [r for r in results if not r[1]]
+    print(f"\n{len(results) - len(failed)}/{len(results)} passed")
+    if failed:
+        print("\nThis machine is NOT ready. Fix the FAIL lines, then run:")
+        print("  hyperbox doctor")
+        print("  python tests/run_all.py docker")
+    else:
+        print("\nHost side is portable here. Next: `hyperbox doctor`, then")
+        print("`python tests/run_all.py docker` (and `podman`).")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
