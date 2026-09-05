@@ -17,6 +17,10 @@ def usage() -> str:
         "  hyperbox doctor          Check this machine can run sandboxes\n"
         "    --pull                 Also pull the sandbox image if missing\n"
         "    --quick                Skip the live create/run/destroy check\n"
+        "  hyperbox config          Print a ready-to-paste MCP client config\n"
+        "    --format json          mcpServers block (Claude Desktop, generic)\n"
+        "    --format cursor        servers block (.vscode/mcp.json)\n"
+        "    --format yaml          Codeaira mcpservers/config.yaml\n"
         "  hyperbox --version       Print the installed version\n"
     )
 
@@ -48,6 +52,31 @@ def dispatch(argv: list[str]) -> int:
         from hyperbox_mcp.doctor import run_doctor
 
         return run_doctor(pull="--pull" in rest, live="--quick" not in rest)
+
+    if command == "config":
+        fmt = "json"
+        rest_iter = list(rest)
+        while rest_iter:
+            arg = rest_iter.pop(0)
+            if arg == "--format":
+                if not rest_iter:
+                    print("hyperbox config: --format needs a value\n")
+                    print(usage())
+                    return 2
+                fmt = rest_iter.pop(0)
+            elif arg.startswith("--format="):
+                fmt = arg.split("=", 1)[1]
+            else:
+                print(f"hyperbox config: unknown option {arg!r}\n")
+                print(usage())
+                return 2
+        if fmt not in {"json", "cursor", "yaml"}:
+            print(f"hyperbox config: unknown format {fmt!r}. "
+                  "Use json, cursor or yaml.\n")
+            return 2
+        from hyperbox_mcp.clientconfig import print_config
+
+        return print_config(fmt)
 
     print(usage())
     return 2

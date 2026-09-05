@@ -14,6 +14,7 @@ is a crash on Windows rather than a degradation, so they get a test.
 
 from __future__ import annotations
 
+import json
 import os
 import platform
 import subprocess
@@ -238,6 +239,55 @@ def main() -> int:
         "dropped connections are retried and real outages are not",
         not wrong,
         "; ".join(wrong) or f"{len(stale_cases)} cases classified correctly",
+    )
+
+    # --- 6d. the generated client config is valid and complete -------
+    #
+    # This is the file a colleague pastes into an editor. Its failure
+    # mode is silent — a bad path or a stray backslash produces "no tools
+    # appeared" with no error — so it is generated rather than typed, and
+    # the generation is checked here.
+    from hyperbox_mcp import clientconfig
+
+    ok = True
+    detail = []
+    for fmt, key in (("json", "mcpServers"), ("cursor", "servers")):
+        text = clientconfig.render(fmt)
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError as exc:
+            ok = False
+            detail.append(f"{fmt}: {exc}")
+            continue
+        entry = (parsed.get(key) or {}).get("hyperbox") or {}
+        if not entry.get("command") or entry.get("args") != []:
+            ok = False
+            detail.append(f"{fmt}: bad entry {entry}")
+        if not (entry.get("env") or {}).get("PATH"):
+            ok = False
+            detail.append(f"{fmt}: no PATH")
+    check(
+        "generated client configs are valid JSON with a launchable command",
+        ok,
+        "; ".join(detail) or "json and cursor formats both parse",
+    )
+
+    yaml_text = clientconfig.render("yaml")
+    check(
+        "the yaml config has the shape Codeaira expects",
+        yaml_text.startswith("mcpServers:") and "- name: hyperbox" in yaml_text,
+        yaml_text.splitlines()[1] if "\n" in yaml_text else yaml_text,
+    )
+
+    # The escaping this exists for. A Windows path carries backslashes and
+    # a space; emitted naively it is not parseable at all, which is the
+    # error colleagues hit by hand.
+    win = r"C:\Users\Sanjay Jat\.local\bin\hyperbox.exe"
+    check(
+        "Windows paths survive a round trip through both serialisers",
+        json.loads(json.dumps(win)) == win
+        and json.loads(clientconfig._yaml_scalar(win)) == win,
+        "backslashes and spaces escape correctly for JSON and YAML",
     )
 
     # --- 7. no POSIX-only calls left on an import path ---------------

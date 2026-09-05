@@ -553,7 +553,9 @@ def main() -> None:
     is using.
     """
     argv = sys.argv[1:]
-    if argv and argv[0] in {"doctor", "--version", "-V", "help", "--help", "-h"}:
+    if argv and argv[0] in {
+        "doctor", "config", "--version", "-V", "help", "--help", "-h"
+    }:
         from hyperbox_mcp.cli import dispatch
 
         raise SystemExit(dispatch(argv))

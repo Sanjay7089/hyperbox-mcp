@@ -92,6 +92,32 @@ re-resolves dependencies on every launch.
 
 ## Wire it into an MCP client
 
+Let the tool write the config rather than typing paths by hand:
+
+```bash
+hyperbox config                  # Claude Desktop and most clients
+hyperbox config --format cursor  # Cursor / VS Code, .vscode/mcp.json
+hyperbox config --format yaml    # Codeaira
+```
+
+It fills in its own absolute path and a `PATH` containing the container
+CLI it detected, escaped correctly for the format. Guidance goes to
+stderr and the config to stdout, so this writes a clean file:
+
+```bash
+hyperbox config --format cursor > .vscode/mcp.json
+```
+
+Worked examples per client are in
+[client-examples/](client-examples/README.md).
+
+**No checkout is required to run the server.** Nothing in the package
+reads a repository file at runtime, so once installed as a tool the clone
+can be moved or deleted. A config of the form
+`uv run --project <repo> hyperbox` still works but ties every client to
+that folder and re-resolves the environment on each launch; `hyperbox
+config` warns when it detects it is running that way.
+
 Any client that speaks stdio takes the same shape. Use an **absolute
 path** to the executable and give it a `PATH` that includes your
 container CLI — MCP clients commonly launch servers with a trimmed
@@ -131,12 +157,17 @@ and that `PATH`.
 
 1. **A container engine running** — Docker Desktop, or Podman with its
    machine started. Both are supported.
-2. **The sandbox image**, pulled on first use (~1.6 GB). To avoid a slow
-   first call, pre-pull during provisioning:
+2. **The sandbox image, pulled during provisioning — not optional.**
 
    ```bash
    hyperbox doctor --pull
    ```
+
+   The image is several gigabytes. No MCP client will wait for that
+   inside a tool call: Codeaira defaults to a 30-second timeout and
+   others are not much longer, so a first `create_sandbox` on a cold
+   machine is cut off partway through the download. Pulling once during
+   setup removes the problem for every client, whatever its timeout.
 
 3. Nothing else. No Python on `PATH` is required by the client: the tool
    install carries its own interpreter.
