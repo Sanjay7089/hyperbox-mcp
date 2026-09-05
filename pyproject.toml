@@ -1,6 +1,6 @@
 [project]
 name = "hyperbox-mcp"
-version = "0.1.0"
+version = "0.1.1"
 description = "MCP server that lets any agent run code in a disposable Docker/Podman container before it touches your real project."
 readme = "README.md"
 requires-python = ">=3.11"

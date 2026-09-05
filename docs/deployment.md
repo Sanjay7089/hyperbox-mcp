@@ -5,6 +5,29 @@ builds to a single wheel that installs identically on macOS, Linux and
 Windows. Nothing here needs a package index, a container registry of your
 own, or network access beyond the sandbox image.
 
+## Installing a tagged build
+
+The repository is private, so every route below needs GitHub access to
+it. Nothing is published to a public index.
+
+**From the repository, with git** — simplest if the machine already has
+credentials for the repo:
+
+```bash
+uv tool install "git+https://github.com/Sanjay7089/hyperbox-mcp@v0.1.1"
+hyperbox doctor
+```
+
+**From a release asset**, for a machine without git access:
+
+```bash
+gh release download v0.1.1 --repo Sanjay7089/hyperbox-mcp --pattern "*.whl"
+uv tool install hyperbox_mcp-0.1.1-py3-none-any.whl
+```
+
+Both put a single `hyperbox` executable on the path and carry their own
+interpreter. Upgrading is the same command with `--force` and a new tag.
+
 ## Build one artifact
 
 ```bash
