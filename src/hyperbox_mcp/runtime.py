@@ -65,9 +65,22 @@ class Runtime(Protocol):
     through this interface — no llm-sandbox types, no docker-py objects.
     """
 
-    def create(self, language: str, backend: str) -> SandboxHandle:
-        """Create and open a persistent sandbox. Raises on unsupported
-        language/backend BEFORE allocating anything."""
+    def create(
+        self, language: str, backend: str, sandbox_id: str
+    ) -> SandboxHandle:
+        """Create and open a persistent sandbox under the given id.
+
+        The id is supplied by the caller, not minted here, so the caller
+        can record its intent to create BEFORE a container exists. That
+        ordering is what stops a concurrent garbage collection from
+        reclaiming a container whose registration has not landed yet.
+        The id must be baked into the container's labels; `gc` matches
+        on them.
+
+        Raises on an unsupported language/backend BEFORE allocating
+        anything, and must not return a handle for a sandbox whose
+        resource limits the engine did not actually apply.
+        """
         ...
 
     def run(
@@ -83,18 +96,26 @@ class Runtime(Protocol):
         ...
 
     def destroy(self, handle: SandboxHandle) -> None:
-        """Tear down the sandbox. Idempotent — destroying an already-gone
-        sandbox is a no-op success, not an error.
+        """Tear down the sandbox.
 
-        Must confirm the underlying container is genuinely gone rather
-        than merely absent from this process's memory. Reporting a
-        still-running container as gone is how orphans accumulate.
+        Returns normally ONLY when the container is confirmed gone —
+        either removed by this call, or reported absent by the engine
+        itself. Destroying an already-gone sandbox is a success.
+
+        Raises when the engine cannot be reached, because "I could not
+        ask" is not "it is gone". Returning success there is how
+        orphaned containers accumulate: the caller drops its record while
+        the container keeps running.
         """
         ...
 
     def alive(self, handle: SandboxHandle) -> bool:
-        """Whether the sandbox's container actually exists and runs right
-        now — asked of the engine, not of in-process bookkeeping."""
+        """Whether the sandbox's container exists and runs right now —
+        asked of the engine, not of in-process bookkeeping.
+
+        Raises rather than returning False when the engine cannot be
+        reached. False must mean the engine answered and said no.
+        """
         ...
 
     def gc(self, known_ids: set[str]) -> list[str]:
@@ -103,6 +124,8 @@ class Runtime(Protocol):
 
         Only ever touches containers carrying our own labels. A container
         we did not create is never a candidate, no matter how orphaned it
-        looks — that judgement is not ours to make.
+        looks — that judgement is not ours to make. A container younger
+        than the grace period is also never a candidate: another process
+        may be creating it right now.
         """
         ...

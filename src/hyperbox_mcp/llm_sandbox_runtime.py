@@ -1,40 +1,46 @@
 """The llm-sandbox implementation of the Runtime protocol.
 
 THIS IS THE ONLY FILE ALLOWED TO IMPORT llm_sandbox. Every name and
-signature below was verified directly against the installed package
-(not assumed from docs) — see DESIGN.md's decision log:
+signature below was verified against the installed package rather than
+assumed from its docs:
 
-- create_session(backend=SandboxBackend.X, lang=SupportedLanguage.Y)
-  returns a session with explicit .open() / .close() (verified present),
-  so we can hold it open across many .run() calls — a persistent
-  sandbox, not a one-shot context manager.
+- create_session(backend=..., lang=...) returns a session with explicit
+  .open() / .close(), so one sandbox stays open across many .run() calls.
 - .run(code, libraries=..., timeout=...) -> ConsoleOutput with
   .stdout / .stderr / .exit_code.
 - Top-level exceptions actually exported: SandboxError (base),
   ContainerError, ResourceError, SecurityError, ValidationError.
-  (MissingDependencyError is NOT top-level — do not import it.)
-- SandboxTimeoutError is NOT top-level either; it lives in
-  llm_sandbox.exceptions and subclasses SandboxError, so it must be
-  caught BEFORE the generic backend tuple or it disappears into it.
-- create_session(container_id=...) attaches to an EXISTING container
-  (_connect_to_existing_container, docker.py:287-312) and starts it if
-  stopped. Verified by running code through a second session attached to
-  a container the first session created. This is what makes a sandbox
-  survive the process that made it.
-- runtime_configs is forwarded verbatim into containers.create()
-  (docker.py:378 -> 33), so labels/mem_limit/nano_cpus/pids_limit all
-  land in HostConfig. Verified: labels present, Memory=536870912,
-  NanoCpus=1000000000, PidsLimit=128.
-- Verified against a real container: each .run() is a fresh process in
-  the SAME container (differing os.getpid(), identical nodename). The
-  filesystem and pip-installed packages persist between runs;
-  interpreter memory does not.
-- There is NO SupportedLanguage for bash/shell. Not our concern here.
+  SandboxTimeoutError is NOT top-level; it lives in llm_sandbox.exceptions
+  and subclasses SandboxError, so it must be caught BEFORE the generic
+  tuple or it disappears into it.
+- create_session(container_id=...) attaches to an EXISTING container and
+  starts it if stopped. This is what lets a sandbox survive the process
+  that made it.
+- runtime_configs is forwarded verbatim into containers.create(), so
+  labels / mem_limit / nano_cpus / pids_limit / tmpfs / security_opt all
+  land in the real HostConfig. Asserted after creation, not trusted.
+- Each .run() is a fresh process in the SAME container. The filesystem
+  and installed packages persist between runs; interpreter memory does
+  not.
+
+Measured limits of hardening this backend (see docs/security-model.md):
+
+- A non-root `user` makes the container unusable. llm-sandbox provisions
+  a virtualenv at /sandbox/.sandbox-venv during environment setup, which
+  needs root in these images; as uid 1000 every subsequent exec fails
+  with 127 because the interpreter was never created.
+- cap_drop: ["ALL"] breaks it too, even as root: dropping
+  CAP_DAC_OVERRIDE removes root's permission-bypass, so llm-sandbox
+  cannot read the file it just copied into /sandbox (Errno 13).
+Both were tried against a real container and reverted. What survives is
+applied below.
 """
 
 from __future__ import annotations
 
-import uuid
+import re
+import time
+from datetime import datetime, timezone
 
 from llm_sandbox import (
     ContainerError,
@@ -48,18 +54,27 @@ from llm_sandbox import (
 )
 from llm_sandbox.exceptions import SandboxTimeoutError
 
+from hyperbox_mcp import engine
+from hyperbox_mcp.engine import ContainerGoneError, EngineUnavailableError
+from hyperbox_mcp.policy import (
+    GC_GRACE_SECONDS,
+    LABEL_ID,
+    LABEL_MANAGED,
+    MEM_LIMIT,
+    MEM_LIMIT_BYTES,
+    NANO_CPUS,
+    PIDS_LIMIT,
+    SECURITY_OPT,
+    TMPFS,
+)
 from hyperbox_mcp.runtime import ExecResult, SandboxHandle
 
-# These maps hold ONLY what has actually been run against a real
-# container. java/cpp/r are free from llm-sandbox and have snippet sets
-# ready in tests/verify.py, but an entry here is a promise the tool can
-# deliver that environment, so nothing is added until a real verified
-# run passes. See DESIGN.md's tool contract.
 _LANGUAGES = {
     "python": SupportedLanguage.PYTHON,
-    "javascript": SupportedLanguage.JAVASCRIPT,
-    "ruby": SupportedLanguage.RUBY,
-    "go": SupportedLanguage.GO,
+    # javascript / ruby / go are supported by llm-sandbox and have snippet
+    # sets ready in tests/verify.py, but an entry here is a promise the
+    # tool can deliver that environment. They return once each clears the
+    # hardened suite against a real container.
 }
 
 _BACKENDS = {
@@ -67,28 +82,13 @@ _BACKENDS = {
     "podman": SandboxBackend.PODMAN,
 }
 
-# Every container we create carries both labels. GC matches on them and
-# ONLY on them — a container without our label is never ours to remove.
-LABEL_MANAGED = "hyperbox-mcp.managed"
-LABEL_ID = "hyperbox-mcp.id"
-
 # The default network each backend attaches containers to. Docker names
 # it "bridge", Podman names it "podman" — verified against both engines.
 _DEFAULT_NETWORK = {"docker": "bridge", "podman": "podman"}
 
-# Server policy, not an agent's choice. See DESIGN.md.
-MEM_LIMIT = "1g"
-NANO_CPUS = 1_000_000_000  # 1 CPU
-PIDS_LIMIT = 128
-
 # A no-op per language, used to run a dependency install without also
 # running the caller's code while the network is briefly attached.
-_NOOP = {
-    "python": "pass",
-    "javascript": "0;",
-    "ruby": "nil",
-    "go": "package main\nfunc main() {}",
-}
+_NOOP = {"python": "pass"}
 
 _BACKEND_EXCEPTIONS = (
     SandboxError,
@@ -103,27 +103,12 @@ class UnsupportedLanguageError(ValueError):
     pass
 
 
-class UnsupportedBackendError(ValueError):
-    pass
+UnsupportedBackendError = engine.UnsupportedBackendError
 
 
 class SandboxRuntimeError(RuntimeError):
     """Wraps any backend exception so callers never see raw llm-sandbox
     types — keeps the backend replaceable."""
-
-
-def _engine_client(backend: str):
-    """A raw engine client for label queries GC needs. Imported lazily so
-    a missing podman install never breaks the docker path."""
-    if backend == "docker":
-        import docker
-
-        return docker.from_env()
-    if backend == "podman":
-        from podman import PodmanClient
-
-        return PodmanClient.from_env()
-    raise UnsupportedBackendError(f"Unsupported backend '{backend}'")
 
 
 class LLMSandboxRuntime:
@@ -153,6 +138,60 @@ class LLMSandboxRuntime:
                 f"{', '.join(_BACKENDS)}"
             )
 
+    def _runtime_configs(self, sandbox_id: str) -> dict:
+        """Everything the engine must apply. Server policy, start to
+        finish — no part of this comes from a caller."""
+        return {
+            "labels": {LABEL_MANAGED: "true", LABEL_ID: sandbox_id},
+            "mem_limit": MEM_LIMIT,
+            "nano_cpus": NANO_CPUS,
+            "pids_limit": PIDS_LIMIT,
+            "tmpfs": dict(TMPFS),
+            "security_opt": list(SECURITY_OPT),
+        }
+
+    @staticmethod
+    def _assert_policy_applied(attrs: dict, sandbox_id: str) -> None:
+        """Confirm the engine actually applied what we asked for.
+
+        An engine that accepts a config and silently ignores half of it
+        hands back a container we would go on to DESCRIBE as limited.
+        That is the worst failure mode available to this project: the
+        agent is told it is sandboxed and it is not. So the limits are
+        read back off the real container and a mismatch is fatal.
+        """
+        host = attrs.get("HostConfig") or {}
+        config = attrs.get("Config") or {}
+        expected = {
+            "Memory": MEM_LIMIT_BYTES,
+            "NanoCpus": NANO_CPUS,
+            "PidsLimit": PIDS_LIMIT,
+        }
+        wrong = {
+            key: host.get(key)
+            for key, want in expected.items()
+            if host.get(key) != want
+        }
+        labels = config.get("Labels") or {}
+        if labels.get(LABEL_ID) != sandbox_id:
+            wrong["Labels"] = labels.get(LABEL_ID)
+        if wrong:
+            raise SandboxRuntimeError(
+                "The container engine did not apply this server's resource "
+                f"policy for sandbox '{sandbox_id}'. Expected "
+                f"{expected} with label {sandbox_id}, but the container "
+                f"reports {wrong}. Refusing to hand back a sandbox that is "
+                "not actually limited."
+            )
+
+    def _container(self, handle: SandboxHandle):
+        ref = handle.meta.get("container_ref")
+        if not ref:
+            raise ContainerGoneError(
+                f"Sandbox '{handle.sandbox_id}' has no container reference."
+            )
+        return engine.get_container(handle.backend, ref)
+
     # --- network sealing ----------------------------------------------
     #
     # `network_disabled=True` is NOT usable here: it creates the container
@@ -167,12 +206,6 @@ class LLMSandboxRuntime:
     # which the container has a network. No caller-supplied code runs in
     # that window — only llm-sandbox's own environment setup — so nothing
     # an agent submits is ever executed unsealed.
-
-    def _networks(self, handle: SandboxHandle):
-        client = _engine_client(handle.backend)
-        container = client.containers.get(handle.meta["container_ref"])
-        container.reload()
-        return client, container
 
     @staticmethod
     def _attached_networks(container) -> list[str]:
@@ -189,9 +222,13 @@ class LLMSandboxRuntime:
         """Detach every network. Fails closed: if we cannot seal, the
         caller must not be handed a sandbox we claim is sealed."""
         try:
-            client, container = self._networks(handle)
+            client = engine.client(handle.backend)
+            container = self._container(handle)
+            container.reload()
             for name in self._attached_networks(container):
                 client.networks.get(name).disconnect(container)
+        except (EngineUnavailableError, ContainerGoneError):
+            raise
         except Exception as exc:  # noqa: BLE001
             raise SandboxRuntimeError(
                 f"Could not seal network for '{handle.sandbox_id}': "
@@ -205,7 +242,8 @@ class LLMSandboxRuntime:
         either one breaks the other backend, so the name is chosen per
         backend and verified against the engine before use.
         """
-        client, container = self._networks(handle)
+        client = engine.client(handle.backend)
+        container = self._container(handle)
         preferred = _DEFAULT_NETWORK.get(handle.backend, "bridge")
         try:
             network = client.networks.get(preferred)
@@ -233,6 +271,10 @@ class LLMSandboxRuntime:
                 f"No live sandbox '{handle.sandbox_id}' and no container "
                 "reference to reattach to. Create one first."
             )
+        # Confirm the container is really there before llm-sandbox tries
+        # to attach, so an unreachable engine surfaces as itself rather
+        # than as a confusing backend error.
+        self._container(handle)
         try:
             session = create_session(
                 backend=_BACKENDS[handle.backend],
@@ -250,22 +292,19 @@ class LLMSandboxRuntime:
 
     # --- Runtime protocol ---------------------------------------------
 
-    def create(self, language: str, backend: str) -> SandboxHandle:
+    def create(
+        self, language: str, backend: str, sandbox_id: str
+    ) -> SandboxHandle:
         self._validate(language, backend)
+        # Fail on an unreachable engine before allocating anything, with
+        # that engine's own actionable fix rather than a generic error.
+        engine.client(backend)
 
-        # The id is minted before the container so it can be baked into
-        # the labels GC matches on.
-        sandbox_id = uuid.uuid4().hex[:12]
         try:
             session = create_session(
                 backend=_BACKENDS[backend],
                 lang=_LANGUAGES[language],
-                runtime_configs={
-                    "labels": {LABEL_MANAGED: "true", LABEL_ID: sandbox_id},
-                    "mem_limit": MEM_LIMIT,
-                    "nano_cpus": NANO_CPUS,
-                    "pids_limit": PIDS_LIMIT,
-                },
+                runtime_configs=self._runtime_configs(sandbox_id),
             )
             session.open()
         except _BACKEND_EXCEPTIONS as exc:
@@ -276,10 +315,7 @@ class LLMSandboxRuntime:
             # Without a container ref the sandbox cannot outlive this
             # process, which defeats the registry. Fail loudly instead of
             # handing back a handle that silently degrades.
-            try:
-                session.close()
-            except Exception:  # noqa: BLE001 - already failing; don't mask
-                pass
+            self._close_quietly(session)
             raise SandboxRuntimeError(
                 "Backend did not expose a container id; cannot register "
                 "a durable sandbox."
@@ -292,14 +328,28 @@ class LLMSandboxRuntime:
             backend=backend,
             meta={"container_ref": container_ref},
         )
-        # Sealed by default. If this fails the sandbox is destroyed rather
-        # than returned with network access nobody asked for.
+        # Everything past this point either succeeds or takes the
+        # container with it. A half-configured sandbox is never returned.
         try:
+            container = self._container(handle)
+            self._assert_policy_applied(container.attrs, sandbox_id)
             self._seal(handle)
-        except SandboxRuntimeError:
-            self.destroy(handle)
+        except BaseException:
+            self._destroy_quietly(handle)
             raise
         return handle
+
+    def _close_quietly(self, session) -> None:
+        try:
+            session.close()
+        except Exception:  # noqa: BLE001 - already failing; do not mask
+            pass
+
+    def _destroy_quietly(self, handle: SandboxHandle) -> None:
+        try:
+            self.destroy(handle)
+        except Exception:  # noqa: BLE001 - already failing; do not mask
+            pass
 
     def run(
         self,
@@ -323,7 +373,6 @@ class LLMSandboxRuntime:
                     timeout=timeout,
                 )
             except _BACKEND_EXCEPTIONS as exc:
-                self._seal(handle)
                 return ExecResult(
                     stdout="",
                     stderr=f"Dependency install failed: {type(exc).__name__}: {exc}",
@@ -374,7 +423,7 @@ class LLMSandboxRuntime:
     def _explain_sigkill(self, handle: SandboxHandle) -> str:
         """Turn a bare 137 into something actionable."""
         try:
-            _, container = self._networks(handle)
+            container = self._container(handle)
             if container.attrs.get("State", {}).get("OOMKilled"):
                 return (
                     f"Killed (SIGKILL): the sandbox exceeded its memory limit "
@@ -390,26 +439,29 @@ class LLMSandboxRuntime:
         )
 
     def alive(self, handle: SandboxHandle) -> bool:
-        """Ask the engine, not our own bookkeeping."""
-        container_ref = handle.meta.get("container_ref")
-        if not container_ref:
-            return False
+        """Ask the engine, not our own bookkeeping.
+
+        Raises EngineUnavailableError rather than returning False when the
+        engine cannot be reached — False here means the engine answered.
+        """
         try:
-            client = _engine_client(handle.backend)
-            container = client.containers.get(container_ref)
-            return getattr(container, "status", "") == "running"
-        except Exception:  # noqa: BLE001 - absent, unreachable, or gone
+            container = self._container(handle)
+        except ContainerGoneError:
             return False
+        return getattr(container, "status", "") == "running"
 
     def destroy(self, handle: SandboxHandle) -> None:
         """Tear the container down by reference, not by session ownership.
 
-        session.close() only removes a container the session CREATED —
-        `if not self.using_existing_container` (docker.py:418). A process
-        that reattached would therefore detach and leave the container
-        running, which is exactly how orphans accumulated. Destroy means
-        destroy, whichever process is asking, so we close the session for
-        tidiness and then remove the container explicitly.
+        session.close() only removes a container the session CREATED, so a
+        process that reattached would detach and leave the container
+        running — exactly how orphans accumulated. Destroy means destroy,
+        whichever process is asking, so we close the session for tidiness
+        and then remove the container explicitly.
+
+        Returns only on confirmed absence. An unreachable engine raises,
+        so the caller keeps its registry row instead of forgetting a
+        container that may still be running.
         """
         session = self._sessions.pop(handle.sandbox_id, None)
         if session is not None:
@@ -418,17 +470,16 @@ class LLMSandboxRuntime:
             except _BACKEND_EXCEPTIONS:
                 pass  # removal below is the operation that matters
 
-        container_ref = handle.meta.get("container_ref")
-        if not container_ref:
-            return  # nothing durable to remove
         try:
-            client = _engine_client(handle.backend)
-            container = client.containers.get(container_ref)
-        except Exception:  # noqa: BLE001 - already gone, or engine down
-            return
+            container = self._container(handle)
+        except ContainerGoneError:
+            return  # the engine confirmed it: nothing left to remove
+
         try:
             container.remove(force=True)
         except Exception as exc:  # noqa: BLE001
+            if engine.is_not_found(handle.backend, exc):
+                return  # removed by someone else between get and remove
             raise SandboxRuntimeError(
                 f"Failed to remove container for '{handle.sandbox_id}': "
                 f"{type(exc).__name__}: {exc}"
@@ -436,20 +487,28 @@ class LLMSandboxRuntime:
 
     def gc(self, known_ids: set[str]) -> list[str]:
         """Remove our containers whose sandbox_id is unknown to the
-        registry. Matches on our labels only."""
+        registry. Matches on our labels only.
+
+        Best effort by design: an engine that is not installed or not
+        running is skipped rather than failing the sweep, because GC runs
+        at server startup and must never stop the server from serving.
+        """
         reclaimed: list[str] = []
         for backend in _BACKENDS:
             try:
-                client = _engine_client(backend)
-                containers = client.containers.list(
-                    all=True, filters={"label": f"{LABEL_MANAGED}=true"}
+                containers = engine.list_managed(
+                    backend, f"{LABEL_MANAGED}=true"
                 )
-            except Exception:  # noqa: BLE001 - engine absent/unreachable
+            except (EngineUnavailableError, ContainerGoneError):
                 continue
             for container in containers:
                 labels = getattr(container, "labels", None) or {}
                 sandbox_id = labels.get(LABEL_ID)
                 if not sandbox_id or sandbox_id in known_ids:
+                    continue
+                if self._too_young(container):
+                    # Another process may be creating this right now, in
+                    # the window before its registration lands.
                     continue
                 try:
                     container.remove(force=True)
@@ -457,3 +516,37 @@ class LLMSandboxRuntime:
                 except Exception:  # noqa: BLE001 - best effort
                     continue
         return reclaimed
+
+    @staticmethod
+    def _too_young(container) -> bool:
+        """Whether a container is inside the creation grace period.
+
+        Unparseable or missing timestamps return False: an unknown age
+        must not make a container permanently unreclaimable.
+        """
+        created = (container.attrs or {}).get("Created")
+        if not isinstance(created, str) or not created:
+            return False
+        # Engines emit more fractional-second digits than fromisoformat
+        # accepts on 3.11, so the fraction is trimmed to microseconds
+        # while any timezone suffix is preserved.
+        stamp = created.strip().replace("Z", "+00:00")
+        match = re.match(
+            r"^(?P<head>[\dT:-]+)"
+            r"(?:\.(?P<frac>\d+))?"
+            r"(?P<tz>[+-]\d{2}:?\d{2})?$",
+            stamp,
+        )
+        if match:
+            frac = (match.group("frac") or "")[:6]
+            stamp = match.group("head")
+            if frac:
+                stamp += "." + frac.ljust(6, "0")
+            stamp += match.group("tz") or "+00:00"
+        try:
+            born = datetime.fromisoformat(stamp)
+        except ValueError:
+            return False
+        if born.tzinfo is None:
+            born = born.replace(tzinfo=timezone.utc)
+        return (time.time() - born.timestamp()) < GC_GRACE_SECONDS

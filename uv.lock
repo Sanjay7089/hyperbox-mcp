@@ -665,7 +665,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "fastmcp", specifier = ">=4.0.2,<5" },
-    { name = "llm-sandbox", extras = ["docker", "podman"], specifier = ">=0.3" },
+    { name = "llm-sandbox", extras = ["docker", "podman"], specifier = ">=0.3.44,<0.4" },
 ]
 
 [package.metadata.requires-dev]
