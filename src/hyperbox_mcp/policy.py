@@ -26,6 +26,13 @@ LANGUAGES = ("python",)
 
 BACKENDS = ("docker", "podman")
 
+#: Reachable, wired up, and NOT proven. Podman is experimental: on the
+#: versions tested, podman-py's exec_run returns no output at all in any
+#: mode, so results never reach the server. Sandboxes refuse to start on
+#: it rather than answering every run with empty output — see
+#: docs/troubleshooting.md. `auto` prefers docker for this reason.
+EXPERIMENTAL_BACKENDS = ("podman",)
+
 #: Accepted by `create_sandbox`; "auto" resolves to the first reachable
 #: engine. Never a passthrough for arbitrary engine options.
 BACKEND_CHOICES = ("auto", *BACKENDS)
@@ -34,22 +41,41 @@ BACKEND_CHOICES = ("auto", *BACKENDS)
 
 MEM_LIMIT = "1g"
 MEM_LIMIT_BYTES = 1024 * 1024 * 1024
-NANO_CPUS = 1_000_000_000  # 1 CPU
+CPUS = 1.0
 PIDS_LIMIT = 128
 
-#: Bounded scratch space. These are tmpfs, so they are accounted against
-#: the container's memory cgroup — a full /work eats into MEM_LIMIT
-#: rather than growing the host's disk without limit.
+#: The same ceiling, spelled two ways, because the clients disagree.
+#: docker-py takes `nano_cpus`; podman-py silently DISCARDS that keyword
+#: (it is in its "Ignore these keywords" list) and honours only
+#: `cpu_period` / `cpu_quota`. Passing nano_cpus to podman produced a
+#: container with CpuQuota=0 — no CPU limit at all — while the server
+#: went on describing it as limited. Both spellings are checked against
+#: the created container.
+NANO_CPUS = int(CPUS * 1_000_000_000)
+CPU_PERIOD = 100_000
+CPU_QUOTA = int(CPU_PERIOD * CPUS)
+
+#: Bounded scratch space, declared as paths and a size rather than as one
+#: engine's syntax: Docker takes a `tmpfs` mapping while Podman rejects
+#: that keyword and wants tmpfs entries in `mounts`. The runtime builds
+#: whichever shape the chosen engine accepts.
+#:
+#: These are tmpfs, so they are accounted against the container's memory
+#: cgroup — a full /work eats into MEM_LIMIT rather than growing the
+#: host's disk without limit.
+#: Only /work. A sized tmpfs over /tmp was tried and is not portable:
+#: podman's crun refuses it with "No space left on device" whatever
+#: options are given, while an unsized one defaults to half of RAM and
+#: so is not a limit at all. /tmp remains writable and is still
+#: destroyed with the container, but /work is the bounded one and is
+#: what the tools point callers at.
 TMPFS_SIZE = "64m"
-TMPFS = {
-    "/work": f"rw,size={TMPFS_SIZE},mode=1777",
-    "/tmp": f"rw,size={TMPFS_SIZE},mode=1777",
-}
+TMPFS_PATHS = ("/work",)
 
 #: Blocks setuid/setgid escalation inside the container. Safe on every
 #: image; unlike cap_drop it does not interfere with the workdir chown
-#: llm-sandbox performs during environment setup.
-SECURITY_OPT = ["no-new-privileges"]
+#: the backend performs during environment setup.
+NO_NEW_PRIVILEGES = True
 
 # --- execution ceilings --------------------------------------------------
 

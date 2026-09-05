@@ -145,6 +145,7 @@ def capabilities() -> str:
         {
             "languages": sorted(policy.LANGUAGES),
             "backends": sorted(policy.BACKEND_CHOICES),
+            "experimental_backends": sorted(policy.EXPERIMENTAL_BACKENDS),
             "limits": {
                 "memory": policy.MEM_LIMIT,
                 "cpus": policy.NANO_CPUS / 1_000_000_000,
@@ -166,11 +167,13 @@ def capabilities() -> str:
             "filesystem": {
                 "host_filesystem": "not mounted",
                 "container_engine_socket": "not mounted",
-                "scratch_space": sorted(policy.TMPFS),
-                "scratch_size_each": policy.TMPFS_SIZE,
+                "scratch_space": sorted(policy.TMPFS_PATHS),
+                "scratch_size": policy.TMPFS_SIZE,
                 "scratch_note": (
-                    "tmpfs, counted against the memory limit and discarded "
-                    "when the sandbox is destroyed"
+                    "/work is a size-limited tmpfs, counted against the "
+                    "memory limit and discarded with the sandbox. Write "
+                    "working files there. /tmp is writable too but is not "
+                    "separately size-limited."
                 ),
             },
             "persistence": {
@@ -310,8 +313,8 @@ def run(
     Safe to call repeatedly on one sandbox_id. The filesystem and installed
     packages persist between calls; in-memory variables do NOT — each run
     is a fresh process, so write anything you need to keep to a file.
-    /work and /tmp are writable scratch space, size-limited and discarded
-    with the sandbox.
+    Write working files to /work: it is scratch space, size-limited, and
+    discarded with the sandbox.
 
     Your code runs with NO network access. Passing `libraries` installs
     them in a brief, separate network-enabled step first, then re-seals

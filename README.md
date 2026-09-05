@@ -1,31 +1,47 @@
 # HyperBox
 
-**Your AI agent can run terminal commands. HyperBox gives it somewhere safe to do that.**
+**A local MCP server that runs LLM-generated code inside restricted
+Docker containers.**
 
-Claude Code, Cursor, and any agent with shell access will happily execute
-the code they just wrote — on your machine, against your files, with your
-credentials. Usually that's fine. Occasionally it's `rm -rf`, a global
-install that breaks another project, or a script that quietly talks to
-production.
+Your agent writes code and wants to run it. By default that happens on
+your machine, against your files, with your credentials. Usually fine.
+Occasionally it is `rm -rf`, a global install that breaks another
+project, or a script that quietly talks to production.
 
-HyperBox is an MCP server that gives the agent a disposable container to
-run code in first, and — the part that actually matters — makes the agent
-*understand* when to use it.
+HyperBox gives the agent somewhere else to run it: create a sandbox, run
+in it as many times as you need, destroy it when done.
 
-## It contains hostile code. Here's the proof, not the promise.
+```
+create_sandbox()  →  run(code)  →  run(fixed code)  →  destroy_sandbox()
+```
+
+## Why use it
+
+- **Generated code runs somewhere other than your MCP client's process.**
+  No access to your filesystem, your project, or the container engine.
+- **Resource limits are set by the server**, not negotiable by the model:
+  1 GB memory, 1 CPU, 128 processes, a 60-second ceiling, capped output.
+- **The network is sealed** before any submitted code runs. Declared
+  dependencies install in a separate step that closes again afterwards.
+- **Cleanup survives restarts.** Ownership lives in a registry outside
+  your repo, so a restarted server — or a second one your client launched
+  — can still find and destroy a sandbox it did not create.
+- **Failure is reported honestly.** `run` returns real stdout, stderr and
+  exit codes, and an unreachable engine is an error rather than a cheerful
+  "already cleaned up".
+
+## It contains hostile code — the proof, not the promise
 
 `tests/verify_containment.py` runs genuinely dangerous code in a real
 container. Actual output:
 
 ```
-sandbox: bf4ea26ec5a5
-
 PASS  host filesystem is unreachable from inside
         stdout: 'DENIED: FileNotFoundError'
 PASS  network is unreachable from inside
         stdout: 'DENIED: OSError'
 PASS  container engine socket is not mounted
-        stdout: 'docker.sock present: False'
+        stdout: 'engine sockets present: []'
 PASS  memory exhaustion is capped, with a legible reason
         exit_code: 137 | stderr: Killed (SIGKILL): the sandbox exceeded its memory limit of 1g.
 PASS  process explosion is capped by the PID limit
@@ -36,102 +52,99 @@ PASS  sandbox is destroyed cleanly afterwards
 ```
 
 The fork bomb stopped at 126 processes against a ceiling of 128. Run it
-yourself — that is the point of shipping it as a test.
+yourself — that is why it ships as a test.
 
-## Quickstart
+## Install and run
+
+Requires **Python 3.11+** and **Docker** running.
 
 ```bash
+git clone <this repository>
+cd hyperbox
 uv sync
-uv run python -m hyperbox_mcp.server     # stdio MCP server
+uv run hyperbox doctor
 ```
 
-Then point an MCP client at it. For Claude Desktop, in
-`claude_desktop_config.json`:
+`hyperbox doctor` checks your engine, the sandbox image, the registry,
+and then creates a real sandbox, runs code in it and destroys it. It
+exits 0 only if all of that worked, and every failure line names its fix.
+
+Then register it with any MCP client that speaks stdio:
 
 ```json
 {
   "mcpServers": {
-    "HyperBox": {
-      "command": "/absolute/path/to/uv",
-      "args": ["run", "--project", "/absolute/path/to/hyperbox",
-               "python", "-m", "hyperbox_mcp.server"],
-      "env": { "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" }
+    "hyperbox": {
+      "command": "uv",
+      "args": ["run", "--project", "/absolute/path/to/hyperbox", "hyperbox"],
+      "env": { "PATH": "/usr/local/bin:/usr/bin:/bin" }
     }
   }
 }
 ```
 
-Requires Docker or rootless Podman running. On macOS with Podman, export
-`CONTAINER_HOST` from `podman machine inspect` first — without it
-podman-py connects but silently returns empty output.
+Use absolute paths, and make sure `PATH` includes your container engine's
+CLI — MCP clients often launch servers with a trimmed environment.
 
 ## The tools
 
 | Tool | What it does |
 |---|---|
-| `create_sandbox(language, backend)` | A persistent, disposable container. Returns a `sandbox_id`. |
-| `run(sandbox_id, code, libraries, timeout)` | Executes code. Returns `{stdout, stderr, exit_code, success}` — never a bare "it failed". |
-| `destroy_sandbox(sandbox_id)` | Tears it down. Idempotent, and verified against the engine before it claims success. |
+| `create_sandbox(language, backend)` | A persistent, disposable container. Returns a `sandbox_id`. `backend` defaults to `auto`. |
+| `run(sandbox_id, code, libraries, timeout)` | Executes code. Returns `{stdout, stderr, exit_code, success, timed_out}` — never a bare "it failed". |
+| `destroy_sandbox(sandbox_id)` | Tears it down. Idempotent, and confirmed against the engine before it claims success. |
 
-Languages: `python`, `javascript`, `ruby`, `go`. Backends: `docker`,
-`podman`. Each combination is in the map only after passing the suite
-against a real container — an entry is a promise the tool can deliver it.
+There is also a `hyperbox://capabilities` resource publishing the exact
+limits, so an agent can read them instead of discovering them by failing.
 
-## What the sandbox enforces
+**Language:** `python`. **Engine:** Docker. Podman is wired up but
+**experimental** — see [limits](#what-it-does-not-do).
 
-Set by the server, not negotiable by the agent:
+Within one sandbox the filesystem and installed packages persist between
+runs; variables do not, because each run is a fresh process. Write what
+you need to keep to `/work`.
 
-| | |
-|---|---|
-| Memory | 1 GB, OOM-killed with a legible reason rather than a bare exit 137 |
-| CPU | 1 core |
-| Processes | 128 PIDs |
-| Network | **disabled while your code runs** |
-| Timeout | capped at 60s; `timeout=None` is rejected |
-| Output | capped per stream, and marked when truncated |
-| Host FS / engine socket | never mounted |
+## What it does not do
 
-Declaring `libraries=[...]` opens the network for a separate install step,
-then re-seals before your code executes.
+Be clear-eyed about the boundary:
 
-## Why this isn't a thin wrapper
+- **Local containers share your host's kernel.** This is developer
+  containment, not a claim of absolute isolation. A kernel exploit or a
+  container escape reaches your machine. There is no gVisor, no
+  Firecracker, no VM boundary that HyperBox itself provides.
+- **It is not a multi-tenant boundary.** Do not use it to run untrusted
+  third-party code as a service.
+- **Code runs as root inside the container.** A non-root user was tried
+  and breaks the execution backend's environment setup; the container
+  boundary, `no-new-privileges` and the resource limits are what confine
+  it. The reasoning is in
+  [docs/security-model.md](docs/security-model.md).
+- **Podman is experimental.** Its client returns no output at all on the
+  versions tested, so a sandbox would report success with empty results.
+  HyperBox refuses to start one rather than lie about it; `auto` prefers
+  Docker.
+- **Dependencies come from the public index** and are not vetted.
 
-**The agent has to understand it, or it won't use it.** An MCP client has
-no dispatcher — it decides from tool names, descriptions and annotations
-alone. Measured here: a working search tool described only as "search the
-codebase" was *refused* by a client that asked the user to upload files by
-hand; naming what it covered turned the same tool into a correct answer.
-So HyperBox ships tool annotations (`run` is marked not host-destructive;
-`destroy_sandbox` destructive but idempotent), a `hyperbox://capabilities`
-resource so limits are discoverable before they're hit, and a `run_safely`
-prompt that makes the safe path the easy path.
+If you need a hard boundary for genuinely adversarial code, you want a VM
+or microVM sandbox, not a local container.
 
-**Sandboxes outlive the process that made them.** Ownership lives in a
-SQLite registry outside the repo, and containers carry
-`hyperbox-mcp.managed` labels. A restarted server — or a second one your
-client launched — reattaches by container id instead of losing the
-sandbox and leaking the container. Before this existed, alternating calls
-between two server processes failed 5 times in 10.
+## Documentation
 
-**The backend is replaceable.** Everything above `runtime.py` talks to a
-`Runtime` protocol. `llm-sandbox` is one implementation, in the only file
-allowed to import it. The contract is the project; the backend is a
-detail.
+- [Architecture](docs/architecture.md) — how the pieces fit, and why
+- [Security model](docs/security-model.md) — what is enforced, and what is not
+- [Troubleshooting](docs/troubleshooting.md) — every failure and its fix
+- [Development](docs/development.md) — the rules, the suites, how to extend it
 
 ## Verify
 
 ```bash
-uv run python tests/verify.py              # 14 — lifecycle + MCP surface
-uv run python tests/verify_registry.py     # 11 — ownership across processes
-uv run python tests/verify_limits.py       # 12 — enforced resource policy
-uv run python tests/verify_containment.py  #  6 — the safety proof
-uv run python tests/verify.py podman       # 9  — second backend
+uv run python tests/run_all.py docker
 ```
 
-43 checks, all against real containers. There are no mocked tests for the
-sandbox path on purpose: mocking Docker would prove only that the mock
-works.
+Every suite, against real containers, with a check that nothing was left
+behind. There are no mocked tests on the sandbox path on purpose: mocking
+Docker would prove only that the mock works.
 
 ## License
 
-MIT — see `LICENSE`.
+MIT — see [LICENSE](LICENSE).

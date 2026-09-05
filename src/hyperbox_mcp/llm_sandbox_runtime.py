@@ -57,15 +57,19 @@ from llm_sandbox.exceptions import SandboxTimeoutError
 from hyperbox_mcp import engine
 from hyperbox_mcp.engine import ContainerGoneError, EngineUnavailableError
 from hyperbox_mcp.policy import (
+    CPU_PERIOD,
+    CPU_QUOTA,
     GC_GRACE_SECONDS,
     LABEL_ID,
     LABEL_MANAGED,
     MEM_LIMIT,
+    CPUS,
     MEM_LIMIT_BYTES,
     NANO_CPUS,
+    NO_NEW_PRIVILEGES,
     PIDS_LIMIT,
-    SECURITY_OPT,
-    TMPFS,
+    TMPFS_PATHS,
+    TMPFS_SIZE,
 )
 from hyperbox_mcp.runtime import ExecResult, SandboxHandle
 
@@ -89,6 +93,22 @@ _DEFAULT_NETWORK = {"docker": "bridge", "podman": "podman"}
 # A no-op per language, used to run a dependency install without also
 # running the caller's code while the network is briefly attached.
 _NOOP = {"python": "pass"}
+
+#: Proof that results actually round-trip out of this container.
+#:
+#: This exists because of a measured failure: on Podman, podman-py's
+#: exec_run returns no output at all in every mode (demux on or off,
+#: streaming or not), and its streaming exit code is None, which the
+#: backend turns into 0. The result is a run that reports success with
+#: empty stdout — a sandbox that silently discards every result it is
+#: asked to produce. An agent reading that would conclude its code
+#: printed nothing, and go on to debug code that was fine.
+#:
+#: So every sandbox proves it can return a result before it is handed
+#: out, on every backend. One extra exec at creation is cheap; a
+#: silently mute sandbox is not.
+CANARY_MARKER = "__hyperbox_canary__"
+_CANARY = {"python": f"print('{CANARY_MARKER}')"}
 
 _BACKEND_EXCEPTIONS = (
     SandboxError,
@@ -138,17 +158,71 @@ class LLMSandboxRuntime:
                 f"{', '.join(_BACKENDS)}"
             )
 
-    def _runtime_configs(self, sandbox_id: str) -> dict:
+    @staticmethod
+    def _engine_specific(backend: str) -> dict:
+        """The same policy, spelled the way this engine's client accepts.
+
+        The two clients diverge in three places and there is no common
+        vocabulary:
+
+        - CPU: docker-py takes `nano_cpus`; podman-py DISCARDS it
+          silently and honours `cpu_period` / `cpu_quota` instead.
+        - Scratch space: docker-py takes a `tmpfs` mapping; podman-py
+          rejects that keyword outright and wants tmpfs entries in
+          `mounts`.
+        - Privilege: `security_opt` versus a `no_new_privileges` flag.
+
+        Getting any of these wrong produces a container that looks
+        configured and is not, which is why every one of them is read
+        back off the container afterwards.
+        """
+        if backend == "podman":
+            return {
+                "cpu_period": CPU_PERIOD,
+                "cpu_quota": CPU_QUOTA,
+                "mounts": [
+                    {
+                        "type": "tmpfs",
+                        # Without an explicit source podman creates a
+                        # plain directory instead of a tmpfs mount.
+                        "source": "tmpfs",
+                        "target": path,
+                        "size": TMPFS_SIZE,
+                        "chown": True,
+                    }
+                    for path in TMPFS_PATHS
+                ],
+                "no_new_privileges": NO_NEW_PRIVILEGES,
+            }
+        return {
+            "nano_cpus": NANO_CPUS,
+            "tmpfs": {
+                path: f"rw,size={TMPFS_SIZE},mode=1777" for path in TMPFS_PATHS
+            },
+            "security_opt": ["no-new-privileges"] if NO_NEW_PRIVILEGES else [],
+        }
+
+    def _runtime_configs(self, sandbox_id: str, backend: str) -> dict:
         """Everything the engine must apply. Server policy, start to
         finish — no part of this comes from a caller."""
         return {
             "labels": {LABEL_MANAGED: "true", LABEL_ID: sandbox_id},
             "mem_limit": MEM_LIMIT,
-            "nano_cpus": NANO_CPUS,
             "pids_limit": PIDS_LIMIT,
-            "tmpfs": dict(TMPFS),
-            "security_opt": list(SECURITY_OPT),
+            **self._engine_specific(backend),
         }
+
+    @staticmethod
+    def _cpu_limited(host: dict) -> bool:
+        """Whether a CPU ceiling is genuinely in force.
+
+        Docker records it as NanoCpus; Podman as a quota over a period.
+        Either is proof, neither being present is not.
+        """
+        if host.get("NanoCpus") == NANO_CPUS:
+            return True
+        quota, period = host.get("CpuQuota"), host.get("CpuPeriod")
+        return bool(quota) and bool(period) and quota == CPU_QUOTA and period == CPU_PERIOD
 
     @staticmethod
     def _assert_policy_applied(attrs: dict, sandbox_id: str) -> None:
@@ -162,26 +236,28 @@ class LLMSandboxRuntime:
         """
         host = attrs.get("HostConfig") or {}
         config = attrs.get("Config") or {}
-        expected = {
-            "Memory": MEM_LIMIT_BYTES,
-            "NanoCpus": NANO_CPUS,
-            "PidsLimit": PIDS_LIMIT,
-        }
+        expected = {"Memory": MEM_LIMIT_BYTES, "PidsLimit": PIDS_LIMIT}
         wrong = {
             key: host.get(key)
             for key, want in expected.items()
             if host.get(key) != want
         }
+        if not LLMSandboxRuntime._cpu_limited(host):
+            wrong["cpu"] = (
+                f"NanoCpus={host.get('NanoCpus')} "
+                f"CpuQuota={host.get('CpuQuota')} "
+                f"CpuPeriod={host.get('CpuPeriod')}"
+            )
         labels = config.get("Labels") or {}
         if labels.get(LABEL_ID) != sandbox_id:
             wrong["Labels"] = labels.get(LABEL_ID)
         if wrong:
             raise SandboxRuntimeError(
                 "The container engine did not apply this server's resource "
-                f"policy for sandbox '{sandbox_id}'. Expected "
-                f"{expected} with label {sandbox_id}, but the container "
-                f"reports {wrong}. Refusing to hand back a sandbox that is "
-                "not actually limited."
+                f"policy for sandbox '{sandbox_id}'. Expected {expected}, a "
+                f"CPU ceiling of {CPUS} and label {sandbox_id}, but the "
+                f"container reports {wrong}. Refusing to hand back a sandbox "
+                "that is not actually limited."
             )
 
     def _container(self, handle: SandboxHandle):
@@ -304,7 +380,7 @@ class LLMSandboxRuntime:
             session = create_session(
                 backend=_BACKENDS[backend],
                 lang=_LANGUAGES[language],
-                runtime_configs=self._runtime_configs(sandbox_id),
+                runtime_configs=self._runtime_configs(sandbox_id, backend),
             )
             session.open()
         except _BACKEND_EXCEPTIONS as exc:
@@ -334,10 +410,42 @@ class LLMSandboxRuntime:
             container = self._container(handle)
             self._assert_policy_applied(container.attrs, sandbox_id)
             self._seal(handle)
+            self._assert_results_round_trip(handle)
         except BaseException:
             self._destroy_quietly(handle)
             raise
         return handle
+
+    def _assert_results_round_trip(self, handle: SandboxHandle) -> None:
+        """Refuse to hand back a sandbox that cannot report results.
+
+        Runs a marker through exactly the path a caller's code takes. If
+        it does not come back, the sandbox would answer every future run
+        with empty output — so it fails here, loudly and once, instead of
+        silently on every call.
+        """
+        probe = _CANARY.get(handle.language)
+        if probe is None:
+            return
+        try:
+            result = self.run(handle, probe, timeout=30)
+        except Exception as exc:  # noqa: BLE001 - reported as our own error
+            raise SandboxRuntimeError(
+                f"Sandbox '{handle.sandbox_id}' on {handle.backend} could not "
+                f"run a startup check: {type(exc).__name__}: {exc}"
+            ) from exc
+        if CANARY_MARKER in result.stdout:
+            return
+        raise SandboxRuntimeError(
+            f"The {handle.backend} backend started a container but its output "
+            f"does not reach this server: a startup check printed "
+            f"'{CANARY_MARKER}' and returned exit code {result.exit_code} with "
+            f"stdout={result.stdout!r} stderr={result.stderr!r}. Every run in "
+            "this sandbox would report success with empty output, so it is "
+            "refused rather than handed back. This is a known limitation of "
+            "the podman client against some Podman versions; use "
+            "backend='docker' (or 'auto') instead."
+        )
 
     def _close_quietly(self, session) -> None:
         try:

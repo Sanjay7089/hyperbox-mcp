@@ -114,6 +114,12 @@ def check_engines(report: Report) -> dict[str, engine.EngineStatus]:
         notes = [f"{k}: {v}" for k, v in status.extra.items() if v]
         if status.binary:
             notes.insert(0, f"cli: {status.binary}")
+        if backend in policy.EXPERIMENTAL_BACKENDS:
+            notes.append(
+                "experimental: results may not reach the server on this "
+                "engine; sandboxes refuse to start rather than return "
+                "empty output. Prefer docker."
+            )
         report.add(
             Check(
                 name=f"{backend} engine reachable",
@@ -154,6 +160,13 @@ def check_selection(report: Report, statuses: dict) -> str:
                 f"'auto' resolves to {chosen} "
                 f"(reachable: {', '.join(others) or chosen}); "
                 "docker is preferred when both are available"
+            ),
+            notes=(
+                [
+                    f"{chosen} is experimental — see docs/troubleshooting.md"
+                ]
+                if chosen in policy.EXPERIMENTAL_BACKENDS
+                else []
             ),
         )
     )

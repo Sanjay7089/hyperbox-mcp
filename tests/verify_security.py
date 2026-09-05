@@ -23,6 +23,7 @@ sys.path.insert(0, "src")
 from fastmcp import Client  # noqa: E402
 
 from hyperbox_mcp import engine, policy, server  # noqa: E402
+from hyperbox_mcp.llm_sandbox_runtime import LLMSandboxRuntime  # noqa: E402
 
 results: list[tuple[str, bool, str]] = []
 
@@ -68,10 +69,17 @@ async def main() -> int:
                 host.get("Memory") == policy.MEM_LIMIT_BYTES,
                 f"Memory={host.get('Memory')} expected={policy.MEM_LIMIT_BYTES}",
             )
+            # Docker records the ceiling as NanoCpus, Podman as a quota
+            # over a period. Podman-py silently DISCARDS nano_cpus, so
+            # asserting only docker's spelling would pass a podman
+            # container that has no CPU limit whatsoever.
             check(
-                "CPU limit is applied to the container",
-                host.get("NanoCpus") == policy.NANO_CPUS,
-                f"NanoCpus={host.get('NanoCpus')} expected={policy.NANO_CPUS}",
+                "a CPU ceiling is genuinely in force",
+                LLMSandboxRuntime._cpu_limited(host),
+                f"NanoCpus={host.get('NanoCpus')} "
+                f"CpuQuota={host.get('CpuQuota')} "
+                f"CpuPeriod={host.get('CpuPeriod')} "
+                f"(expected {policy.CPUS} CPU)",
             )
             check(
                 "PID limit is applied to the container",
@@ -87,12 +95,25 @@ async def main() -> int:
             )
 
             # --- nothing of the host is inside -------------------------
+            #
+            # The claim is not "no mounts" — the scratch tmpfs is a mount,
+            # and podman lists it here. The claim is that no mount reaches
+            # anything on the host: a tmpfs has no host source, a bind
+            # does.
             mounts = attrs.get("Mounts") or []
             binds = host.get("Binds") or []
+            host_sourced = [
+                m
+                for m in mounts
+                if str(m.get("Type")) not in {"tmpfs", ""}
+                or str(m.get("Source", "")).startswith("/")
+                and str(m.get("Type")) != "tmpfs"
+            ]
             check(
-                "no host filesystem is mounted",
-                not mounts and not binds,
-                f"Mounts={mounts} Binds={binds}",
+                "no mount reaches the host filesystem",
+                not host_sourced and not binds,
+                f"host-sourced={host_sourced} Binds={binds} "
+                f"(of {len(mounts)} mount(s) total)",
             )
             blob = f"{mounts}{binds}"
             check(
@@ -120,14 +141,43 @@ async def main() -> int:
             )
 
             # --- bounded writable space ---------------------------------
+            #
+            # The two engines record this differently: docker reports a
+            # HostConfig.Tmpfs mapping, podman reports tmpfs entries under
+            # Mounts. Rather than trust either spelling, the size limit is
+            # also proved from inside the container below.
             tmpfs = host.get("Tmpfs") or {}
+            declared = {
+                m.get("Destination") or m.get("Target")
+                for m in (attrs.get("Mounts") or [])
+                if str(m.get("Type")) == "tmpfs"
+            }
             check(
-                "scratch space is tmpfs and size-limited",
+                "scratch space is declared tmpfs at every documented path",
                 all(
-                    path in tmpfs and policy.TMPFS_SIZE in str(tmpfs.get(path))
-                    for path in policy.TMPFS
+                    path in tmpfs or path in declared for path in policy.TMPFS_PATHS
                 ),
-                f"Tmpfs={tmpfs}",
+                f"Tmpfs={tmpfs} tmpfs-mounts={sorted(declared)}",
+            )
+            sized = (
+                await client.call_tool(
+                    "run",
+                    {
+                        "sandbox_id": sid,
+                        "code": (
+                            "import subprocess\n"
+                            "print(subprocess.run(['df','-h','/work'],"
+                            " capture_output=True, text=True).stdout)\n"
+                        ),
+                        "timeout": 30,
+                    },
+                )
+            ).data
+            df = (sized.get("stdout") or "").strip()
+            check(
+                "the scratch mount really is a small tmpfs inside the container",
+                "tmpfs" in df.lower() and "64M" in df.upper().replace("MB", "M"),
+                f"df -h /work: {df.splitlines()[-1] if df else '(no output)'}",
             )
 
             # --- ownership, so GC can tell ours from everyone else's ----

@@ -31,6 +31,7 @@ from fastmcp import Client  # noqa: E402
 from fastmcp.client.transports import StdioTransport  # noqa: E402
 
 from hyperbox_mcp import engine, policy  # noqa: E402
+from hyperbox_mcp.llm_sandbox_runtime import LLMSandboxRuntime  # noqa: E402
 from hyperbox_mcp.registry import Registry  # noqa: E402
 
 BACKEND = sys.argv[1] if len(sys.argv) > 1 else "docker"
@@ -104,18 +105,26 @@ async def main() -> int:
         )
         check(
             "CPU limit applied",
-            host.get("NanoCpus") == policy.NANO_CPUS,
-            f"NanoCpus={host.get('NanoCpus')}",
+            LLMSandboxRuntime._cpu_limited(host),
+            f"NanoCpus={host.get('NanoCpus')} CpuQuota={host.get('CpuQuota')} "
+            f"CpuPeriod={host.get('CpuPeriod')}",
         )
         check(
             "PID limit applied",
             host.get("PidsLimit") == policy.PIDS_LIMIT,
             f"PidsLimit={host.get('PidsLimit')}",
         )
+        # Scratch tmpfs mounts are expected; mounts with a host source
+        # are not. See tests/verify_security.py for the full assertion.
+        from_host = [
+            m
+            for m in (attrs.get("Mounts") or [])
+            if str(m.get("Type")) != "tmpfs"
+        ]
         check(
             "no host filesystem or engine socket mounted",
-            not attrs.get("Mounts"),
-            f"Mounts={attrs.get('Mounts')}",
+            not from_host and not (attrs["HostConfig"].get("Binds") or []),
+            f"host-sourced mounts={from_host}",
         )
 
         # --- sealed by default -----------------------------------------
