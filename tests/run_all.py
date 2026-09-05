@@ -41,7 +41,7 @@ def managed_containers(backend: str) -> list[str]:
 
 def main() -> int:
     backend = sys.argv[1] if len(sys.argv) > 1 else "docker"
-    print(f"=== HyperBox acceptance suites on {backend} ===\n")
+    print(f"=== HyperBox acceptance suites on {backend} ===\n", flush=True)
 
     before = set(managed_containers(backend))
     if before:
@@ -69,7 +69,7 @@ def main() -> int:
             (l for l in reversed(tail) if "passed" in l or "contained" in l), "no summary"
         )
         ok = result.returncode == 0
-        print(f"  {'OK  ' if ok else 'FAIL'} {summary.strip()}  ({elapsed:.0f}s)\n")
+        print(f"  {'OK  ' if ok else 'FAIL'} {summary.strip()}  ({elapsed:.0f}s)\n", flush=True)
         if not ok:
             # A failing suite's own output is the evidence; show it whole.
             print(result.stdout[-4000:])

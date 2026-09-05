@@ -60,7 +60,12 @@ behind.
 is defined against a real container, because mocking Docker would prove
 only that the mock works. Two consequences worth knowing:
 
-- The suites take a few minutes and need an engine running.
+- The suites need an engine running, and take anywhere from 3 to 15
+  minutes. That spread is not flakiness in the assertions — they pass
+  consistently — but contention: several cases deliberately balloon to
+  the 1 GB memory ceiling and get OOM-killed, and whichever suite runs
+  while the engine's VM is reclaiming pays for it. Expect roughly 5
+  minutes on an idle machine.
 - When something fails, triage the layer before editing code. Is the
   engine running? Is the image pullable from here? `hyperbox doctor`
   answers both. A create failure is far more often the environment than
