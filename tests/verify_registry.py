@@ -222,6 +222,31 @@ async def main() -> int:
     finally:
         srv._registry.remove(reserved_id)
 
+    # --- 5b. abandoned reservations do not accumulate -----------------
+    #
+    # A create killed between reserve() and finalize() leaves a `creating`
+    # row. Those are excluded from the normal expiry sweep on purpose, so
+    # without a sweep of their own they sit in the registry forever,
+    # shielding an id from collection and showing up in every doctor run.
+    abandoned = "ffffffffff02"
+    srv._registry.reserve(abandoned, language="python", backend=BACKEND)
+    with srv._registry._connect() as conn:
+        conn.execute(
+            "UPDATE sandboxes SET expires_at = ? WHERE sandbox_id = ?",
+            (time.time() - 1, abandoned),
+        )
+    check(
+        "an abandoned reservation is recognised as stale",
+        abandoned in {r.sandbox_id for r in srv._registry.stale_reservations()},
+        "past its TTL and never finalised",
+    )
+    srv.collect_garbage()
+    check(
+        "garbage collection clears abandoned reservations",
+        srv._registry.get(abandoned) is None,
+        "the row is gone, so its container id is collectable again",
+    )
+
     # --- 6. GC reclaims OUR orphans and nothing else ------------------
     async with Client(transport()) as c5:
         orphan = data(

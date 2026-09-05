@@ -292,6 +292,29 @@ def check_round_trip(report: Report, backend: str) -> None:
     """
     if not backend:
         return
+    # Creating a sandbox pulls the image if it is absent, which takes
+    # minutes. Say that plainly instead of appearing to hang, and point
+    # at the flag that does the pull deliberately.
+    try:
+        if not engine.image_present(backend, python_image()):
+            report.add(
+                Check(
+                    name="live sandbox round trip",
+                    status=WARN,
+                    detail=(
+                        "skipped: the sandbox image is not on this machine "
+                        "yet, and pulling it here would look like a hang."
+                    ),
+                    fix="Run `hyperbox doctor --pull` to fetch it, then run "
+                    "`hyperbox doctor` again to prove the round trip.",
+                )
+            )
+            return
+    except EngineUnavailableError as exc:
+        report.add(
+            Check(name="live sandbox round trip", status=FAIL, detail=str(exc))
+        )
+        return
     runtime = LLMSandboxRuntime()
     sandbox_id = uuid.uuid4().hex[:12]
     started = time.time()

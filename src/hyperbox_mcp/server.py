@@ -26,6 +26,7 @@ import asyncio
 import json
 import sys
 import uuid
+from contextlib import asynccontextmanager, suppress
 
 from fastmcp import Context, FastMCP
 
@@ -36,6 +37,7 @@ from hyperbox_mcp.llm_sandbox_runtime import (
     SandboxRuntimeError,
     UnsupportedBackendError,
     UnsupportedLanguageError,
+    image_for,
 )
 from hyperbox_mcp.registry import Registry
 from hyperbox_mcp.runtime import Runtime, SandboxHandle
@@ -66,6 +68,63 @@ def _cap_output(text: str) -> str:
         f"...[truncated {dropped} chars of {len(text)}; "
         f"server cap is {policy.MAX_OUTPUT_CHARS}]"
     )
+
+
+#: How often to tell the client we are still working. MCP clients cut a
+#: tool call off after a period of silence — 60 seconds is typical — and
+#: creating a sandbox can legitimately take longer than that on a cold
+#: machine, because the language image is several gigabytes. Reporting
+#: progress well inside that window is what turns "the request timed out"
+#: into "this is still downloading".
+HEARTBEAT_SECONDS = 8.0
+
+#: Progress is reported out of 100 but the real duration is unknown, so
+#: it approaches this ceiling without ever claiming to be finished. Only
+#: the actual completion reports 100.
+HEARTBEAT_CEILING = 90
+
+
+@asynccontextmanager
+async def _heartbeat(ctx: Context, what: str):
+    """Report progress every few seconds until the body finishes.
+
+    The work itself runs in a worker thread and cannot report anything on
+    its own — the execution backend surfaces no pull or build progress —
+    so this is a liveness signal rather than a measurement. It says "still
+    working, here is what on", which is what a client needs to keep the
+    call alive and what a person needs to not think it has hung.
+
+    Cancelled on every exit path, success or failure, so a failed create
+    never leaves a task reporting progress for work that has stopped.
+    """
+    done = asyncio.Event()
+
+    async def beat() -> None:
+        progress = 10
+        try:
+            await ctx.report_progress(progress, 100, what)
+            while not done.is_set():
+                try:
+                    await asyncio.wait_for(done.wait(), timeout=HEARTBEAT_SECONDS)
+                    return  # finished before the next beat was due
+                except asyncio.TimeoutError:
+                    progress = min(progress + 8, HEARTBEAT_CEILING)
+                    await ctx.report_progress(progress, 100, f"{what}…")
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            # A client that cannot receive progress must not break the
+            # operation it was reporting on.
+            return
+
+    task = asyncio.create_task(beat())
+    try:
+        yield
+    finally:
+        done.set()
+        task.cancel()
+        with suppress(asyncio.CancelledError, Exception):
+            await task
 
 
 def _handle_for(rec) -> SandboxHandle:
@@ -113,6 +172,19 @@ def collect_garbage() -> list[str]:
                 except Exception:  # noqa: BLE001 - best effort reclamation
                     pass
                 _registry.remove(rec.sandbox_id)
+        except OSError:  # noqa: PERF203 - a lock we cannot take is not fatal
+            continue
+
+    # Reservations that never became sandboxes. Dropping the row is
+    # enough: the container, if one was ever made, still carries our
+    # labels, so the sweep below reclaims it once it is past the creation
+    # grace period. Removing the row first is what makes it visible.
+    for stale in _registry.stale_reservations():
+        try:
+            with _registry.lock(stale.sandbox_id):
+                current = _registry.get(stale.sandbox_id)
+                if current is not None and not current.ready and current.expired:
+                    _registry.remove(stale.sandbox_id)
         except OSError:  # noqa: PERF203 - a lock we cannot take is not fatal
             continue
 
@@ -229,13 +301,6 @@ async def create_sandbox(
     except InvalidInput as exc:
         return {"error": str(exc)}
 
-    # llm-sandbox does not surface image-pull progress, so this is a
-    # start/finish signal rather than a percentage — enough for a client to
-    # show that a possibly-slow pull is underway instead of appearing hung.
-    # (ctx.info is deliberately not used: MCP deprecated the logging
-    # capability in SEP-2577, 2026-07-28.)
-    await ctx.report_progress(0, 100, f"pulling image / starting {language} sandbox")
-
     try:
         resolved = await asyncio.to_thread(engine.detect, requested)
     except EngineUnavailableError as exc:
@@ -243,20 +308,35 @@ async def create_sandbox(
     except UnsupportedBackendError as exc:
         return {"error": str(exc)}
 
+    # Say what the slow part is going to be, so a first run reads as a
+    # download rather than a hang.
+    try:
+        cold = not await asyncio.to_thread(
+            engine.image_present, resolved, image_for(language)
+        )
+    except Exception:  # noqa: BLE001 - only used to word the message
+        cold = False
+    what = (
+        f"pulling the {language} image (first use, several GB)"
+        if cold
+        else f"starting {language} sandbox"
+    )
+
     # Claim the id BEFORE the container exists. Garbage collection in any
     # process skips reservations, so nothing can reclaim the container
     # that is about to be created under this id.
     sandbox_id = uuid.uuid4().hex[:12]
     _registry.reserve(sandbox_id, language=language, backend=resolved)
     try:
-        # Offloaded: container creation blocks for seconds to minutes, and
-        # must not stall the server's event loop.
-        handle = await asyncio.to_thread(
-            _runtime.create,
-            language=language,
-            backend=resolved,
-            sandbox_id=sandbox_id,
-        )
+        async with _heartbeat(ctx, what):
+            # Offloaded: container creation blocks for seconds to minutes,
+            # and must not stall the server's event loop.
+            handle = await asyncio.to_thread(
+                _runtime.create,
+                language=language,
+                backend=resolved,
+                sandbox_id=sandbox_id,
+            )
     except (UnsupportedLanguageError, UnsupportedBackendError, InvalidInput) as exc:
         _registry.remove(sandbox_id)
         return {"error": str(exc)}

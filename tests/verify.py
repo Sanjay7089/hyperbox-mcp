@@ -177,6 +177,70 @@ def main() -> int:
         str(timed),
     )
 
+    # 5b. The startup output check runs ONCE per sandbox and does not
+    #     recurse. It verifies output by calling run(), which opens a
+    #     session, which is what triggers the check — so a guard that is
+    #     set after the call instead of before it recurses until the
+    #     stack gives out. That was a real failure; this is its test.
+    probe = lsr.LLMSandboxRuntime()
+    calls = {"n": 0}
+    original = probe._assert_results_round_trip
+
+    def counted(h):
+        calls["n"] += 1
+        return original(h)
+
+    probe._assert_results_round_trip = counted
+    probe_handle = None
+    try:
+        probe_handle = probe.create(
+            language=language, backend=backend, sandbox_id=new_id()
+        )
+        check(
+            "creating a sandbox does not pay for the output check",
+            calls["n"] == 0,
+            f"round-trip checks during create: {calls['n']}",
+        )
+        first = probe.run(probe_handle, snip["hello"])
+        after_first = calls["n"]
+        probe.run(probe_handle, snip["hello"])
+        check(
+            "the output check runs exactly once, on first use, without recursing",
+            after_first == 1 and calls["n"] == 1 and first.success,
+            f"checks after first run={after_first}, after second={calls['n']}",
+        )
+    except RecursionError as exc:
+        check(
+            "the output check runs exactly once, on first use, without recursing",
+            False,
+            f"RecursionError: {exc}",
+        )
+    finally:
+        if probe_handle is not None:
+            probe.destroy(probe_handle)
+
+    # 5c. A dropped connection is not an outage. Engines close idle
+    #     sockets — Docker Desktop on Windows does it within seconds —
+    #     and a cached client keeps the dead one. Treating that as an
+    #     unreachable engine made destroy() refuse to confirm removal and
+    #     leave the container running.
+    stale = lsr.LLMSandboxRuntime()
+    from hyperbox_mcp.engine import EngineUnavailableError
+
+    dropped = EngineUnavailableError(
+        "Could not reach docker (ConnectionError: ('Connection aborted.', "
+        "RemoteDisconnected('Remote end closed connection without response')))"
+    )
+    down = EngineUnavailableError(
+        "Docker is not reachable (DockerException: FileNotFoundError(2))"
+    )
+    check(
+        "a dropped socket is retried, a real outage is not",
+        stale._is_stale_connection(dropped) and not stale._is_stale_connection(down),
+        f"dropped={stale._is_stale_connection(dropped)} "
+        f"down={stale._is_stale_connection(down)}",
+    )
+
     # 6. Destroy, then destroy again — idempotent.
     rt.destroy(handle)
     rt.destroy(handle)  # must not raise

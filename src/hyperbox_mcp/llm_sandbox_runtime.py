@@ -133,6 +133,15 @@ class SandboxRuntimeError(RuntimeError):
     types — keeps the backend replaceable."""
 
 
+def image_for(language: str) -> str:
+    """The image a sandbox of this language needs, as the backend would
+    resolve it. Read from llm-sandbox rather than hardcoded, so it cannot
+    drift from what actually gets pulled."""
+    from llm_sandbox.const import DefaultImage
+
+    return getattr(DefaultImage, language.upper())
+
+
 class LLMSandboxRuntime:
     """Runtime implementation backed by llm-sandbox.
 
@@ -145,6 +154,9 @@ class LLMSandboxRuntime:
 
     def __init__(self) -> None:
         self._sessions: dict[str, object] = {}
+        # Sandboxes whose output has been proved to reach us, this
+        # process. Checked once per sandbox rather than on every run.
+        self._canary_verified: set[str] = set()
 
     # --- helpers ------------------------------------------------------
 
@@ -262,13 +274,50 @@ class LLMSandboxRuntime:
                 "that is not actually limited."
             )
 
+    #: Substrings of the errors a dead-but-cached connection produces.
+    #: Docker Desktop on Windows closes idle named-pipe connections after
+    #: a few seconds, and macOS/Linux sockets can be dropped the same way
+    #: by a restarted engine. The cached client keeps the dead socket, so
+    #: the NEXT call fails even though the engine is perfectly healthy —
+    #: which is how a destroy() came to report the engine as unreachable
+    #: and leave a container running.
+    _STALE_CONNECTION_MARKERS = (
+        "connection aborted",
+        "remote end closed connection",
+        "remotedisconnected",
+        "connection reset",
+        "broken pipe",
+    )
+
+    @classmethod
+    def _is_stale_connection(cls, exc: BaseException) -> bool:
+        text = str(exc).lower()
+        return any(marker in text for marker in cls._STALE_CONNECTION_MARKERS)
+
     def _container(self, handle: SandboxHandle):
+        """Look up this sandbox's container, surviving a dropped socket.
+
+        A cached client whose connection has been closed underneath it
+        looks exactly like an unreachable engine, and treating it as one
+        is worse than useless here: destroy() would refuse to confirm
+        removal and leave the container running with its registry row
+        intact. So a connection-shaped failure drops the cached clients
+        and is retried once. A genuinely unreachable engine fails the
+        same way twice and propagates, which is the behaviour that
+        matters for truthfulness.
+        """
         ref = handle.meta.get("container_ref")
         if not ref:
             raise ContainerGoneError(
                 f"Sandbox '{handle.sandbox_id}' has no container reference."
             )
-        return engine.get_container(handle.backend, ref)
+        try:
+            return engine.get_container(handle.backend, ref)
+        except EngineUnavailableError as exc:
+            if not self._is_stale_connection(exc):
+                raise
+            engine.reset_clients()
+            return engine.get_container(handle.backend, ref)
 
     # --- network sealing ----------------------------------------------
     #
@@ -338,9 +387,14 @@ class LLMSandboxRuntime:
 
     def _session_for(self, handle: SandboxHandle):
         """Return a live session for `handle`, reattaching to its
-        container if this process has never seen it."""
+        container if this process has never seen it.
+
+        The first time this process opens a given sandbox it also proves
+        the sandbox can return output at all — see _verify_once.
+        """
         session = self._sessions.get(handle.sandbox_id)
         if session is not None:
+            self._verify_once(handle)
             return session
 
         container_ref = handle.meta.get("container_ref")
@@ -369,7 +423,31 @@ class LLMSandboxRuntime:
                 f"{type(exc).__name__}: {exc}"
             ) from exc
         self._sessions[handle.sandbox_id] = session
+        self._verify_once(handle)
         return session
+
+    def _verify_once(self, handle: SandboxHandle) -> None:
+        """Run the output round-trip check once per sandbox, per process.
+
+        The ordering here is load-bearing and was got wrong once: the id
+        goes into the set BEFORE the check runs, not after. The check
+        itself calls run(), which calls _session_for(), which calls this
+        again — so marking afterwards means the guard is never set on the
+        re-entrant path and the two functions recurse until the stack
+        gives out. Marking first makes the inner call a no-op.
+
+        On failure the mark is removed, so a later attempt (or a fresh
+        process) can retry rather than inheriting a permanent verdict.
+        """
+        sandbox_id = handle.sandbox_id
+        if sandbox_id in self._canary_verified:
+            return
+        self._canary_verified.add(sandbox_id)
+        try:
+            self._assert_results_round_trip(handle)
+        except BaseException:
+            self._canary_verified.discard(sandbox_id)
+            raise
 
     # --- Runtime protocol ---------------------------------------------
 
@@ -421,10 +499,14 @@ class LLMSandboxRuntime:
             container = self._container(handle)
             self._assert_policy_applied(container.attrs, sandbox_id)
             self._seal(handle)
-            self._assert_results_round_trip(handle)
         except BaseException:
             self._destroy_quietly(handle)
             raise
+        # The output round-trip check deliberately does NOT run here. It
+        # costs a full exec, and creation is already the slowest thing
+        # this server does — on a cold machine it pulls gigabytes, and
+        # every second spent here is a second closer to the client's
+        # timeout. It runs instead on first use, in _session_for.
         return handle
 
     def _assert_results_round_trip(self, handle: SandboxHandle) -> None:
@@ -584,6 +666,7 @@ class LLMSandboxRuntime:
         so the caller keeps its registry row instead of forgetting a
         container that may still be running.
         """
+        self._canary_verified.discard(handle.sandbox_id)
         session = self._sessions.pop(handle.sandbox_id, None)
         if session is not None:
             try:

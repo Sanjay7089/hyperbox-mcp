@@ -34,7 +34,19 @@ use it**, and keep the annotations honest.
 tool can deliver that environment. Nothing goes in until the full suite
 passes for it against a real container.
 
-**5. Validate at the boundary, act under the lock.** Every tool body runs
+**5. A slow operation must keep talking.** MCP clients kill a tool call
+after a period of silence. Anything that can take longer than a few
+seconds — creation pulls gigabytes on a cold machine — reports progress
+while it works. Silence is indistinguishable from a hang, and the client
+resolves that ambiguity by killing the request.
+
+**6. A dropped connection is not an outage.** Engines close idle sockets;
+a cached client keeps the dead one. Retry a connection-shaped failure
+once against a fresh client, and never widen that to cover a genuinely
+unreachable engine — the whole registry design rests on being able to
+tell those apart.
+
+**7. Validate at the boundary, act under the lock.** Every tool body runs
 in one order: validate the inputs, take the per-sandbox lock, re-read the
 record inside the lock, then act. A decision made on state read before the
 lock is already stale.

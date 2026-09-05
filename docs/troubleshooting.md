@@ -151,6 +151,50 @@ Every HyperBox container carries `hyperbox-mcp.managed` and
 those, so a container HyperBox did not create is never touched. Stray
 ones are reclaimed the next time a server starts.
 
+## "Tool call failed: request timed out after 60000ms"
+
+The first `create_sandbox` on a machine pulls the language image, which
+is several gigabytes. MCP clients cut a tool call off after a period of
+silence — 60 seconds is typical — so the pull used to be killed partway
+through with no explanation.
+
+The server now reports progress every few seconds for the whole of
+creation, so the client sees activity well inside its timeout and a cold
+start completes. If you still hit this, the pull is genuinely stalled
+rather than slow: check the engine can reach `ghcr.io`, or pre-pull with
+`hyperbox doctor --pull` and watch it directly.
+
+## "Remote end closed connection without response" on destroy
+
+Container engines close idle connections — Docker Desktop on Windows does
+it within seconds on its named pipe. HyperBox caches its engine client,
+so an operation after a pause could inherit a socket the engine had
+already closed, and a healthy engine looked unreachable.
+
+That mattered more than a spurious error: `destroy_sandbox` refuses to
+confirm removal when the engine is unreachable, so it left the container
+running with its registry row intact. A connection-shaped failure is now
+retried once against a fresh client, while a genuinely unreachable engine
+still fails both times and is reported honestly.
+
+If you have orphans from before this fix:
+
+```bash
+docker ps -a --filter label=hyperbox-mcp.managed=true
+```
+
+They are reclaimed automatically the next time a server starts.
+
+## `hyperbox doctor` shows rows "still being created"
+
+A create that died between reserving its id and finishing — a killed
+server, a stalled pull — leaves a `creating` row. Those are deliberately
+excluded from the normal expiry sweep, because a reservation is young by
+definition and its container may not exist yet.
+
+They are now cleared by garbage collection once past their TTL, so they
+no longer accumulate. Starting a server runs that sweep.
+
 ## The first sandbox takes a long time
 
 It pulls the language image (`ghcr.io/vndee/sandbox-python-311-bullseye`),

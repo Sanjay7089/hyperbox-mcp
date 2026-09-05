@@ -246,6 +246,26 @@ class Registry:
             rows = conn.execute("SELECT sandbox_id FROM sandboxes").fetchall()
         return {r["sandbox_id"] for r in rows}
 
+    def stale_reservations(self) -> list[SandboxRecord]:
+        """Reservations that were never finalised and are past their TTL.
+
+        A create that dies between reserve() and finalize() — the server
+        killed, the engine dropping the connection, an image pull that
+        never returns — leaves a `creating` row behind. Those rows are
+        excluded from the normal expiry sweep on purpose, because a
+        reservation is young by definition and its container may not
+        exist yet. Without this they would sit in the registry forever,
+        shielding a container id from collection and showing up in every
+        `hyperbox doctor` run.
+        """
+        now = time.time()
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM sandboxes WHERE expires_at <= ? AND state = ?",
+                (now, STATE_CREATING),
+            ).fetchall()
+        return [SandboxRecord(**dict(r)) for r in rows]
+
     def expired_records(self) -> list[SandboxRecord]:
         """Ready sandboxes past their inactivity TTL.
 

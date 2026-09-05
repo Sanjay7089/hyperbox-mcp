@@ -441,6 +441,23 @@ def list_managed(backend: str, label: str) -> list[Any]:
         raise classify(backend, exc, "the managed container list") from exc
 
 
+def image_present(backend: str, image: str) -> bool:
+    """Whether `image` is already on this engine.
+
+    Used to decide whether creating a sandbox can finish inside an MCP
+    client's request timeout. Raises if the engine cannot be reached, so
+    "absent" never silently means "could not ask".
+    """
+    engine_client = client(backend)
+    try:
+        engine_client.images.get(image)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        if is_not_found(backend, exc):
+            return False
+        raise classify(backend, exc, f"image {image}") from exc
+
+
 def probe(backend: str) -> EngineStatus:
     """Diagnose one engine without raising. Backs `hyperbox doctor`."""
     binary = podman_binary() if backend == "podman" else (shutil.which("docker") or "")
