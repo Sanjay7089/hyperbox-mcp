@@ -1,6 +1,6 @@
 """Proof that a HyperBox sandbox actually contains hostile code.
 
-    python tests/verify_containment.py
+    python tests/verify_containment.py [docker|podman]
 
 Every check runs REAL code in a REAL container and prints what actually
 came back. This is the evidence behind the project's central claim — that
@@ -22,6 +22,8 @@ sys.path.insert(0, "src")
 from fastmcp import Client  # noqa: E402
 
 from hyperbox_mcp import server  # noqa: E402
+
+BACKEND = sys.argv[1] if len(sys.argv) > 1 else "docker"
 
 results: list[tuple[str, bool, str]] = []
 
@@ -54,7 +56,9 @@ PROBES = {
     ),
     "reach the container engine socket": (
         "import os\n"
-        "print('docker.sock present:', os.path.exists('/var/run/docker.sock'))\n"
+        "socks = ['/var/run/docker.sock', '/run/docker.sock',\n"
+        "         '/var/run/podman/podman.sock', '/run/podman/podman.sock']\n"
+        "print('engine sockets present:', [s for s in socks if os.path.exists(s)])\n"
     ),
     "exhaust host memory": (
         "a = []\n"
@@ -80,12 +84,12 @@ PROBES = {
 async def main() -> int:
     async with Client(server.mcp) as client:
         made = (await client.call_tool(
-            "create_sandbox", {"language": "python", "backend": "docker"})).data
+            "create_sandbox", {"language": "python", "backend": BACKEND})).data
         if not isinstance(made, dict) or "sandbox_id" not in made:
             check("sandbox created for containment probes", False, str(made))
             return 1
         sid = made["sandbox_id"]
-        print(f"sandbox: {sid}\n")
+        print(f"sandbox: {sid} on {made.get('backend')}\n")
 
         async def probe(name: str, timeout: float = 60) -> dict:
             r = await client.call_tool(
@@ -105,7 +109,7 @@ async def main() -> int:
         r = await probe("reach the container engine socket")
         out = (r.get("stdout") or "").strip()
         check("container engine socket is not mounted",
-              "False" in out, f"stdout: {out!r}")
+              out.endswith("[]"), f"stdout: {out!r}")
 
         r = await probe("exhaust host memory")
         err = (r.get("stderr") or "").strip()
