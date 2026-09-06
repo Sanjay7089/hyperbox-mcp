@@ -4,26 +4,27 @@ HyperBox is a stdio MCP server. It exposes three tools that create,
 use and destroy a container, and nothing else. This document explains
 how the pieces fit and why the boundaries sit where they do.
 
+```mermaid
+flowchart TD
+    client["MCP client<br/>(editor, desktop app, CLI agent)"]
+
+    subgraph server["HyperBox server — server.py, FastMCP"]
+        direction TB
+        tools["create_sandbox · run · destroy_sandbox<br/>hyperbox://capabilities · run_safely"]
+        support["policy.py — the limits, in one place<br/>validate.py — every caller value, checked first<br/>registry.py — SQLite ownership, across processes<br/>engine.py — the only module holding an engine client"]
+        tools --- support
+    end
+
+    proto["Runtime protocol — runtime.py<br/>create · run · destroy · alive · gc"]
+    impl["LLMSandboxRuntime — llm_sandbox_runtime.py<br/>the only file permitted to import llm_sandbox"]
+    ctr[("Docker or Podman container")]
+
+    client -->|"stdio, JSON-RPC"| tools
+    support -->|"talks only to the protocol"| proto
+    proto -.->|"one implementation of it"| impl
+    impl --> ctr
 ```
-MCP client (any: an editor, a desktop app, a CLI agent)
-        │ stdio, JSON-RPC
-        ▼
-HyperBox server  (server.py, FastMCP)
-   ├── create_sandbox / run / destroy_sandbox
-   ├── hyperbox://capabilities   discoverable limits
-   ├── run_safely                prompt
-   │
-   ├── policy.py    the limits, in one place, set by the server
-   ├── validate.py  every caller-supplied value, checked before use
-   ├── registry.py  SQLite ownership, shared across processes
-   ├── engine.py    the only module that talks to a container client
-   │
-   │        talks only to the Runtime protocol
-   ▼
-Runtime  (runtime.py)  ◄── LLMSandboxRuntime (llm_sandbox_runtime.py)
-                                    │
-                                    ▼  Docker or Podman container
-```
+
 
 ## The Runtime boundary
 
@@ -58,6 +59,55 @@ raises. An engine that accepts a configuration and silently applies none
 of it would otherwise hand back a sandbox that gets *described* to an
 agent as limited while being nothing of the sort.
 
+## Environments: selecting is a tool, building is not
+
+A sandbox starts from a base image. `create_sandbox(environment=...)`
+picks a different one — a heavier image with numpy and pandas already
+installed, say — so a project does not pay a package install on every
+new sandbox.
+
+Building one is not on the tool surface, and the asymmetry is deliberate.
+A `docker build` runs whatever the Dockerfile says: arbitrary commands,
+as root, with network access, under none of the caps in `policy.py`. That
+is the exact thing this project exists to prevent an agent from reaching.
+
+```mermaid
+flowchart LR
+    subgraph human["Human at a terminal"]
+        direction TB
+        build["hyperbox build &lt;name&gt; --custom Dockerfile"]
+        envs["hyperbox envs"]
+    end
+
+    subgraph disk["~/.hyperbox/environments/"]
+        dir["&lt;name&gt;/Dockerfile"]
+    end
+
+    subgraph agent["Agent, over MCP"]
+        direction TB
+        create["create_sandbox(environment='name')"]
+    end
+
+    sb["sandbox on that image<br/>every limit still applied,<br/>and still read back off the container"]
+
+    build -->|"copies it in, then runs docker build<br/>UNSANDBOXED: root, network, no caps"| dir
+    envs -.->|"reads"| dir
+    dir -->|"rescanned on every call by<br/>policy.environments()"| create
+    create --> sb
+```
+
+The map is resolved on **every call**, not once at import, and this is
+load-bearing rather than tidiness. `hyperbox build` runs in a different
+process from the server; a server that had already started could never
+see a new environment, so the tool description promised something that
+needed a restart to be true. `policy.environments()` caches on the
+environment directory's mtime, so the hot path is one `stat()`.
+
+Selecting an environment changes the base image and nothing else. The
+post-create read-back still runs, so a sandbox on a custom image is
+refused unless the engine actually applied every limit, and the output
+canary still refuses one that cannot report results.
+
 ## Sandboxes outlive the process that created them
 
 Ownership lives in a SQLite registry outside the repository (see
@@ -85,6 +135,26 @@ Two invariants keep the lifecycle race-safe:
 
 The lock is a `flock` on a per-sandbox file, so the OS releases it if a
 server is killed: a crashed process must not wedge a sandbox forever.
+
+```mermaid
+stateDiagram-v2
+    [*] --> creating: reserve() writes the row before the container exists
+    creating --> ready: finalize() once the limits are read back
+    creating --> [*]: creation failed, container destroyed with the row
+    ready --> ready: touch() on each run pushes expires_at out
+    ready --> [*]: destroy_sandbox, or GC once expired
+
+    note right of creating
+        GC skips this state entirely.
+        Nothing can reclaim a container
+        that is still being created.
+    end note
+```
+
+Garbage collection runs at startup and then every
+`policy.GC_INTERVAL_SECONDS` while the server is up — without the
+periodic sweep the inactivity TTL was really enforced by restarting the
+process, and a server inside an editor stays up for days.
 
 ## Truthful failure
 
@@ -165,3 +235,36 @@ re-attached for a dependency install and detached again afterwards.
 This leaves a brief window between container start and sealing in which a
 network exists. Only the backend's own environment setup runs in it —
 nothing an agent submitted is ever executed unsealed.
+
+```mermaid
+sequenceDiagram
+    participant A as Agent
+    participant S as server.py
+    participant R as LLMSandboxRuntime
+    participant C as Container
+
+    A->>S: create_sandbox()
+    S->>R: create(...)
+    R->>C: start (on the default network)
+    Note over C: only backend env setup<br/>runs in this window
+    R->>C: read HostConfig back
+    Note over R,C: refuse the sandbox unless memory,<br/>CPU, PIDs and the id label all match
+    R->>C: _seal() — detach every network
+    Note over C: sealed · fails closed:<br/>no seal, no handle
+    R-->>S: handle
+    S-->>A: sandbox_id
+
+    A->>S: run(code, libraries=[...])
+    S->>R: run(...)
+    R->>C: _unseal()
+    R->>C: install packages ONLY
+    Note over C: caller code never runs here
+    R->>C: _seal() (in a finally block)
+    R->>C: execute the caller's code
+    C-->>A: stdout · stderr · exit_code
+```
+
+The install step runs a no-op program with the package list attached, so
+the network window covers dependency resolution and nothing else. The
+reseal is in a `finally`, so a failed install still leaves the sandbox
+sealed.

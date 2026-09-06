@@ -182,19 +182,24 @@ never disturbs it:
 | macOS / Linux | `~/.hyperbox/state/` |
 | Windows | `%USERPROFILE%\.hyperbox\state\` |
 
-Everything HyperBox owns lives under `~/.hyperbox`: `state/`, `logs/` and
-`environments/`. Override the state directory with `HYPERBOX_STATE_DIR`.
+Everything HyperBox owns lives under one directory:
+
+| Directory | Holds |
+|---|---|
+| `~/.hyperbox/state/` | the SQLite registry and per-sandbox lock files |
+| `~/.hyperbox/logs/` | `server.log`, rotated at 5 MB, three kept |
+| `~/.hyperbox/environments/` | one directory per custom environment, each with a Dockerfile |
+
+Override the state directory with `HYPERBOX_STATE_DIR`. Deleting it while
+sandboxes are running orphans their containers — they are still labelled,
+so `docker ps -a --filter label=hyperbox-mcp.managed=true` finds them.
 
 Upgrading from v0.1 moves the registry across from
 `~/.local/state/hyperbox-mcp/` on first start. The move is conservative:
 it never overwrites a registry already at the new path, it moves only
-`registry.db` and its WAL siblings, and it leaves the old directory in
-place. `XDG_STATE_HOME` is no longer consulted — set `HYPERBOX_STATE_DIR`
-if you want the registry somewhere specific.
-
-It holds a small SQLite registry and per-sandbox lock files. Deleting it while sandboxes are running orphans
-their containers — they are still labelled, so
-`docker ps -a --filter label=hyperbox-mcp.managed=true` finds them.
+`registry.db` and its WAL siblings, and it leaves both the lock files and
+the old directory in place. `XDG_STATE_HOME` is no longer consulted — set
+`HYPERBOX_STATE_DIR` if you want the registry somewhere specific.
 
 ## Upgrading
 

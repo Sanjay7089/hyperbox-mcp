@@ -190,6 +190,57 @@ $HYPERBOX_STATE_DIR                       if set
 `hyperbox doctor` prints the path in use and lists any sandboxes on file,
 flagging rows whose container no longer exists.
 
+Everything HyperBox owns sits under one directory:
+
+```
+~/.hyperbox/state           the SQLite registry and per-sandbox locks
+~/.hyperbox/logs            server.log, rotated at 5 MB, 3 kept
+~/.hyperbox/environments    one directory per custom environment
+```
+
+Upgrading from v0.1 moves the registry across from
+`~/.local/state/hyperbox-mcp/` the first time a server starts. It never
+overwrites a registry already at the new path, moves only `registry.db`
+and its WAL siblings, and leaves the old directory in place.
+
+## What did the server actually do?
+
+A stdio server cannot print — stdout is the JSON-RPC channel the client
+is reading — so there is a log instead:
+
+```bash
+hyperbox logs             # print it
+hyperbox logs --follow    # and keep printing
+```
+
+It records sandbox creation, every run with its exit code, destruction
+and garbage collection. This is the thing to read when a client reports a
+failure with no detail: the client shows you the tool result, the log
+shows you what the server was doing at the time.
+
+Nothing is logged at import, only from a running server, so
+`hyperbox doctor` and `hyperbox config` never write to it.
+
+## "Unknown environment"
+
+`create_sandbox(environment=...)` only accepts environments that already
+exist. List them:
+
+```bash
+hyperbox envs
+```
+
+If the one you want is missing, build it — an agent cannot, by design:
+
+```bash
+hyperbox build my-env --custom ./Dockerfile
+```
+
+A running server picks up the new environment without a restart; the map
+is rescanned on every call. If the name is rejected outright rather than
+reported as unknown, it failed the name check: lowercase letters, digits,
+dots, hyphens and underscores, starting with a letter or digit.
+
 ## Containers left behind
 
 There should not be any. If you want to check:

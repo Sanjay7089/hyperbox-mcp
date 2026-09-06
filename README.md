@@ -11,9 +11,19 @@ project, or a script that quietly talks to production.
 HyperBox gives the agent somewhere else to run it: create a sandbox, run
 in it as many times as you need, destroy it when done.
 
+```mermaid
+flowchart LR
+    w["agent writes code"] --> c["create_sandbox()"]
+    c --> r["run(code)"]
+    r -->|"stderr says what broke"| f["run(fixed code)"]
+    f --> r
+    r -->|"it works"| d["destroy_sandbox()"]
+    f -.->|"only now, and only if you<br/>have seen it pass"| host["apply to the real project"]
 ```
-create_sandbox()  →  run(code)  →  run(fixed code)  →  destroy_sandbox()
-```
+
+The loop matters more than any single call: the agent gets real stderr
+and a real exit code, so it can fix the code and try again somewhere that
+cannot hurt you — and only then touch your project.
 
 ## Why use it
 

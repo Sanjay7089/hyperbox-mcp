@@ -52,6 +52,41 @@ Two limits on what that window can be used for:
 If a package install is itself hostile, it runs inside the sandbox with
 the same limits as everything else.
 
+## Custom environments, and why building is not a tool
+
+`create_sandbox(environment=...)` starts a sandbox from an image built by
+the user with `hyperbox build`. This changes the base image and nothing
+else: every limit in `policy.py` is still applied, still read back off
+the created container, and the output canary still refuses a sandbox that
+cannot report results. A custom image that ignores policy is destroyed
+rather than handed back.
+
+Building is deliberately absent from the MCP tool surface. A build runs
+whatever the Dockerfile says — arbitrary commands, as root, with network
+access, with none of the caps a sandbox runs under. Handing an agent that
+capability would invert the entire point of the project: the model would
+gain, through the build path, exactly the unconstrained host execution
+the sandbox exists to deny it.
+
+```mermaid
+flowchart TD
+    A["agent"] -->|"may select an environment"| S["create_sandbox(environment=...)"]
+    A -->|"has no tool for this"| X["build an image"]
+    H["human at a terminal"] -->|"hyperbox build"| X
+    S --> L["limits applied AND read back<br/>network sealed · no host mount"]
+    X --> U["docker build: root, network,<br/>no resource caps"]
+
+    linkStyle 1 stroke-dasharray: 6 4
+```
+
+The dashed edge is the one that does not exist. It is the whole design.
+
+So the trust boundary for an environment is the person who built it: a
+malicious Dockerfile produces a malicious base image, and the sandbox
+limits still apply but the image's contents are yours to vouch for. The
+name is validated (Docker tag rules, anchored, so `../..` cannot become a
+path) but the *contents* are not, and cannot be.
+
 ## What was tried and rejected
 
 Both of these were measured against real containers and reverted, rather
@@ -145,6 +180,11 @@ isolation guarantee.
   full `/tmp`, can still consume host resources.
 - **The brief network window during a dependency install** is a real
   window. It is narrow and constrained to named packages, but it exists.
+- **A custom environment is only as trustworthy as its Dockerfile.**
+  HyperBox validates the environment's *name*, applies every limit to a
+  sandbox built on it, and verifies those limits against the real
+  container — but it does not inspect what the image contains. You built
+  it; you vouch for it.
 
 If you need a hard isolation boundary for genuinely adversarial code, you
 need a VM or a microVM sandbox, not a local container.
