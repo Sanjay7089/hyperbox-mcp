@@ -22,6 +22,7 @@ def usage() -> str:
         "    --format json          mcpServers block (Claude Desktop, generic)\n"
         "    --format cursor        servers block (.vscode/mcp.json)\n"
         "    --format yaml          Codeaira mcpservers/config.yaml\n"
+        "    --format antigravity   Antigravity mcp_config.json\n"
         "  hyperbox envs            List environments create_sandbox can use\n"
         "  hyperbox build <name>    Build an environment from a Dockerfile\n"
         "    --custom <path>        Copy that Dockerfile in and build it\n"
@@ -109,9 +110,9 @@ def dispatch(argv: list[str]) -> int:
                 print(f"hyperbox config: unknown option {arg!r}\n")
                 print(usage())
                 return 2
-        if fmt not in {"json", "cursor", "yaml"}:
+        if fmt not in {"json", "cursor", "yaml", "antigravity"}:
             print(f"hyperbox config: unknown format {fmt!r}. "
-                  "Use json, cursor or yaml.\n")
+                  "Use json, cursor, yaml or antigravity.\n")
             return 2
         from hyperbox_mcp.clientconfig import print_config
 

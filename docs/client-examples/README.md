@@ -7,6 +7,7 @@ and will not match your machine:
 hyperbox config                  # Claude Desktop and most clients
 hyperbox config --format cursor  # Cursor / VS Code
 hyperbox config --format yaml    # Codeaira
+hyperbox config --format antigravity  # Antigravity
 ```
 
 The command fills in its own absolute path and a `PATH` containing your
@@ -57,4 +58,5 @@ not much longer.
 
 - [cursor.md](cursor.md) — Cursor / VS Code, `.vscode/mcp.json`
 - [codeaira.md](codeaira.md) — Codeaira, `mcpservers/config.yaml`
+- [antigravity.md](antigravity.md) — Antigravity, `~/.gemini/antigravity/mcp_config.json`
 - [claude-desktop.md](claude-desktop.md) — Claude Desktop

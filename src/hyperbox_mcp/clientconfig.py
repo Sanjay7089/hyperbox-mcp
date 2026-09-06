@@ -127,8 +127,10 @@ def render(fmt: str = "json") -> str:
         ]
         return "\n".join(lines)
 
-    # Cursor and VS Code use "servers" in .vscode/mcp.json; Claude Desktop
-    # and most others use "mcpServers". Same object either way.
+    # Cursor and VS Code use "servers" in .vscode/mcp.json; Claude Desktop,
+    # Antigravity and most others use "mcpServers". Same object either way,
+    # so antigravity needs no branch here — only a different file to put it
+    # in, which notes() names.
     key = "servers" if fmt == "cursor" else "mcpServers"
     return json.dumps({key: {SERVER_NAME: entry}}, indent=2)
 
@@ -142,6 +144,13 @@ def notes(fmt: str) -> list[str]:
         out.append("Codeaira: merge into mcpservers/config.yaml")
     elif fmt == "cursor":
         out.append("Cursor / VS Code: merge into .vscode/mcp.json")
+    elif fmt == "antigravity":
+        out.append(
+            "Antigravity: merge into ~/.gemini/antigravity/mcp_config.json"
+        )
+        out.append(
+            "  (restart Antigravity afterwards; it reads the file at startup)"
+        )
     else:
         out.append("Merge into your client's MCP config (Claude Desktop: "
                    "claude_desktop_config.json)")
