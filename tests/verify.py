@@ -25,6 +25,7 @@ edit the implementation until you've ruled the environment out.
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import uuid
 
@@ -266,6 +267,24 @@ async def _check_tool_layer(language: str, backend: str) -> None:
             str(sorted(names)),
         )
 
+        # create_sandbox exposes environment, and it is the ONLY way an
+        # agent touches environments: building one runs arbitrary RUN
+        # commands as root with network access, so it stays a CLI action.
+        create_schema = {
+            t.name: getattr(t, "input_schema", None) or t.inputSchema
+            for t in await client.list_tools()
+        }["create_sandbox"]
+        check(
+            "create_sandbox accepts an environment",
+            "environment" in (create_schema.get("properties") or {}),
+            str(sorted((create_schema.get("properties") or {}))),
+        )
+        check(
+            "there is no tool that builds an environment",
+            not any("build" in n for n in names),
+            str(sorted(names)),
+        )
+
         # The comprehension layer: an agent must be able to discover the
         # limits without first crashing into them.
         resources = [str(r.uri) for r in await client.list_resources()]
@@ -276,6 +295,16 @@ async def _check_tool_layer(language: str, backend: str) -> None:
         )
         prompts = [p.name for p in await client.list_prompts()]
         check("run_safely prompt is published", "run_safely" in prompts, str(prompts))
+
+        caps = json.loads(
+            (await client.read_resource("hyperbox://capabilities"))[0].text
+        )
+        check(
+            "capabilities lists the environments an agent may pick",
+            isinstance(caps.get("environments"), list)
+            and "python" in caps["environments"],
+            str(caps.get("environments")),
+        )
 
         by_name = {t.name: t for t in await client.list_tools()}
         ann = by_name["destroy_sandbox"].annotations
@@ -292,6 +321,21 @@ async def _check_tool_layer(language: str, backend: str) -> None:
         )
 
         # --- strict input validation, at the tool boundary -------------
+        for label, env in (
+            ("path traversal", "../../etc"),
+            ("an unknown name", "definitely-not-built"),
+            ("a name with a space", "has space"),
+        ):
+            res = await client.call_tool(
+                "create_sandbox", {"language": language, "environment": env}
+            )
+            payload = res.data if hasattr(res, "data") else res
+            check(
+                f"create_sandbox refuses {label} as an environment",
+                isinstance(payload, dict) and "error" in payload,
+                str(payload)[:110],
+            )
+
         bad_inputs = {
             "negative timeout is rejected": {
                 "sandbox_id": "a" * 12, "code": "print(1)", "timeout": -5},

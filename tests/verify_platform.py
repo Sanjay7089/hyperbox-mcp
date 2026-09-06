@@ -417,6 +417,45 @@ def main() -> int:
         "a root StreamHandler must never reach stdout",
     )
 
+    # --- 6g. the background sweep keeps running -----------------------
+    #
+    # Before this loop existed the inactivity TTL was enforced only by
+    # restarting the process: serve() swept once and then blocked in
+    # mcp.run(). A server inside an editor stays up for days.
+    calls = []
+    real_collect, real_interval = server.collect_garbage, policy.GC_INTERVAL_SECONDS
+    try:
+        policy.GC_INTERVAL_SECONDS = 0.05
+
+        def counting_collect():
+            calls.append(1)
+            # Fail every other sweep: a failing sweep must not kill the
+            # thread, or GC silently stops for the life of the process.
+            if len(calls) % 2 == 0:
+                raise RuntimeError("engine unreachable")
+            return []
+
+        server.collect_garbage = counting_collect
+        t = threading.Thread(target=server._background_gc_loop, daemon=True)
+        t.start()
+        deadline = time.time() + 3.0
+        while len(calls) < 5 and time.time() < deadline:
+            time.sleep(0.05)
+    finally:
+        server.collect_garbage = real_collect
+        policy.GC_INTERVAL_SECONDS = real_interval
+
+    check(
+        "the background GC sweeps repeatedly, not once",
+        len(calls) >= 5,
+        f"{len(calls)} sweeps in 3s",
+    )
+    check(
+        "a failing sweep does not kill the GC thread",
+        len(calls) >= 5 and t.is_alive(),
+        "the loop kept going after a raised exception",
+    )
+
     # --- 7. no POSIX-only calls left on an import path ---------------
     offenders = []
     for path in Path("src/hyperbox_mcp").glob("*.py"):
