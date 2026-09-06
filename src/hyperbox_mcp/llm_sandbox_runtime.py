@@ -23,17 +23,12 @@ assumed from its docs:
   and installed packages persist between runs; interpreter memory does
   not.
 
-Measured limits of hardening this backend (see docs/security-model.md):
-
-- A non-root `user` makes the container unusable. llm-sandbox provisions
-  a virtualenv at /sandbox/.sandbox-venv during environment setup, which
-  needs root in these images; as uid 1000 every subsequent exec fails
-  with 127 because the interpreter was never created.
-- cap_drop: ["ALL"] breaks it too, even as root: dropping
-  CAP_DAC_OVERRIDE removes root's permission-bypass, so llm-sandbox
-  cannot read the file it just copied into /sandbox (Errno 13).
-Both were tried against a real container and reverted. What survives is
-applied below.
+Two standard hardening measures do NOT work against this backend and
+were reverted after being measured: a non-root `user` (the backend needs
+root to provision its virtualenv, so every exec then fails with 127) and
+cap_drop: ["ALL"] (without CAP_DAC_OVERRIDE it cannot read the file it
+just copied into /sandbox). What survives is applied below and explained
+in docs/security.md.
 """
 
 from __future__ import annotations

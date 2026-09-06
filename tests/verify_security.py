@@ -196,7 +196,7 @@ async def main() -> int:
             # break this backend (llm-sandbox builds a venv under
             # /sandbox during setup, which needs root in these images),
             # so the honest test asserts what is observed and keeps
-            # docs/security-model.md from claiming otherwise.
+            # docs/security.md from claiming otherwise.
             probe = (
                 await client.call_tool(
                     "run",

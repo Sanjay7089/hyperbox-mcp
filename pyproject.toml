@@ -1,17 +1,47 @@
 [project]
 name = "hyperbox-mcp"
 version = "0.2.0"
-description = "MCP server that lets any agent run code in a disposable Docker/Podman container before it touches your real project."
+description = "MCP server that runs LLM-generated code in a disposable Docker/Podman container before it touches your real project."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
+authors = [{ name = "Sanjay Jat" }]
+keywords = [
+    "mcp",
+    "model-context-protocol",
+    "sandbox",
+    "docker",
+    "podman",
+    "llm",
+    "agent",
+    "code-execution",
+    "container",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Testing",
+    "Topic :: Security",
+    "Topic :: System :: Emulators",
+]
 dependencies = [
     "fastmcp>=4.0.2,<5",
     "llm-sandbox[docker,podman]>=0.3.44,<0.4",
 ]
 
-[dependency-groups]
-dev = ["pytest>=8.0"]
+[project.urls]
+Homepage = "https://github.com/Sanjay7089/hyperbox-mcp"
+Repository = "https://github.com/Sanjay7089/hyperbox-mcp"
+Issues = "https://github.com/Sanjay7089/hyperbox-mcp/issues"
+Changelog = "https://github.com/Sanjay7089/hyperbox-mcp/blob/main/CHANGELOG.md"
 
 [project.scripts]
 hyperbox = "hyperbox_mcp.server:main"

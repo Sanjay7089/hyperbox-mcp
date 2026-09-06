@@ -1,15 +1,20 @@
 # HyperBox
 
-**A local MCP server that runs LLM-generated code inside restricted
-Docker containers.**
+**An MCP server that runs LLM-generated code in a disposable container,
+so your agent can test its own work before it touches your project.**
+
+[![PyPI](https://img.shields.io/pypi/v/hyperbox-mcp.svg)](https://pypi.org/project/hyperbox-mcp/)
+[![Python](https://img.shields.io/pypi/pyversions/hyperbox-mcp.svg)](https://pypi.org/project/hyperbox-mcp/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+---
 
 Your agent writes code and wants to run it. By default that happens on
 your machine, against your files, with your credentials. Usually fine.
 Occasionally it is `rm -rf`, a global install that breaks another
 project, or a script that quietly talks to production.
 
-HyperBox gives the agent somewhere else to run it: create a sandbox, run
-in it as many times as you need, destroy it when done.
+HyperBox gives the agent somewhere else to run it.
 
 ```mermaid
 flowchart LR
@@ -18,29 +23,57 @@ flowchart LR
     r -->|"stderr says what broke"| f["run(fixed code)"]
     f --> r
     r -->|"it works"| d["destroy_sandbox()"]
-    f -.->|"only now, and only if you<br/>have seen it pass"| host["apply to the real project"]
+    f -.->|"only now, and only if<br/>you have seen it pass"| host["apply to the real project"]
 ```
 
-The loop matters more than any single call: the agent gets real stderr
-and a real exit code, so it can fix the code and try again somewhere that
-cannot hurt you — and only then touch your project.
+The loop matters more than any single call: the agent gets real stdout,
+stderr and exit codes, so it can fix its code and try again somewhere
+that cannot hurt you — and only then touch your project.
+
+## Quick start
+
+```bash
+pip install hyperbox-mcp     # or: uv tool install hyperbox-mcp
+hyperbox doctor --pull       # check the machine, fetch the sandbox image
+hyperbox config --format json
+```
+
+Merge that config into your MCP client and restart it. Full instructions,
+including Cursor, Antigravity and Codeaira, are in
+**[docs/setup.md](docs/setup.md)**.
+
+Requires Python 3.11+ and either Docker or Podman.
+
+## What your agent gets
+
+| Tool | What it does |
+|---|---|
+| `create_sandbox(language, backend, environment)` | A persistent, disposable container. Returns a `sandbox_id`. |
+| `run(sandbox_id, code, libraries, timeout)` | Executes code. Returns `{stdout, stderr, exit_code, success, timed_out}` — never a bare "it failed". |
+| `destroy_sandbox(sandbox_id)` | Tears it down. Idempotent, and confirmed against the engine before it claims success. |
+
+Plus a `hyperbox://capabilities` resource publishing the exact limits, so
+an agent can read them instead of discovering them by failing.
+
+Within one sandbox, the filesystem and installed packages persist between
+runs; variables do not, because each run is a fresh process. Write what
+you need to keep to `/work`.
 
 ## Why use it
 
-- **Generated code runs somewhere other than your MCP client's process.**
-  No access to your filesystem, your project, or the container engine.
-- **Resource limits are set by the server**, not negotiable by the model:
-  1 GB memory, 1 CPU, 128 processes, a 60-second ceiling, capped output —
-  and they are read back off the real container, so a sandbox is never
-  described as limited when it is not.
+- **Generated code runs outside your client's process.** No access to
+  your filesystem, your project, or the container engine.
+- **Limits are server policy, not negotiable by the model** — 1 GB
+  memory, 1 CPU, 128 processes, a 60-second ceiling, capped output. They
+  are read back off the real container, so a sandbox is never *described*
+  as limited when it is not.
 - **The network is sealed** before any submitted code runs. Declared
   dependencies install in a separate step that closes again afterwards.
 - **Cleanup survives restarts.** Ownership lives in a registry outside
   your repo, so a restarted server — or a second one your client launched
   — can still find and destroy a sandbox it did not create.
-- **Failure is reported honestly.** `run` returns real stdout, stderr and
-  exit codes, and an unreachable engine is an error rather than a cheerful
-  "already cleaned up".
+- **Failure is reported honestly.** An unreachable engine is an error,
+  not a cheerful "already cleaned up".
 
 ## It contains hostile code — the proof, not the promise
 
@@ -66,97 +99,35 @@ PASS  sandbox is destroyed cleanly afterwards
 The fork bomb stopped at 126 processes against a ceiling of 128. Run it
 yourself — that is why it ships as a test.
 
-## Install and run
+## Custom environments
 
-Requires **Python 3.11+** and **Docker** running.
-
-```bash
-git clone <this repository>
-cd hyperbox
-uv sync
-uv run hyperbox doctor
-```
-
-`hyperbox doctor` checks your engine, the sandbox image, the registry,
-and then creates a real sandbox, runs code in it and destroys it. It
-exits 0 only if all of that worked, and every failure line names its fix.
-
-Then register it with any MCP client that speaks stdio:
-
-```json
-{
-  "mcpServers": {
-    "hyperbox": {
-      "command": "uv",
-      "args": ["run", "--project", "/absolute/path/to/hyperbox", "hyperbox"],
-      "env": { "PATH": "/usr/local/bin:/usr/bin:/bin" }
-    }
-  }
-}
-```
-
-Use absolute paths, and make sure `PATH` includes your container engine's
-CLI — MCP clients often launch servers with a trimmed environment.
-
-## The tools
-
-| Tool | What it does |
-|---|---|
-| `create_sandbox(language, backend, environment)` | A persistent, disposable container. Returns a `sandbox_id`. `backend` defaults to `auto`; `environment` picks a prebuilt image. |
-| `run(sandbox_id, code, libraries, timeout)` | Executes code. Returns `{stdout, stderr, exit_code, success, timed_out}` — never a bare "it failed". |
-| `destroy_sandbox(sandbox_id)` | Tears it down. Idempotent, and confirmed against the engine before it claims success. |
-
-There is also a `hyperbox://capabilities` resource publishing the exact
-limits, so an agent can read them instead of discovering them by failing.
-
-**Language:** `python`. **Engines:** Docker and Podman, both passing the
-full suite against real containers. `auto` picks whichever is running,
-preferring Docker.
-
-## Environments
-
-Every sandbox starts from a base image. The default is a plain Python
-image, so anything beyond the standard library is a package install on
-each new sandbox. To start from something heavier — numpy and pandas
-already present, say — build an environment once:
+Start sandboxes from a heavier image so you do not pay a package install
+every time:
 
 ```bash
 hyperbox build data-science --custom ./Dockerfile
-hyperbox envs                      # what create_sandbox can now use
+hyperbox envs
 ```
 
-Then the agent asks for it by name:
+Your agent then asks for it by name:
 `create_sandbox(environment="data-science")`. A running server picks up a
 new environment without a restart.
 
-**Building is a CLI action, deliberately.** A build runs whatever the
-Dockerfile says — arbitrary commands, as root, with network access, under
-none of the limits that apply to a sandbox. There is no tool that builds
-an environment, so an agent can use what you made and cannot make one.
-
-Selecting an environment changes only the base image. Every limit is
-still applied and still read back off the real container, and a custom
-image that cannot report results is refused like any other.
-
-Within one sandbox the filesystem and installed packages persist between
-runs; variables do not, because each run is a fresh process. Write what
-you need to keep to `/work`.
+Building is a CLI action on purpose — an agent can use an environment,
+but cannot create one. See [docs/security.md](docs/security.md).
 
 ## What it does not do
 
 Be clear-eyed about the boundary:
 
 - **Local containers share your host's kernel.** This is developer
-  containment, not a claim of absolute isolation. A kernel exploit or a
-  container escape reaches your machine. There is no gVisor, no
+  containment, not absolute isolation. There is no gVisor, no
   Firecracker, no VM boundary that HyperBox itself provides.
 - **It is not a multi-tenant boundary.** Do not use it to run untrusted
   third-party code as a service.
 - **Code runs as root inside the container.** A non-root user was tried
-  and breaks the execution backend's environment setup; the container
-  boundary, `no-new-privileges` and the resource limits are what confine
-  it. The reasoning is in
-  [docs/security-model.md](docs/security-model.md).
+  and breaks the execution backend; the reasoning is in
+  [docs/security.md](docs/security.md).
 - **Dependencies come from the public index** and are not vetted.
 
 If you need a hard boundary for genuinely adversarial code, you want a VM
@@ -164,21 +135,24 @@ or microVM sandbox, not a local container.
 
 ## Documentation
 
-- [Architecture](docs/architecture.md) — how the pieces fit, and why
-- [Security model](docs/security-model.md) — what is enforced, and what is not
-- [Troubleshooting](docs/troubleshooting.md) — every failure and its fix
-- [Development](docs/development.md) — the rules, the suites, how to extend it
+- **[Setup](docs/setup.md)** — install, client configuration, environments, CLI reference
+- **[Security model](docs/security.md)** — what is enforced, how it is proven, what it does not cover
+- **[Troubleshooting](docs/troubleshooting.md)** — when something does not work
+- **[Changelog](CHANGELOG.md)**
+- **[Contributing](CONTRIBUTING.md)**
 
-## Verify
+## Testing
+
+There are no mocks on the sandbox path, on purpose — mocking Docker would
+prove only that the mock works. Every acceptance suite runs against a real
+container:
 
 ```bash
-uv run python tests/run_all.py docker
+python tests/run_all.py docker      # and: podman
 ```
 
-Every suite, against real containers, with a check that nothing was left
-behind. There are no mocked tests on the sandbox path on purpose: mocking
-Docker would prove only that the mock works.
+Takes 5–15 minutes. It also asserts that no containers were left behind.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).

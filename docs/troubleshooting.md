@@ -320,4 +320,4 @@ under `/work`.
 Only plain package names are accepted: `requests`, `pandas==2.2.0`,
 `uvicorn[standard]`. Installer flags, URLs, filesystem paths and VCS
 references are refused on purpose — that install is the only moment the
-sandbox can reach the network. See [security-model.md](security-model.md).
+sandbox can reach the network. See [security.md](security.md).

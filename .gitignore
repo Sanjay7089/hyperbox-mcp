@@ -11,3 +11,8 @@ build/
 # Editor / assistant configuration is per-developer, not product material.
 .claude/
 .semantic-search/
+
+# Internal engineering notes: design rationale, the log of what was tried
+# and reverted, and talk material. Kept local on purpose — the public repo
+# documents what HyperBox does, not the story of building it.
+internal/

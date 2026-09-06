@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  host-checks:
+    # The host-side suite: file locking, engine discovery, path handling,
+    # config generation, environment resolution, log rotation. It needs no
+    # container, so it runs on every push.
+    #
+    # It is NOT the full acceptance suite. Containment, resource limits and
+    # the lifecycle are proven against real Docker and Podman containers,
+    # which is a local step -- see CONTRIBUTING.md.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.11", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install
+        run: pip install -e .
+
+      - name: Host portability suite
+        run: python tests/verify_platform.py
+
+      - name: The CLI runs without a container engine
+        run: |
+          hyperbox --version
+          hyperbox config --format json
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build wheel and sdist
+        run: |
+          pip install build twine
+          python -m build
+          twine check dist/*
