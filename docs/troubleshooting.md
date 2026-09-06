@@ -184,8 +184,7 @@ cannot clobber each other's registries:
 
 ```
 $HYPERBOX_STATE_DIR                       if set
-$XDG_STATE_HOME/hyperbox-mcp              if set
-~/.local/state/hyperbox-mcp               otherwise
+~/.hyperbox/state                         otherwise
 ```
 
 `hyperbox doctor` prints the path in use and lists any sandboxes on file,

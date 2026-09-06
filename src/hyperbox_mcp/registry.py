@@ -30,6 +30,7 @@ Two invariants make the lifecycle race-safe:
 from __future__ import annotations
 
 import os
+import shutil
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -77,15 +78,56 @@ class SandboxRecord:
         return self.state == STATE_READY
 
 
+#: Where v0.1 kept its registry, before everything HyperBox owns moved
+#: under one directory. Read once, at first use, to migrate.
+_LEGACY_STATE_DIR = Path.home() / ".local" / "state" / "hyperbox-mcp"
+
+
 def state_dir() -> Path:
-    """Where registry state lives. Never inside the repo."""
+    """Where registry state lives. Never inside the repo.
+
+    Everything HyperBox owns lives under ~/.hyperbox: state, logs and
+    environments. XDG_STATE_HOME is deliberately no longer consulted —
+    set HYPERBOX_STATE_DIR to put the registry somewhere else.
+    """
     override = os.environ.get("HYPERBOX_STATE_DIR")
     if override:
         return Path(override).expanduser()
-    xdg = os.environ.get("XDG_STATE_HOME")
-    if xdg:
-        return Path(xdg) / "hyperbox-mcp"
-    return Path.home() / ".local" / "state" / "hyperbox-mcp"
+    return Path.home() / ".hyperbox" / "state"
+
+
+def migrate_legacy_state(destination: Path) -> bool:
+    """Move a v0.1 registry to `destination`. True if anything moved.
+
+    Deliberately conservative, because both directories can exist at once
+    on a machine that has run two versions:
+
+    * Never overwrite. If the destination already has a registry, that one
+      is newer or equally valid, and clobbering it would discard live
+      sandboxes.
+    * Move registry.db and its WAL siblings only. Lock files are never
+      deleted by design (see filelock.py), there can be hundreds, and
+      they are recreated on demand.
+    * Never delete the source directory. Leaving it costs nothing and
+      makes the migration reversible by hand.
+    """
+    source = _LEGACY_STATE_DIR
+    if source == destination or not (source / "registry.db").exists():
+        return False
+    if (destination / "registry.db").exists():
+        return False
+    try:
+        destination.mkdir(parents=True, exist_ok=True)
+        for name in ("registry.db", "registry.db-wal", "registry.db-shm"):
+            candidate = source / name
+            if candidate.exists():
+                shutil.move(str(candidate), str(destination / name))
+    except OSError:
+        # A failed migration must not stop the server starting: the new
+        # directory simply begins empty, and GC reclaims the old
+        # containers by label.
+        return False
+    return True
 
 
 class Registry:
@@ -97,8 +139,13 @@ class Registry:
     """
 
     def __init__(self, directory: Path | None = None) -> None:
+        explicit = directory is not None
         self.dir = directory or state_dir()
         self.dir.mkdir(parents=True, exist_ok=True)
+        # Only for the default location: a caller that named a directory
+        # gets exactly that directory and nothing moved into it.
+        if not explicit:
+            migrate_legacy_state(self.dir)
         self.path = self.dir / "registry.db"
         self._init_db()
 

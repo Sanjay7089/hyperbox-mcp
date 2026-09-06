@@ -179,11 +179,20 @@ never disturbs it:
 
 | Platform | Default |
 |---|---|
-| macOS / Linux | `~/.local/state/hyperbox-mcp/` |
-| Windows | `%USERPROFILE%\.local\state\hyperbox-mcp\` |
+| macOS / Linux | `~/.hyperbox/state/` |
+| Windows | `%USERPROFILE%\.hyperbox\state\` |
 
-Override with `HYPERBOX_STATE_DIR`. It holds a small SQLite registry and
-per-sandbox lock files. Deleting it while sandboxes are running orphans
+Everything HyperBox owns lives under `~/.hyperbox`: `state/`, `logs/` and
+`environments/`. Override the state directory with `HYPERBOX_STATE_DIR`.
+
+Upgrading from v0.1 moves the registry across from
+`~/.local/state/hyperbox-mcp/` on first start. The move is conservative:
+it never overwrites a registry already at the new path, it moves only
+`registry.db` and its WAL siblings, and it leaves the old directory in
+place. `XDG_STATE_HOME` is no longer consulted — set `HYPERBOX_STATE_DIR`
+if you want the registry somewhere specific.
+
+It holds a small SQLite registry and per-sandbox lock files. Deleting it while sandboxes are running orphans
 their containers — they are still labelled, so
 `docker ps -a --filter label=hyperbox-mcp.managed=true` finds them.
 
