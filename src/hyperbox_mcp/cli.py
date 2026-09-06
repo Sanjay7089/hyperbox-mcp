@@ -7,6 +7,7 @@ stdio MCP client is reading that stream.
 
 from __future__ import annotations
 
+import sys
 from importlib.metadata import PackageNotFoundError, version
 
 
@@ -24,6 +25,8 @@ def usage() -> str:
         "  hyperbox envs            List environments create_sandbox can use\n"
         "  hyperbox build <name>    Build an environment from a Dockerfile\n"
         "    --custom <path>        Copy that Dockerfile in and build it\n"
+        "  hyperbox logs            Show the server log\n"
+        "    --follow               Keep printing as new lines arrive\n"
         "  hyperbox --version       Print the installed version\n"
     )
 
@@ -33,6 +36,39 @@ def _version() -> str:
         return version("hyperbox-mcp")
     except PackageNotFoundError:  # pragma: no cover - running from source
         return "unknown (not installed as a package)"
+
+
+def _logs(follow: bool = False) -> int:
+    """Print the server log, optionally following it.
+
+    Written in Python rather than shelling out to `tail -f`: this package
+    is expected to work on Windows, where there is no tail, and building
+    a shell command out of a home-directory path invites quoting bugs.
+    """
+    import time
+
+    from hyperbox_mcp.server import LOG_FILE
+
+    if not LOG_FILE.exists():
+        print(f"No log yet at {LOG_FILE}")
+        print("It is created when the server next starts.")
+        return 1
+
+    with LOG_FILE.open("r", encoding="utf-8", errors="replace") as fh:
+        sys.stdout.write(fh.read())
+        if not follow:
+            return 0
+        sys.stdout.flush()
+        try:
+            while True:
+                line = fh.readline()
+                if line:
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+                else:
+                    time.sleep(0.4)
+        except KeyboardInterrupt:
+            return 0
 
 
 def dispatch(argv: list[str]) -> int:
@@ -80,6 +116,14 @@ def dispatch(argv: list[str]) -> int:
         from hyperbox_mcp.clientconfig import print_config
 
         return print_config(fmt)
+
+    if command == "logs":
+        unknown = [a for a in rest if a not in {"--follow", "-f"}]
+        if unknown:
+            print(f"hyperbox logs: unknown option {unknown[0]!r}\n")
+            print(usage())
+            return 2
+        return _logs(follow=bool(rest))
 
     if command == "envs":
         if rest:

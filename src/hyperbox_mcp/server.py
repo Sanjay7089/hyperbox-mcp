@@ -24,9 +24,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import logging.handlers
 import sys
 import uuid
 from contextlib import asynccontextmanager, suppress
+from pathlib import Path
 
 from fastmcp import Context, FastMCP
 
@@ -43,6 +46,55 @@ from hyperbox_mcp.llm_sandbox_runtime import (
 from hyperbox_mcp.registry import Registry
 from hyperbox_mcp.runtime import Runtime, SandboxHandle
 from hyperbox_mcp.validate import InvalidInput
+
+LOG_DIR = Path.home() / ".hyperbox" / "logs"
+LOG_FILE = LOG_DIR / "server.log"
+LOG_MAX_BYTES = 5_000_000
+LOG_BACKUPS = 3
+
+logger = logging.getLogger("hyperbox")
+
+
+def _setup_logging() -> None:
+    """Attach the rotating file handler. Called from serve(), NOT at import.
+
+    A stdio server cannot print: stdout is the JSON-RPC channel and the
+    client is reading it. A file is the only place a record of what
+    happened can go.
+
+    This is not done at import because the console script is
+    `hyperbox_mcp.server:main`, so every CLI invocation — `hyperbox
+    doctor`, `hyperbox config` — imports this module. Configuring at
+    import would create and open a log file as a side effect of asking
+    for the version.
+
+    It rotates: an unbounded log on a server that runs for weeks is a
+    disk leak, not a diagnostic.
+    """
+    if logger.handlers:  # serve() called twice in one process
+        return
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        handler = logging.handlers.RotatingFileHandler(
+            LOG_FILE, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUPS,
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        # An unwritable log directory must not stop the server from
+        # serving. Say so on stderr, which is safe, and carry on.
+        print(f"hyperbox: logging disabled ({exc})", file=sys.stderr)
+        return
+    handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(message)s", "%Y-%m-%d %H:%M:%S"
+        )
+    )
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    # Never propagate to the root logger: a root StreamHandler would put
+    # log lines on stdout, in the middle of the JSON-RPC stream.
+    logger.propagate = False
+
 
 mcp = FastMCP("HyperBox")
 
@@ -165,6 +217,7 @@ def collect_garbage() -> list[str]:
                 if current is None or not current.expired or not current.ready:
                     continue  # revived by a concurrent run, or already gone
                 try:
+                    logger.info("GC: reclaiming expired sandbox %s", rec.sandbox_id)
                     _runtime.destroy(_handle_for(current))
                 except EngineUnavailableError:
                     # Cannot confirm removal, so keep the row. Reclaiming
@@ -194,6 +247,7 @@ def collect_garbage() -> list[str]:
     try:
         return _runtime.gc(_registry.known_ids())
     except Exception:  # noqa: BLE001 - never let GC break startup
+        logger.exception("engine-level GC failed")
         return []
 
 
@@ -352,6 +406,10 @@ async def create_sandbox(
     # process skips reservations, so nothing can reclaim the container
     # that is about to be created under this id.
     sandbox_id = uuid.uuid4().hex[:12]
+    logger.info(
+        "creating sandbox %s (language=%s, backend=%s, environment=%s)",
+        sandbox_id, language, resolved, environment,
+    )
     _registry.reserve(sandbox_id, language=language, backend=resolved)
     try:
         async with _heartbeat(ctx, what):
@@ -385,6 +443,7 @@ async def create_sandbox(
         }
 
     _registry.finalize(sandbox_id, handle.meta.get("container_ref", ""))
+    logger.info("sandbox %s ready", sandbox_id)
     await ctx.report_progress(100, 100, "sandbox ready")
     return {
         "sandbox_id": handle.sandbox_id,
@@ -456,6 +515,10 @@ def run(
                 _handle_for(rec), code=code, libraries=libraries, timeout=timeout
             )
             _registry.touch(sandbox_id)
+            logger.info(
+                "run in %s finished (exit_code=%s, timed_out=%s)",
+                sandbox_id, result.exit_code, result.timed_out,
+            )
     except EngineUnavailableError as exc:
         return {"error": str(exc)}
     except SandboxRuntimeError as exc:
@@ -524,6 +587,7 @@ def destroy_sandbox(sandbox_id: str) -> dict:
                     )
                 }
             _registry.remove(sandbox_id)
+            logger.info("destroyed sandbox %s", sandbox_id)
     except EngineUnavailableError as exc:
         return {
             "error": (
@@ -565,6 +629,10 @@ def run_safely(code: str, language: str = "python") -> str:
 
 
 def serve() -> None:
+    # Before the sweep, so the first collection is on the record.
+    _setup_logging()
+    logger.info("HyperBox server starting")
+
     # Reclaim anything left behind by a previous process before serving.
     collect_garbage()
     mcp.run()
@@ -580,7 +648,7 @@ def main() -> None:
     """
     argv = sys.argv[1:]
     if argv and argv[0] in {
-        "doctor", "config", "envs", "build",
+        "doctor", "config", "envs", "build", "logs",
         "--version", "-V", "help", "--help", "-h",
     }:
         from hyperbox_mcp.cli import dispatch
