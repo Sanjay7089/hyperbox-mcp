@@ -66,7 +66,8 @@ class Runtime(Protocol):
     """
 
     def create(
-        self, language: str, backend: str, sandbox_id: str
+        self, language: str, backend: str, sandbox_id: str,
+        environment: str | None = None,
     ) -> SandboxHandle:
         """Create and open a persistent sandbox under the given id.
 
@@ -76,6 +77,10 @@ class Runtime(Protocol):
         reclaiming a container whose registration has not landed yet.
         The id must be baked into the container's labels; `gc` matches
         on them.
+
+        When `environment` is given, the sandbox is built on that
+        environment's image instead of the language default. The
+        environment must already exist; a backend never builds one.
 
         Raises on an unsupported language/backend BEFORE allocating
         anything, and must not return a handle for a sandbox whose

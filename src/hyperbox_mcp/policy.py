@@ -13,6 +13,7 @@ import the other to learn what a sandbox is allowed to do.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 # --- what we promise we can deliver -------------------------------------
 #
@@ -23,6 +24,70 @@ import os
 # re-promoted the moment it clears the hardened suite.
 
 LANGUAGES = ("python",)
+
+# --- environment resolution (call-time, not import-time) ----------------
+#
+# The only built-in is python — its image is published and pulled by
+# `doctor --pull`. Everything else is discovered from
+# ~/.hyperbox/environments/*/Dockerfile, written there by `hyperbox
+# build`.
+#
+# This is resolved on every call rather than once at import because
+# building happens in a DIFFERENT process: `hyperbox build` is a CLI
+# subcommand, while the server is a long-lived stdio process. A map
+# computed at import can never see an environment built after the server
+# started, and the server can run for days. Caching on the directory's
+# mtime keeps the hot path to one stat() instead of a walk.
+#
+# Limitation, stated honestly: a directory's mtime changes when entries
+# are added or removed, not when a Dockerfile inside one is edited. That
+# is correct here — we consume the image tag, which does not change when
+# its Dockerfile does; rebuilding is `hyperbox build`, and that replaces
+# the image in place.
+
+_BUILTIN_ENVIRONMENTS: dict[str, str] = {
+    "python": "ghcr.io/vndee/sandbox-python-311-bullseye:latest",
+}
+
+_ENV_DIR = Path.home() / ".hyperbox" / "environments"
+_env_cache: dict[str, str] | None = None
+_env_mtime: float = 0.0
+
+
+def environments() -> dict[str, str]:
+    """Resolve the environment map, cached on the environment directory's mtime.
+
+    Built-ins are always present. A custom environment appears as soon as
+    its directory holds a Dockerfile — no server restart needed.
+
+    Always returns a fresh dict: callers must never be handed the cache
+    itself, or a caller that mutates the result corrupts every later one.
+    """
+    global _env_cache, _env_mtime
+
+    if not _ENV_DIR.exists():
+        return dict(_BUILTIN_ENVIRONMENTS)
+
+    try:
+        current_mtime = _ENV_DIR.stat().st_mtime
+    except OSError:
+        # An unreadable environment directory is not a reason to fail a
+        # sandbox that asked for a built-in.
+        return dict(_BUILTIN_ENVIRONMENTS)
+
+    if _env_cache is not None and current_mtime == _env_mtime:
+        return dict(_env_cache)
+
+    result = dict(_BUILTIN_ENVIRONMENTS)
+    for item in sorted(_ENV_DIR.iterdir()):
+        if item.is_dir() and (item / "Dockerfile").exists():
+            # A built-in name is never shadowed by a local directory.
+            if item.name not in result:
+                result[item.name] = f"hyperbox-local/{item.name}:latest"
+    _env_cache = result
+    _env_mtime = current_mtime
+    return dict(result)
+
 
 BACKENDS = ("docker", "podman")
 

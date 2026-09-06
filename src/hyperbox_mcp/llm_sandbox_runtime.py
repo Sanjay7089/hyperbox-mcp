@@ -54,7 +54,7 @@ from llm_sandbox import (
 )
 from llm_sandbox.exceptions import SandboxTimeoutError
 
-from hyperbox_mcp import engine
+from hyperbox_mcp import engine, policy
 from hyperbox_mcp.engine import ContainerGoneError, EngineUnavailableError
 from hyperbox_mcp.policy import (
     CPU_PERIOD,
@@ -123,6 +123,11 @@ _BACKEND_EXCEPTIONS = (
 
 class UnsupportedLanguageError(ValueError):
     pass
+
+
+class UnsupportedEnvironmentError(ValueError):
+    """Named environment does not exist. Distinct from a language error
+    so the agent is told to build one, not to pick another language."""
 
 
 UnsupportedBackendError = engine.UnsupportedBackendError
@@ -424,9 +429,26 @@ class LLMSandboxRuntime:
     # --- Runtime protocol ---------------------------------------------
 
     def create(
-        self, language: str, backend: str, sandbox_id: str
+        self, language: str, backend: str, sandbox_id: str,
+        environment: str | None = None,
     ) -> SandboxHandle:
         self._validate(language, backend)
+        # Resolved ONCE, and before anything is allocated. Calling
+        # policy.environments() twice would leave a window in which a
+        # concurrent `hyperbox build` changes the map between the
+        # membership check and the lookup, turning a clean error into a
+        # KeyError.
+        image = None
+        if environment:
+            available = policy.environments()
+            if environment not in available:
+                raise UnsupportedEnvironmentError(
+                    f"Unknown environment '{environment}'. "
+                    f"Available: {', '.join(sorted(available))}. "
+                    "Build one with: hyperbox build <name> --custom <Dockerfile>"
+                )
+            image = available[environment]
+
         # Fail on an unreachable engine before allocating anything, with
         # that engine's own actionable fix rather than a generic error.
         engine.client(backend)
@@ -436,6 +458,11 @@ class LLMSandboxRuntime:
         # this is empty and the backend speaks for itself.
         extra = engine.session_kwargs(backend)
         session_backend = extra.pop("session_backend", backend)
+        # Only the base image changes. runtime_configs still carries every
+        # limit, so _assert_policy_applied still reads them back off the
+        # real container and the canary still refuses a mute sandbox.
+        if image:
+            extra["image"] = image
         try:
             session = create_session(
                 backend=_BACKENDS[session_backend],
