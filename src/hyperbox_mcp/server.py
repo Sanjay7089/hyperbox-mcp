@@ -36,6 +36,7 @@ from hyperbox_mcp.llm_sandbox_runtime import (
     LLMSandboxRuntime,
     SandboxRuntimeError,
     UnsupportedBackendError,
+    UnsupportedEnvironmentError,
     UnsupportedLanguageError,
     image_for,
 )
@@ -216,6 +217,9 @@ def capabilities() -> str:
     return json.dumps(
         {
             "languages": sorted(policy.LANGUAGES),
+            # Resolved per request, so an environment the user built
+            # after this server started is listed without a restart.
+            "environments": sorted(policy.environments()),
             "backends": sorted(policy.BACKEND_CHOICES),
             "experimental_backends": sorted(policy.EXPERIMENTAL_BACKENDS),
             "limits": {
@@ -274,7 +278,10 @@ def capabilities() -> str:
     }
 )
 async def create_sandbox(
-    ctx: Context, language: str = "python", backend: str = "auto"
+    ctx: Context,
+    language: str = "python",
+    backend: str = "auto",
+    environment: str | None = None,
 ) -> dict:
     """Create a disposable container to run untrusted or unverified code in.
 
@@ -300,11 +307,18 @@ async def create_sandbox(
     language may take a minute while its image is pulled; progress is
     reported while that happens.
 
+    Pass `environment` to start from a heavier prebuilt image — for
+    example one that already has numpy and pandas, so you do not pay a
+    package install on every run. The `hyperbox://capabilities` resource
+    lists the ones that exist. You cannot create an environment: only the
+    user can, with `hyperbox build` at their terminal.
+
     Read the `hyperbox://capabilities` resource for exact limits.
     """
     try:
         language = validate.language(language)
         requested = validate.backend(backend)
+        environment = validate.environment(environment)
     except InvalidInput as exc:
         return {"error": str(exc)}
 
@@ -318,8 +332,13 @@ async def create_sandbox(
     # Say what the slow part is going to be, so a first run reads as a
     # download rather than a hang.
     try:
+        wanted_image = (
+            policy.environments()[environment]
+            if environment
+            else image_for(language)
+        )
         cold = not await asyncio.to_thread(
-            engine.image_present, resolved, image_for(language)
+            engine.image_present, resolved, wanted_image
         )
     except Exception:  # noqa: BLE001 - only used to word the message
         cold = False
@@ -343,8 +362,14 @@ async def create_sandbox(
                 language=language,
                 backend=resolved,
                 sandbox_id=sandbox_id,
+                environment=environment,
             )
-    except (UnsupportedLanguageError, UnsupportedBackendError, InvalidInput) as exc:
+    except (
+        UnsupportedLanguageError,
+        UnsupportedEnvironmentError,
+        UnsupportedBackendError,
+        InvalidInput,
+    ) as exc:
         _registry.remove(sandbox_id)
         return {"error": str(exc)}
     except EngineUnavailableError as exc:
@@ -365,6 +390,7 @@ async def create_sandbox(
         "sandbox_id": handle.sandbox_id,
         "language": handle.language,
         "backend": handle.backend,
+        "environment": environment,
         "next": (
             f"Call run(sandbox_id='{handle.sandbox_id}', code=...) to execute. "
             "Call destroy_sandbox when done."

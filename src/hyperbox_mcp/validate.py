@@ -25,6 +25,7 @@ from __future__ import annotations
 import math
 import re
 
+from hyperbox_mcp import policy
 from hyperbox_mcp.policy import (
     BACKEND_CHOICES,
     LANGUAGES,
@@ -171,3 +172,41 @@ def libraries(value: object) -> list[str]:
             )
         cleaned.append(name)
     return cleaned
+
+
+# Docker tag component rules: lowercase alphanumerics, dots, hyphens and
+# underscores, starting with a letter or digit, 64 chars max. The pattern
+# is anchored, so it also blocks path traversal — the name becomes both a
+# path segment under ~/.hyperbox/environments/ and an image tag, and
+# "../.." must never reach either.
+_ENVIRONMENT_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+
+
+def environment(value: object) -> str | None:
+    """Validate an environment name. None means "use the language default".
+
+    Resolved against policy.environments() on every call rather than a
+    cached list, so an environment built while the server was running is
+    accepted without a restart.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise InvalidInput(
+            f"environment must be a string, got {type(value).__name__}."
+        )
+    name = value.strip().lower()
+    if not _ENVIRONMENT_NAME.match(name):
+        raise InvalidInput(
+            f"'{value[:64]}' is not a valid environment name. Use lowercase "
+            "letters, digits, dots, hyphens or underscores, starting with a "
+            "letter or digit (1-64 characters)."
+        )
+    available = policy.environments()
+    if name not in available:
+        raise InvalidInput(
+            f"Unknown environment '{name}'. "
+            f"Available: {', '.join(sorted(available))}. "
+            "Build one with: hyperbox build <name> --custom <Dockerfile>"
+        )
+    return name
