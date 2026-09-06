@@ -157,6 +157,11 @@ MAX_LIBRARIES = 25
 LABEL_MANAGED = "hyperbox-mcp.managed"
 LABEL_ID = "hyperbox-mcp.id"
 
+#: How often the background sweep runs while the server is up. The
+#: inactivity TTL is otherwise enforced only by restarting the process,
+#: and a server inside an editor can stay up for days.
+GC_INTERVAL_SECONDS = 300.0
+
 #: A container younger than this is never reclaimed by GC, even with no
 #: registry row. Belt-and-braces behind the registry's create-time
 #: reservation: another process may be mid-create right now.

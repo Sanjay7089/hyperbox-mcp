@@ -27,6 +27,8 @@ import json
 import logging
 import logging.handlers
 import sys
+import threading
+import time
 import uuid
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
@@ -628,6 +630,32 @@ def run_safely(code: str, language: str = "python") -> str:
     )
 
 
+def _background_gc_loop() -> None:
+    """Sweep for expired sandboxes for as long as the server is up.
+
+    Without this, the inactivity TTL is enforced only by restarting the
+    process: serve() swept once and then blocked in mcp.run(). A server
+    running inside an editor stays up for days, so every expired sandbox
+    stayed on the machine until the editor was closed.
+
+    No new race: collect_garbage() takes the per-sandbox registry lock,
+    and so does every tool that touches one.
+    """
+    while True:
+        time.sleep(policy.GC_INTERVAL_SECONDS)
+        try:
+            reclaimed = collect_garbage()
+        except Exception:  # noqa: BLE001 - a failed sweep is not fatal
+            # Reported, not swallowed. A GC that quietly stops working
+            # looks exactly like a GC with nothing to do.
+            logger.exception("background GC sweep failed")
+        else:
+            if reclaimed:
+                logger.info(
+                    "background GC reclaimed %d container(s)", len(reclaimed)
+                )
+
+
 def serve() -> None:
     # Before the sweep, so the first collection is on the record.
     _setup_logging()
@@ -635,6 +663,12 @@ def serve() -> None:
 
     # Reclaim anything left behind by a previous process before serving.
     collect_garbage()
+
+    # Daemon: it must never hold the process open at shutdown.
+    threading.Thread(
+        target=_background_gc_loop, daemon=True, name="hyperbox-gc"
+    ).start()
+
     mcp.run()
 
 
