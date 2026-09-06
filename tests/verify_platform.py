@@ -15,6 +15,7 @@ is a crash on Windows rather than a degradation, so they get a test.
 from __future__ import annotations
 
 import json
+import logging.handlers
 import os
 import platform
 import subprocess
@@ -251,7 +252,11 @@ def main() -> int:
 
     ok = True
     detail = []
-    for fmt, key in (("json", "mcpServers"), ("cursor", "servers")):
+    for fmt, key in (
+        ("json", "mcpServers"),
+        ("cursor", "servers"),
+        ("antigravity", "mcpServers"),
+    ):
         text = clientconfig.render(fmt)
         try:
             parsed = json.loads(text)
@@ -269,7 +274,7 @@ def main() -> int:
     check(
         "generated client configs are valid JSON with a launchable command",
         ok,
-        "; ".join(detail) or "json and cursor formats both parse",
+        "; ".join(detail) or "json, cursor and antigravity all parse",
     )
 
     yaml_text = clientconfig.render("yaml")
@@ -290,17 +295,147 @@ def main() -> int:
         "backslashes and spaces escape correctly for JSON and YAML",
     )
 
+    # --- 6e. environments resolve at call time, not at import --------
+    #
+    # The bug this guards: environments used to be a dict built at import.
+    # `hyperbox build` runs in a DIFFERENT process from the server, so a
+    # server that had already started could never see a new environment —
+    # it needed a restart, while the tool description promised it did not.
+    from hyperbox_mcp import validate  # noqa: E402
+
+    with tempfile.TemporaryDirectory() as td:
+        fake_env_dir = Path(td) / "environments"
+        fake_env_dir.mkdir()
+        real_dir, real_cache, real_mtime = (
+            policy._ENV_DIR, policy._env_cache, policy._env_mtime
+        )
+        try:
+            policy._ENV_DIR = fake_env_dir
+            policy._env_cache, policy._env_mtime = None, 0.0
+
+            before = policy.environments()
+            check(
+                "an empty environment directory still offers the built-in",
+                set(before) == {"python"},
+                f"got {sorted(before)}",
+            )
+
+            # Built AFTER the first resolution, exactly as a CLI build
+            # would be while the server is already running.
+            (fake_env_dir / "late-built").mkdir()
+            (fake_env_dir / "late-built" / "Dockerfile").write_text("FROM x\n")
+
+            after = policy.environments()
+            check(
+                "an environment built after startup appears with no restart",
+                "late-built" in after,
+                f"got {sorted(after)}",
+            )
+            check(
+                "its image tag is the one hyperbox build produces",
+                after.get("late-built") == "hyperbox-local/late-built:latest",
+                str(after.get("late-built")),
+            )
+            check(
+                "the map is a copy, so a caller cannot corrupt the cache",
+                policy.environments() is not policy.environments(),
+                "each call returns a fresh dict",
+            )
+
+            # A directory without a Dockerfile is not an environment.
+            (fake_env_dir / "no-dockerfile").mkdir()
+            check(
+                "a directory with no Dockerfile is not offered",
+                "no-dockerfile" not in policy.environments(),
+                "only directories holding a Dockerfile count",
+            )
+
+            # Validation, on the same live map.
+            rejected = []
+            for bad in ("../../etc", "has space", "", "x" * 65, 123):
+                try:
+                    validate.environment(bad)
+                except validate.InvalidInput:
+                    rejected.append(bad)
+            check(
+                "bad environment names are refused, traversal included",
+                len(rejected) == 5,
+                f"{len(rejected)}/5 refused",
+            )
+            check(
+                "a real environment is accepted",
+                validate.environment("late-built") == "late-built"
+                and validate.environment(None) is None,
+                "named environment resolves, None means default",
+            )
+            unknown_ok = False
+            try:
+                validate.environment("never-built")
+            except validate.InvalidInput as exc:
+                unknown_ok = "hyperbox build" in str(exc)
+            check(
+                "an unknown environment says how to build one",
+                unknown_ok,
+                "the error names the CLI command",
+            )
+        finally:
+            policy._ENV_DIR = real_dir
+            policy._env_cache, policy._env_mtime = real_cache, real_mtime
+
+    # --- 6f. the log rotates instead of growing without bound --------
+    import logging  # noqa: E402
+
+    from hyperbox_mcp import server  # noqa: E402
+
+    with tempfile.TemporaryDirectory() as td:
+        log_file = Path(td) / "server.log"
+        handler = logging.handlers.RotatingFileHandler(
+            log_file, maxBytes=2_000, backupCount=2, encoding="utf-8"
+        )
+        probe = logging.getLogger("hyperbox-rotation-probe")
+        probe.addHandler(handler)
+        probe.setLevel(logging.INFO)
+        for _ in range(400):
+            probe.info("x" * 80)
+        handler.close()
+        probe.removeHandler(handler)
+        rotated = sorted(Path(td).glob("server.log*"))
+        biggest = max(f.stat().st_size for f in rotated)
+        check(
+            "the server log rotates rather than growing without bound",
+            len(rotated) <= 3 and biggest < 10_000,
+            f"{len(rotated)} files, largest {biggest} bytes",
+        )
+    check(
+        "importing the server configures no log handlers",
+        not logging.getLogger("hyperbox").handlers,
+        "logging is set up in serve(), not at import",
+    )
+    check(
+        "the server logger never propagates to the root logger",
+        server.logger.propagate is False or not server.logger.handlers,
+        "a root StreamHandler must never reach stdout",
+    )
+
     # --- 7. no POSIX-only calls left on an import path ---------------
     offenders = []
     for path in Path("src/hyperbox_mcp").glob("*.py"):
         text = path.read_text(encoding="utf-8")
-        for needle in ("import fcntl", "os.getuid(", "import pwd", "import termios"):
+        # os.system( is on this list because `hyperbox logs` was once
+        # implemented as os.system("tail -f ..."): POSIX-only, and a shell
+        # interpolation of a home-directory path. The needle list had no
+        # entry that would have caught it.
+        for needle in (
+            "import fcntl", "os.getuid(", "import pwd", "import termios",
+            "os.system(",
+        ):
             if needle in text and "WINDOWS" not in text and "filelock" not in path.name:
                 offenders.append(f"{path.name}: {needle}")
     check(
         "no unguarded POSIX-only calls in the package",
         not offenders,
-        "; ".join(offenders) or "checked fcntl, getuid, pwd, termios",
+        "; ".join(offenders)
+        or "checked fcntl, getuid, pwd, termios, os.system",
     )
 
     return summarize()
