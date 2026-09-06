@@ -32,7 +32,20 @@ use it**, and keep the annotations honest.
 
 **4. An entry in the language or backend map is a promise.** It says the
 tool can deliver that environment. Nothing goes in until the full suite
-passes for it against a real container.
+passes for it against a real container. The same rule sets what may be a
+*built-in* environment: only an image the project itself can pull. v0.2
+briefly shipped `data-science` and `browser-testing` as built-ins with no
+Dockerfile in the repo and, for one of them, no image anywhere — they
+worked on the machine that had built them by hand and nowhere else.
+Locally built environments are discovered from `~/.hyperbox/environments`
+at runtime; they are the user's promise, not the project's.
+
+**4b. What is resolved at import cannot change while the server runs.**
+`hyperbox build` is a CLI subcommand and the server is a long-lived stdio
+process, so anything the server learns about the filesystem at import is
+frozen for days. Environments are resolved per call for exactly this
+reason. Before assuming a module-level constant is fine, ask which
+process writes it and which reads it.
 
 **5. A slow operation must keep talking.** MCP clients kill a tool call
 after a period of silence. Anything that can take longer than a few

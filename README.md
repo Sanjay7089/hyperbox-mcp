@@ -92,7 +92,7 @@ CLI — MCP clients often launch servers with a trimmed environment.
 
 | Tool | What it does |
 |---|---|
-| `create_sandbox(language, backend)` | A persistent, disposable container. Returns a `sandbox_id`. `backend` defaults to `auto`. |
+| `create_sandbox(language, backend, environment)` | A persistent, disposable container. Returns a `sandbox_id`. `backend` defaults to `auto`; `environment` picks a prebuilt image. |
 | `run(sandbox_id, code, libraries, timeout)` | Executes code. Returns `{stdout, stderr, exit_code, success, timed_out}` — never a bare "it failed". |
 | `destroy_sandbox(sandbox_id)` | Tears it down. Idempotent, and confirmed against the engine before it claims success. |
 
@@ -102,6 +102,31 @@ limits, so an agent can read them instead of discovering them by failing.
 **Language:** `python`. **Engines:** Docker and Podman, both passing the
 full suite against real containers. `auto` picks whichever is running,
 preferring Docker.
+
+## Environments
+
+Every sandbox starts from a base image. The default is a plain Python
+image, so anything beyond the standard library is a package install on
+each new sandbox. To start from something heavier — numpy and pandas
+already present, say — build an environment once:
+
+```bash
+hyperbox build data-science --custom ./Dockerfile
+hyperbox envs                      # what create_sandbox can now use
+```
+
+Then the agent asks for it by name:
+`create_sandbox(environment="data-science")`. A running server picks up a
+new environment without a restart.
+
+**Building is a CLI action, deliberately.** A build runs whatever the
+Dockerfile says — arbitrary commands, as root, with network access, under
+none of the limits that apply to a sandbox. There is no tool that builds
+an environment, so an agent can use what you made and cannot make one.
+
+Selecting an environment changes only the base image. Every limit is
+still applied and still read back off the real container, and a custom
+image that cannot report results is refused like any other.
 
 Within one sandbox the filesystem and installed packages persist between
 runs; variables do not, because each run is a fresh process. Write what
