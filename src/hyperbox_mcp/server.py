@@ -580,7 +580,8 @@ def main() -> None:
     """
     argv = sys.argv[1:]
     if argv and argv[0] in {
-        "doctor", "config", "--version", "-V", "help", "--help", "-h"
+        "doctor", "config", "envs", "build",
+        "--version", "-V", "help", "--help", "-h",
     }:
         from hyperbox_mcp.cli import dispatch
 

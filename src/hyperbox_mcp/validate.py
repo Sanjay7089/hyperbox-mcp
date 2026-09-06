@@ -182,15 +182,14 @@ def libraries(value: object) -> list[str]:
 _ENVIRONMENT_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 
 
-def environment(value: object) -> str | None:
-    """Validate an environment name. None means "use the language default".
+def environment_name(value: object) -> str:
+    """Validate the SHAPE of an environment name, not its existence.
 
-    Resolved against policy.environments() on every call rather than a
-    cached list, so an environment built while the server was running is
-    accepted without a restart.
+    `hyperbox build` needs this: the environment it is about to create
+    does not exist yet, but its name still becomes a directory under
+    ~/.hyperbox and an image tag, so it is checked before either is
+    touched.
     """
-    if value is None:
-        return None
     if not isinstance(value, str):
         raise InvalidInput(
             f"environment must be a string, got {type(value).__name__}."
@@ -202,6 +201,19 @@ def environment(value: object) -> str | None:
             "letters, digits, dots, hyphens or underscores, starting with a "
             "letter or digit (1-64 characters)."
         )
+    return name
+
+
+def environment(value: object) -> str | None:
+    """Validate an environment name and that it exists. None = language default.
+
+    Resolved against policy.environments() on every call rather than a
+    list captured at import, so an environment built while the server was
+    running is accepted without a restart.
+    """
+    if value is None:
+        return None
+    name = environment_name(value)
     available = policy.environments()
     if name not in available:
         raise InvalidInput(
