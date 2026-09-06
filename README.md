@@ -39,7 +39,7 @@ hyperbox config --format json
 ```
 
 Merge that config into your MCP client and restart it. Full instructions,
-including Cursor, Antigravity and Codeaira, are in
+including Cursor, Antigravity and Continue-based clients, are in
 **[docs/setup.md](docs/setup.md)**.
 
 Requires Python 3.11+ and either Docker or Podman.

@@ -279,7 +279,7 @@ def main() -> int:
 
     yaml_text = clientconfig.render("yaml")
     check(
-        "the yaml config has the shape Codeaira expects",
+        "the yaml config has the list shape Continue-based clients expect",
         yaml_text.startswith("mcpServers:") and "- name: hyperbox" in yaml_text,
         yaml_text.splitlines()[1] if "\n" in yaml_text else yaml_text,
     )

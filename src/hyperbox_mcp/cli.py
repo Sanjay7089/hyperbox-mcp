@@ -21,7 +21,7 @@ def usage() -> str:
         "  hyperbox config          Print a ready-to-paste MCP client config\n"
         "    --format json          mcpServers block (Claude Desktop, generic)\n"
         "    --format cursor        servers block (.vscode/mcp.json)\n"
-        "    --format yaml          Codeaira mcpservers/config.yaml\n"
+        "    --format yaml          YAML list (Continue-based clients)\n"
         "    --format antigravity   Antigravity mcp_config.json\n"
         "  hyperbox envs            List environments create_sandbox can use\n"
         "  hyperbox build <name>    Build an environment from a Dockerfile\n"

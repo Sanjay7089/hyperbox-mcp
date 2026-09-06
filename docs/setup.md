@@ -51,7 +51,7 @@ Do not hand-write the config. Generate it:
 hyperbox config --format json          # Claude Desktop, and most clients
 hyperbox config --format cursor        # Cursor / VS Code
 hyperbox config --format antigravity   # Antigravity
-hyperbox config --format yaml          # Codeaira
+hyperbox config --format yaml          # Continue-based clients
 ```
 
 The config goes to stdout and the guidance to stderr, so you can redirect
@@ -62,7 +62,7 @@ it cleanly. Merge it into the file your client uses:
 | Claude Desktop | `claude_desktop_config.json` | `mcpServers` |
 | Cursor / VS Code | `.vscode/mcp.json` | `servers` |
 | Antigravity | `~/.gemini/antigravity/mcp_config.json` | `mcpServers` |
-| Codeaira | `mcpservers/config.yaml` | `mcpServers` |
+| Continue-based clients | `mcpservers/config.yaml` | `mcpServers` (a YAML list) |
 
 Then **restart the client** — MCP configs are read at launch.
 

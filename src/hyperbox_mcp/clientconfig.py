@@ -116,7 +116,7 @@ def render(fmt: str = "json") -> str:
     entry = _server_entry()
 
     if fmt == "yaml":
-        # Codeaira: mcpservers/config.yaml
+        # Continue-based clients: a YAML list under mcpServers.
         lines = [
             "mcpServers:",
             f"  - name: {SERVER_NAME}",
@@ -141,7 +141,10 @@ def notes(fmt: str) -> list[str]:
     out = []
 
     if fmt == "yaml":
-        out.append("Codeaira: merge into mcpservers/config.yaml")
+        out.append(
+            "Continue-based clients: merge into your mcpservers YAML "
+            "config (often mcpservers/config.yaml)"
+        )
     elif fmt == "cursor":
         out.append("Cursor / VS Code: merge into .vscode/mcp.json")
     elif fmt == "antigravity":

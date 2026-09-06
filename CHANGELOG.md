@@ -47,7 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `hyperbox config` generates ready-to-paste MCP client configuration for
-  Claude Desktop, Cursor / VS Code and Codeaira, so paths and Windows
+  Claude Desktop, Cursor / VS Code and Continue-based clients, so paths and Windows
   escaping are never typed by hand.
 
 ## [0.1.1] — 2026-09-05
