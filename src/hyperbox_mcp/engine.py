@@ -555,7 +555,8 @@ def _build_client(backend: str, cli_timeout: float = PODMAN_CLI_TIMEOUT) -> Any:
                 "The podman client library is not installed.",
                 "Reinstall the project: `uv sync`.",
             ) from exc
-        if _probe_failed_recently("podman", ""):
+        configured = os.environ.get("CONTAINER_HOST", "")
+        if not configured and _probe_failed_recently("podman", ""):
             raise EngineUnavailableError(
                 "No Podman socket is accepting connections (checked in the "
                 f"last {PROBE_FAILURE_TTL:.0f}s).",
@@ -577,7 +578,14 @@ def _build_client(backend: str, cli_timeout: float = PODMAN_CLI_TIMEOUT) -> Any:
             client = PodmanClient.from_env()
             client.ping()
         except Exception as exc:  # noqa: BLE001
-            _record_probe_failure("podman", socket_path)
+            # File it under the endpoint actually tried. The "" key means
+            # "nothing could be resolved"; a user's own CONTAINER_HOST
+            # failing is a different fact and filing it under "" would make
+            # the next call claim no socket is accepting connections about
+            # an endpoint that was never a socket.
+            _record_probe_failure(
+                "podman", socket_path or os.environ.get("CONTAINER_HOST", "")
+            )
             raise EngineUnavailableError(
                 f"Podman is not reachable ({type(exc).__name__}: {exc}).",
                 _PODMAN_MACHINE_FIX,
