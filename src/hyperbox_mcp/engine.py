@@ -21,6 +21,7 @@ what keeps the execution backend replaceable.
 from __future__ import annotations
 
 import glob
+import http.client
 import os
 import shutil
 import socket
@@ -686,6 +687,23 @@ _STALE_CONNECTION_MARKERS = (
 )
 
 
+#: Connection-shaped failures, by TYPE.
+#:
+#: The REST driver raises stdlib exceptions directly, so this is the
+#: reliable half: ConnectionError covers refused, reset, aborted and broken
+#: pipe, and http.client.RemoteDisconnected already subclasses
+#: ConnectionResetError. Naming it anyway is documentation — it is the one
+#: an idle engine actually produces.
+#:
+#: TimeoutError is deliberately absent. A hung engine retried is two long
+#: waits instead of one, and the caller learns nothing new the second time.
+_STALE_CONNECTION_TYPES: tuple[type[BaseException], ...] = (
+    ConnectionError,
+    http.client.RemoteDisconnected,
+    http.client.IncompleteRead,
+)
+
+
 def is_stale_connection(exc: BaseException) -> bool:
     """Whether `exc` looks like a dropped connection rather than an outage.
 
@@ -693,8 +711,22 @@ def is_stale_connection(exc: BaseException) -> bool:
     retrying against a fresh client, an unreachable engine is not, and
     conflating them would let a real outage be retried into a false
     success. The registry's correctness rests on that line.
+
+    Two mechanisms, and the second is on its way out. Types are checked
+    first because they cannot drift — an exception either is a
+    ConnectionError or is not. The string markers below remain only for the
+    SDK path: docker-py and podman-py wrap failures in their own exception
+    classes and the shape survives solely in the message text, which is
+    also why several of the markers are phrasings from requests and pywin32
+    that stdlib will never produce. When those dependencies go, so does the
+    string half.
     """
-    text = f"{exc} {getattr(exc, '__cause__', '')}".lower()
+    if isinstance(exc, _STALE_CONNECTION_TYPES):
+        return True
+    cause = getattr(exc, "__cause__", None)
+    if cause is not None and isinstance(cause, _STALE_CONNECTION_TYPES):
+        return True
+    text = f"{exc} {cause or ''}".lower()
     return any(marker in text for marker in _STALE_CONNECTION_MARKERS)
 
 
