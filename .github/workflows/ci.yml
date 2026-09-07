@@ -2,7 +2,10 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # The v0.3 work happens on its own branch and is not merged until it
+    # has passed on Windows and in a real MCP client, so the branch needs
+    # the same three-OS host checks main gets.
+    branches: [main, v0.3-engine]
   pull_request:
 
 jobs:
