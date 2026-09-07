@@ -71,7 +71,22 @@ if WINDOWS:
     ERROR_PIPE_BUSY = 231
     ERROR_BROKEN_PIPE = 109
     ERROR_NO_DATA = 232
+    ERROR_INVALID_HANDLE = 6
+    ERROR_PIPE_NOT_CONNECTED = 233
+    ERROR_MORE_DATA = 234
     PIPE_READMODE_BYTE = 0x00000000
+
+    #: Codes that mean "the stream ended", not "something went wrong".
+    #:
+    #: Measured against Podman 5.5.1 on Windows: reading the hijacked exec
+    #: stream ends with ERROR_INVALID_HANDLE (6) rather than the
+    #: ERROR_BROKEN_PIPE (109) a socket would give. Treating 6 as a failure
+    #: turns a completed exec into a ConnectionResetError with the whole
+    #: payload already in hand. docker-py avoids this by reading through
+    #: overlapped I/O; this is the same conclusion reached from the error
+    #: codes instead.
+    _PIPE_EOF = (ERROR_BROKEN_PIPE, ERROR_NO_DATA, ERROR_PIPE_NOT_CONNECTED,
+                 ERROR_INVALID_HANDLE)
 
     _k32.CreateFileW.argtypes = [
         wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
@@ -92,6 +107,11 @@ if WINDOWS:
     _k32.WriteFile.restype = wintypes.BOOL
     _k32.CloseHandle.argtypes = [wintypes.HANDLE]
     _k32.CloseHandle.restype = wintypes.BOOL
+    _k32.SetNamedPipeHandleState.argtypes = [
+        wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD),
+        ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(wintypes.DWORD),
+    ]
+    _k32.SetNamedPipeHandleState.restype = wintypes.BOOL
 
     class _PipeRaw(io.RawIOBase):
         """RawIOBase over a pipe handle, so io.BufferedReader can wrap it.
@@ -104,6 +124,7 @@ if WINDOWS:
 
         def __init__(self, handle) -> None:
             self._handle = handle
+            self.eof_code = 0
 
         def readable(self) -> bool:
             return True
@@ -119,10 +140,18 @@ if WINDOWS:
             )
             if not ok:
                 code = ctypes.get_last_error()
-                # A closed pipe is EOF, not an error: the engine hangs up
-                # at the end of a response body and of an exec stream.
-                if code in (ERROR_BROKEN_PIPE, ERROR_NO_DATA):
+                # A closed pipe is EOF, not an error: the engine hangs up at
+                # the end of a response body and of an exec stream, and
+                # Windows reports that hangup with several different codes
+                # depending on how the handle was opened.
+                if code in _PIPE_EOF:
+                    self.eof_code = code
                     return 0
+                if code == ERROR_MORE_DATA:
+                    # Message-mode pipe with a short buffer: the data IS
+                    # there, so keep what arrived rather than failing.
+                    buffer[: read.value] = chunk[: read.value]
+                    return read.value
                 raise ConnectionResetError(
                     code, f"ReadFile failed (WinError {code})"
                 )
@@ -209,6 +238,13 @@ if WINDOWS:
                     raise ConnectionRefusedError(
                         code, f"CreateFileW retry failed (WinError {code})"
                     )
+            # Ask for byte mode rather than inheriting whatever the
+            # server created. In message mode a read shorter than the
+            # message returns ERROR_MORE_DATA, which is not how HTTP framing
+            # expects to be read. Best effort: a pipe already in byte mode
+            # refuses this and does not care.
+            mode = wintypes.DWORD(PIPE_READMODE_BYTE)
+            _k32.SetNamedPipeHandleState(handle, ctypes.byref(mode), None, None)
             self.sock = _PipeSocket(handle)
 
 
@@ -401,6 +437,7 @@ def probe(label: str, target: str) -> bool:
             {"Content-Type": "application/json"},
         )
         out, err = demux(raw)
+        print(f"        read {len(raw)} bytes from the hijacked stream")
         status2, body2 = request(target, "GET", f"{API}/exec/{exec_id}/json")
         code = json.loads(body2).get("ExitCode")
         ok = marker in out and "err" in err and code == 0
