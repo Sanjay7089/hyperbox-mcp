@@ -187,16 +187,27 @@ def attached_networks(container) -> list[str]:
     return list((settings.get("Networks") or {}).keys())
 
 
-def seal(backend: str, get_container: GetContainer, sandbox_id: str = "") -> None:
-    """Detach every network. Fails closed: if we cannot seal, the
-    caller must not be handed a sandbox we claim is sealed."""
+def seal(
+    list_attached: Callable[[], list[str]],
+    disconnect: Callable[[str], None],
+    sandbox_id: str = "",
+) -> None:
+    """Detach every network. Fails closed: if we cannot seal, the caller
+    must not be handed a sandbox we claim is sealed.
 
+    Takes callables rather than a client, because the two runtimes have no
+    common container type — one holds SDK objects, the other plain JSON
+    from the REST API. Passing a shim that satisfies only part of a client
+    interface is how the REST runtime came to hand a fake container object
+    to docker-py, which tried to serialise it as JSON. Naming exactly the
+    two operations needed makes that impossible.
+
+    Still wrapped in with_retry: an idle engine drops connections, and
+    sealing is as exposed to that as anything else.
+    """
     def seal_once():
-        client = engine.client(backend)
-        container = get_container()
-        container.reload()
-        for name in attached_networks(container):
-            client.networks.get(name).disconnect(container)
+        for name in list_attached():
+            disconnect(name)
 
     try:
         engine.with_retry(seal_once, "network sealing")
@@ -214,28 +225,28 @@ def seal(backend: str, get_container: GetContainer, sandbox_id: str = "") -> Non
 DEFAULT_NETWORK = {"docker": "bridge", "podman": "podman"}
 
 
-def unseal(backend: str, get_container: GetContainer) -> None:
-    """Attach the backend's default network for a build phase.
+def unseal(
+    backend: str,
+    list_available: Callable[[], list[str]],
+    connect: Callable[[str], None],
+) -> None:
+    """Attach a network for a build phase.
 
-    Docker calls it "bridge"; Podman calls it "podman". Hardcoding
-    either one breaks the other backend, so the name is chosen per
-    backend and verified against the engine before use.
+    Docker calls its default "bridge"; Podman calls it "podman". Hardcoding
+    either breaks the other, so the preferred name is chosen per backend and
+    checked against what the engine actually offers before use.
     """
-    client = engine.client(backend)
-    container = get_container()
     preferred = DEFAULT_NETWORK.get(backend, "bridge")
-    try:
-        network = client.networks.get(preferred)
-    except Exception:  # noqa: BLE001 - fall back to whatever exists
-        available = [getattr(n, "name", "") for n in client.networks.list()]
-        usable = [n for n in available if n and n != "none"]
-        if not usable:
-            raise SandboxRuntimeError(
-                f"No usable network on backend '{backend}' for a "
-                "dependency install."
-            ) from None
-        network = client.networks.get(usable[0])
-    network.connect(container)
+    available = [n for n in list_available() if n and n != "none"]
+    target = preferred if preferred in available else (
+        available[0] if available else ""
+    )
+    if not target:
+        raise SandboxRuntimeError(
+            f"No usable network on backend '{backend}' for a dependency "
+            "install."
+        )
+    connect(target)
 
 
 # --- failure explanation ---------------------------------------------

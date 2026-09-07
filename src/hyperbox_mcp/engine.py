@@ -389,6 +389,104 @@ def reset_podman_transport() -> None:
     _own_container_host = ""
 
 
+#: Where Docker's socket turns up. Docker Desktop creates several and the
+#: active context decides which one is authoritative, so this is a list to
+#: probe, not a guess to trust.
+_DOCKER_SOCKET_CANDIDATES = (
+    "~/.docker/run/docker.sock",
+    "/var/run/docker.sock",
+    "/run/docker.sock",
+)
+
+
+def _docker_context_endpoint() -> str:
+    """What `docker context` says the active endpoint is.
+
+    Consulted, not obeyed: it names a socket that may not be listening, and
+    the CLI may not be installed at all. The answer is liveness-tested like
+    every other candidate.
+    """
+    binary = shutil.which("docker")
+    if not binary:
+        return ""
+    try:
+        out = subprocess.run(
+            [binary, "context", "inspect", "--format",
+             "{{.Endpoints.docker.Host}}"],
+            capture_output=True, text=True, timeout=PODMAN_CLI_TIMEOUT_FAST,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    value = out.stdout.strip() if out.returncode == 0 else ""
+    return value[len("unix://"):] if value.startswith("unix://") else ""
+
+
+def docker_socket() -> str:
+    """A Docker socket that is accepting connections, or "".
+
+    DOCKER_HOST wins outright when set: it is a deliberate choice, and
+    quietly using a different endpoint than the one someone named is the
+    same wrong answer as handing back Podman to a caller who asked for
+    Docker.
+    """
+    configured = os.environ.get("DOCKER_HOST", "").strip()
+    if configured:
+        return configured
+
+    candidates = []
+    reported = _docker_context_endpoint()
+    if reported:
+        candidates.append(reported)
+    candidates.extend(os.path.expanduser(p) for p in _DOCKER_SOCKET_CANDIDATES)
+    for candidate in candidates:
+        if _socket_is_live(candidate):
+            return candidate
+    return ""
+
+
+def endpoint_for(backend: str) -> str:
+    """The address the REST driver should dial for `backend`.
+
+    A path or URL rather than a client object: the REST driver builds its
+    own connections, and the transport it needs is decided by the address
+    it is given. Raises rather than returning an empty string, because
+    "nowhere to connect" is a diagnosis a caller should not have to infer.
+    """
+    if backend not in BACKENDS:
+        raise UnsupportedBackendError(
+            f"Unsupported backend '{backend}'. Supported: {', '.join(BACKENDS)}"
+        )
+    if WINDOWS:
+        # Podman has no named-pipe client of its own, so both engines are
+        # reached over pipes here; which pipe answers is discovered, and
+        # the product is confirmed by identify() afterwards rather than
+        # assumed from the name.
+        pipes = _windows_podman_pipes() if backend == "podman" else list(
+            _WINDOWS_DOCKER_PIPES
+        )
+        if not pipes:
+            raise EngineUnavailableError(
+                f"No named pipe found for {backend}.", _DOCKER_FIX
+            )
+        return pipes[0]
+
+    if backend == "podman":
+        socket_path = ensure_podman_transport()
+        if socket_path:
+            return socket_path
+        configured = os.environ.get("CONTAINER_HOST", "")
+        if configured:
+            return configured
+        raise EngineUnavailableError(
+            "No Podman socket is accepting connections.", _PODMAN_MACHINE_FIX
+        )
+
+    found = docker_socket()
+    if not found:
+        raise EngineUnavailableError("Docker is not reachable.", _DOCKER_FIX)
+    return found
+
+
 def identify(engine_client: Any) -> str:
     """Which engine is actually answering — the product, not the pipe.
 

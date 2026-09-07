@@ -261,12 +261,34 @@ class LLMSandboxRuntime:
         return sandbox_ops.attached_networks(container)
 
     def _seal(self, handle: SandboxHandle) -> None:
-        sandbox_ops.seal(
-            handle.backend, lambda: self._container(handle), handle.sandbox_id
-        )
+        # The client is fetched inside each callable, not captured: a
+        # stale-connection retry rebuilds the cached clients, and a closure
+        # holding the old one would reconnect to the socket that just died.
+        def attached() -> list[str]:
+            container = self._container(handle)
+            container.reload()
+            return sandbox_ops.attached_networks(container)
+
+        def disconnect(name: str) -> None:
+            engine.client(handle.backend).networks.get(name).disconnect(
+                self._container(handle)
+            )
+
+        sandbox_ops.seal(attached, disconnect, handle.sandbox_id)
 
     def _unseal(self, handle: SandboxHandle) -> None:
-        sandbox_ops.unseal(handle.backend, lambda: self._container(handle))
+        def available() -> list[str]:
+            return [
+                getattr(n, "name", "")
+                for n in engine.client(handle.backend).networks.list()
+            ]
+
+        def connect(name: str) -> None:
+            engine.client(handle.backend).networks.get(name).connect(
+                self._container(handle)
+            )
+
+        sandbox_ops.unseal(handle.backend, available, connect)
 
     def _session_for(self, handle: SandboxHandle):
         """Return a live session for `handle`, reattaching to its
