@@ -49,7 +49,7 @@ from llm_sandbox import (
 )
 from llm_sandbox.exceptions import SandboxTimeoutError
 
-from hyperbox_mcp import engine, policy, sandbox_ops
+from hyperbox_mcp import engine, errors, policy, sandbox_ops
 from hyperbox_mcp.engine import ContainerGoneError, EngineUnavailableError
 from hyperbox_mcp.policy import (
     CPU_PERIOD,
@@ -158,13 +158,11 @@ _BACKEND_EXCEPTIONS = (
 )
 
 
-class UnsupportedLanguageError(ValueError):
-    pass
-
-
-class UnsupportedEnvironmentError(ValueError):
-    """Named environment does not exist. Distinct from a language error
-    so the agent is told to build one, not to pick another language."""
+#: Both defined in errors.py, still ValueErrors. Kept distinct from each
+#: other on purpose: an unknown environment tells the agent to build one,
+#: an unsupported language tells it to pick another.
+UnsupportedLanguageError = errors.UnsupportedLanguageError
+UnsupportedEnvironmentError = errors.UnknownEnvironmentError
 
 
 UnsupportedBackendError = engine.UnsupportedBackendError

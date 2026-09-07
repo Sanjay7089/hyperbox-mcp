@@ -170,6 +170,33 @@ def main() -> int:
         str(broken),
     )
 
+    # 4b. Every failure is structured, and still readable by a v0.2 client.
+    #
+    #     The caller is usually a model that will read the error and
+    #     retry, so a code it can branch on and a fix it can act on are
+    #     worth more than prose. `error_message` carries the old bare
+    #     string for one release, because every client parsing that shape
+    #     would otherwise break on the day this changed.
+    # FastMCP may hand back the plain function or a wrapper; take
+    # whichever is callable rather than assuming.
+    run_fn = getattr(server.run, "fn", server.run)
+    bad = run_fn(sandbox_id="../etc/passwd", code="x")
+    payload = bad.get("error")
+    check(
+        "errors carry a machine-readable code and a compat string",
+        isinstance(payload, dict)
+        and payload.get("code") == "INVALID_INPUT"
+        and bad.get("error_message") == payload.get("message"),
+        f"code={payload.get('code') if isinstance(payload, dict) else payload!r}",
+    )
+    gone = run_fn(sandbox_id="000000000000", code="print(1)")
+    gone_payload = gone.get("error", {})
+    check(
+        "an unusable sandbox says so with a code and a next step",
+        gone_payload.get("code") == "SANDBOX_STALE" and bool(gone_payload.get("fix")),
+        f"code={gone_payload.get('code')} fix={gone_payload.get('fix', '')[:48]!r}",
+    )
+
     # 5. Timeout — a structured failure, not a crash and not a silent
     #    success. timed_out must actually be set, or the field is a lie.
     timed = rt.run(handle, snip["spin"], timeout=5)
@@ -446,7 +473,8 @@ async def _check_tool_layer(language: str, backend: str) -> None:
         ).data
         check(
             "unknown sandbox_id returns a readable error",
-            "error" in unknown and "No sandbox" in unknown["error"],
+            "error" in unknown
+            and "No sandbox" in unknown.get("error_message", ""),
             str(unknown)[:90],
         )
 

@@ -31,7 +31,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from hyperbox_mcp import engine, policy
+from hyperbox_mcp import engine, errors, policy
 from hyperbox_mcp.engine import ContainerGoneError, EngineUnavailableError
 from hyperbox_mcp.policy import (
     CPU_PERIOD,
@@ -53,9 +53,14 @@ from hyperbox_mcp.policy import (
 GetContainer = Callable[[], Any]
 
 
-class SandboxRuntimeError(RuntimeError):
+class SandboxRuntimeError(errors.SandboxError, RuntimeError):
     """Wraps any backend exception so callers never see a backend's own
-    types — keeps the backend replaceable."""
+    types — keeps the backend replaceable.
+
+    Still a RuntimeError, so existing handlers are unaffected.
+    """
+
+    code = "SANDBOX_FAILED"
 
 
 # --- what the engine must apply --------------------------------------

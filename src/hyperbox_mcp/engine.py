@@ -30,27 +30,21 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from hyperbox_mcp import errors
 from hyperbox_mcp.policy import BACKENDS
 
 
-class EngineUnavailableError(RuntimeError):
-    """The container engine could not be reached at all.
-
-    Carries a `fix` a developer can act on. Never raised to mean "the
-    container is gone" — that is ContainerGoneError.
-    """
-
-    def __init__(self, message: str, fix: str = "") -> None:
-        super().__init__(message if not fix else f"{message} {fix}")
-        self.fix = fix
-
-
-class ContainerGoneError(LookupError):
-    """The engine answered and confirmed this container does not exist."""
-
-
-class UnsupportedBackendError(ValueError):
-    pass
+# Defined in errors.py, re-exported here so every existing import keeps
+# working. They carry a machine-readable code and a `fix` now; the
+# behaviour, including which builtin each subclasses, is unchanged.
+#
+# The rule this module exists to enforce is unchanged too:
+# EngineUnavailableError means the engine could not be ASKED,
+# ContainerGoneError means it answered and said no. Neither subclasses the
+# other, so no handler can quietly treat them alike.
+EngineUnavailableError = errors.EngineUnavailableError
+ContainerGoneError = errors.ContainerGoneError
+UnsupportedBackendError = errors.UnsupportedBackendError
 
 
 WINDOWS = sys.platform == "win32"

@@ -35,7 +35,7 @@ from pathlib import Path
 
 from fastmcp import Context, FastMCP
 
-from hyperbox_mcp import engine, policy, validate
+from hyperbox_mcp import engine, errors, policy, validate
 from hyperbox_mcp.engine import EngineUnavailableError
 from hyperbox_mcp.llm_sandbox_runtime import (
     LLMSandboxRuntime,
@@ -194,13 +194,14 @@ def _handle_for(rec) -> SandboxHandle:
 
 
 def _no_sandbox(sandbox_id: str) -> dict:
-    return {
-        "error": (
+    return errors.to_result(
+        errors.SandboxStaleError(
             f"No sandbox '{sandbox_id}'. It was never created, was already "
-            "destroyed, or was reclaimed after its inactivity timeout. Call "
-            "create_sandbox and use the sandbox_id it returns."
+            "destroyed, or was reclaimed after its inactivity timeout.",
+            fix="Call create_sandbox and use the sandbox_id it returns.",
+            context={"sandbox_id": sandbox_id},
         )
-    }
+    )
 
 
 def collect_garbage() -> list[str]:
@@ -376,14 +377,12 @@ async def create_sandbox(
         requested = validate.backend(backend)
         environment = validate.environment(environment)
     except InvalidInput as exc:
-        return {"error": str(exc)}
+        return errors.to_result(exc)
 
     try:
         resolved = await asyncio.to_thread(engine.detect, requested)
-    except EngineUnavailableError as exc:
-        return {"error": str(exc)}
-    except UnsupportedBackendError as exc:
-        return {"error": str(exc)}
+    except (EngineUnavailableError, UnsupportedBackendError) as exc:
+        return errors.to_result(exc)
 
     # Say what the slow part is going to be, so a first run reads as a
     # download rather than a hang.
@@ -431,18 +430,13 @@ async def create_sandbox(
         InvalidInput,
     ) as exc:
         _registry.remove(sandbox_id)
-        return {"error": str(exc)}
-    except EngineUnavailableError as exc:
+        return errors.to_result(exc)
+    except (EngineUnavailableError, SandboxRuntimeError) as exc:
         _registry.remove(sandbox_id)
-        return {"error": str(exc)}
-    except SandboxRuntimeError as exc:
-        _registry.remove(sandbox_id)
-        return {"error": f"Failed to create sandbox: {exc}"}
+        return errors.to_result(exc)
     except Exception as exc:  # noqa: BLE001 — see run() for the rationale
         _registry.remove(sandbox_id)
-        return {
-            "error": f"Failed to create sandbox: {type(exc).__name__}: {exc}"
-        }
+        return errors.to_result(exc)
 
     _registry.finalize(sandbox_id, handle.meta.get("container_ref", ""))
     logger.info("sandbox %s ready", sandbox_id)
@@ -508,7 +502,7 @@ def run(
         libraries = validate.libraries(libraries)
         timeout = validate.timeout(timeout)
     except InvalidInput as exc:
-        return {"error": str(exc)}
+        return errors.to_result(exc)
 
     try:
         # Held for the whole call so two processes cannot drive the same
@@ -526,15 +520,13 @@ def run(
                 "run in %s finished (exit_code=%s, timed_out=%s)",
                 sandbox_id, result.exit_code, result.timed_out,
             )
-    except EngineUnavailableError as exc:
-        return {"error": str(exc)}
-    except SandboxRuntimeError as exc:
-        return {"error": str(exc)}
+    except (EngineUnavailableError, SandboxRuntimeError) as exc:
+        return errors.to_result(exc)
     except Exception as exc:  # noqa: BLE001
         # Results are ALWAYS structured. An unexpected backend exception
         # must reach the agent as something it can reason about, not as a
         # crashed tool call.
-        return {"error": f"{type(exc).__name__}: {exc}"}
+        return errors.to_result(exc)
     return {
         "stdout": _cap_output(result.stdout),
         "stderr": _cap_output(result.stderr),
@@ -570,7 +562,7 @@ def destroy_sandbox(sandbox_id: str) -> dict:
     try:
         sandbox_id = validate.sandbox_id(sandbox_id)
     except InvalidInput as exc:
-        return {"error": str(exc)}
+        return errors.to_result(exc)
 
     try:
         with _registry.lock(sandbox_id):
@@ -586,27 +578,28 @@ def destroy_sandbox(sandbox_id: str) -> dict:
             # record in place — see the runtime's destroy() contract.
             _runtime.destroy(handle)
             if _runtime.alive(handle):
-                return {
-                    "error": (
+                return errors.to_result(
+                    SandboxRuntimeError(
                         f"Sandbox '{sandbox_id}' container is still running "
                         "after destroy was attempted. The sandbox is still "
-                        "on file; try again."
+                        "on file.",
+                        fix="Call destroy_sandbox again.",
+                        context={"sandbox_id": sandbox_id},
                     )
-                }
+                )
             _registry.remove(sandbox_id)
             logger.info("destroyed sandbox %s", sandbox_id)
     except EngineUnavailableError as exc:
-        return {
-            "error": (
-                f"{exc} The sandbox is still on file and was NOT removed, "
-                "because a container that cannot be reached has not been "
-                "proven gone."
-            )
-        }
+        # The record is deliberately KEPT: a container that cannot be
+        # reached has not been proven gone, and forgetting it here is how
+        # orphans accumulate.
+        exc.context.setdefault("sandbox_id", sandbox_id)
+        exc.context["registry_row"] = "kept — removal could not be verified"
+        return errors.to_result(exc)
     except SandboxRuntimeError as exc:
-        return {"error": str(exc)}
+        return errors.to_result(exc)
     except Exception as exc:  # noqa: BLE001 — see run() for the rationale
-        return {"error": f"{type(exc).__name__}: {exc}"}
+        return errors.to_result(exc)
     return {"sandbox_id": sandbox_id, "status": "destroyed"}
 
 

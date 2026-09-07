@@ -25,7 +25,7 @@ from __future__ import annotations
 import math
 import re
 
-from hyperbox_mcp import policy
+from hyperbox_mcp import errors, policy
 from hyperbox_mcp.policy import (
     BACKEND_CHOICES,
     LANGUAGES,
@@ -35,8 +35,8 @@ from hyperbox_mcp.policy import (
 )
 
 
-class InvalidInput(ValueError):
-    """A caller-supplied value the server refuses to act on."""
+#: Defined in errors.py; still a ValueError, now with a code.
+InvalidInput = errors.InvalidInput
 
 
 _SANDBOX_ID = re.compile(r"^[0-9a-f]{12}$")

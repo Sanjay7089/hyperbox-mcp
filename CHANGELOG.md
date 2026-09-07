@@ -5,6 +5,35 @@ All notable changes to HyperBox are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed — breaking, with a migration window
+
+- **Tool errors are now structured.** A failing tool call returns
+  `{"error": {"code", "message", "fix", "context"}}` instead of
+  `{"error": "some string"}`. The caller is usually a model that will read
+  the error and retry, and one that says only what broke costs a round trip
+  to learn nothing — so every error now carries a code to branch on and,
+  where one exists, the command that fixes it.
+
+  For one release the old shape is also present as a top-level
+  `error_message` string, so a client parsing that keeps working. It will be
+  removed in 0.4.0.
+
+  Codes are stable and part of the public surface:
+  `ENGINE_NOT_RUNNING`, `NO_ENGINE_INSTALLED`, `SOCKET_BUSY`,
+  `CONTAINER_GONE`, `PROVISION_FAILED`, `EXECUTION_TIMEOUT`, `OOM_KILLED`,
+  `NETWORK_LEAK`, `POLICY_NOT_APPLIED`, `SANDBOX_STALE`, `SANDBOX_FAILED`,
+  `INVALID_INPUT`, `UNSUPPORTED_LANGUAGE`, `UNSUPPORTED_BACKEND`,
+  `UNKNOWN_ENVIRONMENT`.
+
+### Internal
+
+- Container invariants shared by every runtime — the resource-policy
+  read-back, network sealing, the OOM explanation, orphan collection —
+  moved into `sandbox_ops.py` so a second execution backend shares the
+  behaviour rather than a description of it.
+
 ## [0.2.2] — 2026-09-08
 
 Three defects found in production use across multiple client windows. All

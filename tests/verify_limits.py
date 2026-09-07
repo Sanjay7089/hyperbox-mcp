@@ -262,7 +262,11 @@ async def main() -> int:
             "the error names the fix rather than just failing",
             "error" in d
             and any(
-                hint in d["error"].lower()
+                hint in (
+                    d.get("error_message", "")
+                    + " "
+                    + (d.get("error") or {}).get("fix", "")
+                ).lower()
                 for hint in ("docker info", "systemctl", "docker desktop", "podman")
             ),
             str(d.get("error", ""))[:120],

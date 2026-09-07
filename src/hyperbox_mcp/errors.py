@@ -184,6 +184,10 @@ class UnsupportedLanguageError(ConfigError):
     code = "UNSUPPORTED_LANGUAGE"
 
 
+class UnsupportedBackendError(ConfigError):
+    code = "UNSUPPORTED_BACKEND"
+
+
 class UnknownEnvironmentError(ConfigError):
     """The named environment does not exist. Distinct from a language
     error so the agent is told to build one, not to pick another
