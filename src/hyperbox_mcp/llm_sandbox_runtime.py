@@ -107,6 +107,48 @@ _NOOP = {"python": "pass"}
 CANARY_MARKER = "__hyperbox_canary__"
 _CANARY = {"python": f"print('{CANARY_MARKER}')"}
 
+#: Find, and kill, the processes running submitted code.
+#:
+#: Read /proc directly with the interpreter that is already PID 1 in these
+#: images. `ps` and `pkill` live in procps, which the slim language images
+#: do not install — and a kill that depends on a binary the image may not
+#: have is a kill that silently does nothing, which is the failure mode this
+#: whole module is written against.
+#:
+#: The match is on the path the backend writes snippets to, so only
+#: submitted code is ever a target: never PID 1, never the backend's own
+#: environment setup.
+_SCAN_PROC = """
+import os
+me = os.getpid()
+hits = []
+for entry in os.listdir('/proc'):
+    if not entry.isdigit() or int(entry) == me:
+        continue
+    try:
+        with open('/proc/' + entry + '/cmdline', 'rb') as fh:
+            line = fh.read().decode('utf-8', 'replace')
+    except OSError:
+        continue
+    if '/sandbox/' in line and '.py' in line:
+        hits.append(int(entry))
+"""
+
+_LIST_SANDBOX_PIDS = _SCAN_PROC + "print(' '.join(str(p) for p in hits))\n"
+
+_KILL_SANDBOX_PIDS = _SCAN_PROC + """
+import signal
+for pid in hits:
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        pass
+"""
+
+#: How long to wait for a restarted container to report itself running.
+RESTART_POLL_ATTEMPTS = 10
+RESTART_POLL_SECONDS = 0.5
+
 _BACKEND_EXCEPTIONS = (
     SandboxError,
     ContainerError,
@@ -386,6 +428,7 @@ class LLMSandboxRuntime:
                 backend=_BACKENDS[session_backend],
                 lang=_LANGUAGES[handle.language],
                 container_id=container_ref,
+                keep_template=True,  # see create(); never delete our image
                 **extra,
             )
             session.open()
@@ -463,6 +506,15 @@ class LLMSandboxRuntime:
                 backend=_BACKENDS[session_backend],
                 lang=_LANGUAGES[language],
                 runtime_configs=self._runtime_configs(sandbox_id, backend),
+                # Without this the backend DELETES the language image when
+                # the session closes, whenever that session was the one
+                # that pulled it (_get_or_pull_image sets is_create_template
+                # on a pull, and close() then calls _cleanup_image if no
+                # container references the image any more). destroy() calls
+                # close() before removing the container, so the check
+                # passes. The result for one-sandbox-at-a-time use is a
+                # multi-gigabyte re-pull on every single create.
+                keep_template=True,
                 **extra,
             )
             session.open()
@@ -569,6 +621,17 @@ class LLMSandboxRuntime:
                     libraries=libraries,
                     timeout=timeout,
                 )
+            except SandboxTimeoutError as exc:
+                # Before _BACKEND_EXCEPTIONS, which it subclasses. A hung
+                # install burns the same CPU a hung program does, and used
+                # to be reported as a generic failure while pip kept going.
+                return ExecResult(
+                    stdout="",
+                    stderr=f"Dependency install timed out: {exc}."
+                    + self._kill_runaway(handle),
+                    exit_code=-1,
+                    timed_out=True,
+                )
             except _BACKEND_EXCEPTIONS as exc:
                 return ExecResult(
                     stdout="",
@@ -593,7 +656,8 @@ class LLMSandboxRuntime:
             # the agent's next move differs accordingly.
             return ExecResult(
                 stdout="",
-                stderr=f"{type(exc).__name__}: {exc}",
+                stderr=f"{type(exc).__name__}: {exc}."
+                + self._kill_runaway(handle),
                 exit_code=-1,
                 timed_out=True,
             )
@@ -616,6 +680,139 @@ class LLMSandboxRuntime:
             stderr=stderr,
             exit_code=out.exit_code,
         )
+
+    @staticmethod
+    def _exec(container, argv: list[str]) -> tuple[int, str]:
+        """Run a command in the container, flattening the two client shapes.
+
+        docker-py returns an ExecResult object; podman-py returns a plain
+        (exit_code, output) tuple. Neither is worth knowing about at the
+        call site.
+        """
+        result = container.exec_run(argv)
+        if isinstance(result, tuple):
+            code, output = result
+        else:
+            code, output = result.exit_code, result.output
+        if isinstance(output, bytes):
+            output = output.decode("utf-8", "replace")
+        return (code or 0), (output or "")
+
+    def _sandbox_processes(self, container) -> list[str]:
+        """PIDs inside the container that are running submitted code.
+
+        Read from /proc with the interpreter that is already PID 1 in these
+        images, rather than with `ps` or `pkill`: procps is not installed in
+        the slim language images, and a kill that depends on a binary the
+        image may not have is a kill that silently does nothing.
+        """
+        code, out = self._exec(
+            container,
+            ["python3", "-c", _LIST_SANDBOX_PIDS],
+        )
+        if code != 0:
+            return []
+        return [line for line in out.split() if line.strip().isdigit()]
+
+    def _kill_runaway(self, handle: SandboxHandle) -> str:
+        """Stop code that outlived its timeout, and say what stopping cost.
+
+        The backend's timeout does not stop anything. Its TimeoutMixin is a
+        host-side thread.join, and the container-level cancellation its own
+        docstring promises is a no-op for a container the session created
+        and a bare detach for one it reattached to. So a `while True: pass`
+        keeps running at the full CPU ceiling until the sandbox is
+        destroyed, and a reattached session is left unusable afterwards.
+
+        Two levers, tried in order:
+
+        1. Kill the submitted code's processes directly, found by reading
+           /proc through the interpreter that is already PID 1. This leaves
+           the container up, so the filesystem — including /work — survives
+           and the network stays sealed exactly as it was.
+        2. Restart the container, if anything survived that. Blunt: it
+           empties the tmpfs mounts and needs the seal re-applied, so it is
+           the fallback rather than the plan. The restart is then VERIFIED
+           and started explicitly if the engine left it stopped, because a
+           sandbox that quietly fails to come back is worse than the runaway
+           it replaced.
+
+        Best effort throughout: a timeout is already being reported, and
+        failing to tidy up must not replace that with a less useful error.
+        The session is dropped either way, so the next run reattaches to
+        whatever state the container is really in.
+        """
+        self._sessions.pop(handle.sandbox_id, None)
+        self._canary_verified.discard(handle.sandbox_id)
+        try:
+            container = self._container(handle)
+        except Exception as exc:  # noqa: BLE001 - already reporting a timeout
+            return (
+                f" The sandbox could not be reached to stop it "
+                f"({type(exc).__name__}: {exc}), so that code may still be "
+                "running. Call destroy_sandbox to be certain."
+            )
+
+        try:
+            self._exec(container, ["python3", "-c", _KILL_SANDBOX_PIDS])
+            survivors = self._sandbox_processes(container)
+        except Exception:  # noqa: BLE001 - fall through to the restart
+            survivors = ["unknown"]
+        if not survivors:
+            return " The code was killed; the sandbox is still usable."
+
+        return self._restart_to_kill(handle, container)
+
+    def _restart_to_kill(self, handle: SandboxHandle, container) -> str:
+        """Last resort: take the whole container down and back up."""
+        try:
+            # An explicit, short stop grace. The default is ten seconds of
+            # SIGTERM politeness aimed at PID 1, but the runaway is an exec
+            # child, so nothing useful happens during that wait — a 5s
+            # timeout was measured returning after 19s.
+            container.restart(timeout=2)
+        except Exception as exc:  # noqa: BLE001
+            return (
+                f" The sandbox could not be restarted to stop it "
+                f"({type(exc).__name__}: {exc}), so that code may still be "
+                "running. Call destroy_sandbox to be certain."
+            )
+
+        # Verify rather than assume. A restart that reports success and
+        # leaves the container stopped was observed on Docker while an exec
+        # was in flight, and an unusable sandbox reported as recovered is
+        # exactly the confident-wrong-answer this project exists to avoid.
+        note = (
+            " The sandbox was restarted to stop the code, so scratch space "
+            f"({', '.join(TMPFS_PATHS)}) is now empty; the rest of its "
+            "filesystem, including installed packages, survives."
+        )
+        for _ in range(RESTART_POLL_ATTEMPTS):
+            try:
+                container.reload()
+                if getattr(container, "status", "") == "running":
+                    break
+                container.start()
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(RESTART_POLL_SECONDS)
+        else:
+            return (
+                note
+                + " WARNING: it did not come back up. Call destroy_sandbox "
+                "and create a new one."
+            )
+
+        try:
+            self._seal(handle)
+        except Exception as exc:  # noqa: BLE001
+            return (
+                note
+                + " WARNING: its network could not be re-sealed after the "
+                f"restart ({type(exc).__name__}: {exc}). Destroy this "
+                "sandbox rather than running anything else in it."
+            )
+        return note
 
     def _explain_sigkill(self, handle: SandboxHandle) -> str:
         """Turn a bare 137 into something actionable."""

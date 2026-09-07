@@ -496,6 +496,11 @@ def run(
     before your code executes; only plain package names are accepted.
     `timeout` is capped by the server, must be a positive number, and may
     not be null. Output is truncated past a limit, and marked when it is.
+
+    On timeout the code is actually killed, not just abandoned — a timed-out
+    run leaves nothing burning CPU in the sandbox, and the sandbox stays
+    usable. If the code cannot be killed the sandbox is restarted instead,
+    which empties scratch space; the result says which happened.
     """
     try:
         sandbox_id = validate.sandbox_id(sandbox_id)

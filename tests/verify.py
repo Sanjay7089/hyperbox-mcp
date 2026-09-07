@@ -31,6 +31,7 @@ import uuid
 
 sys.path.insert(0, "src")
 
+from hyperbox_mcp import engine  # noqa: E402
 from hyperbox_mcp import llm_sandbox_runtime as lsr  # noqa: E402
 from hyperbox_mcp import server  # noqa: E402
 from hyperbox_mcp.runtime import Runtime  # noqa: E402
@@ -176,6 +177,59 @@ def main() -> int:
         "timeout: not success + timed_out set + reason in stderr",
         (not timed.success) and timed.timed_out and "Timeout" in timed.stderr,
         str(timed),
+    )
+
+    # 5a. And the timeout has to actually STOP it.
+    #
+    #     Returning a timeout while the code keeps running is the failure
+    #     this replaced: the backend's own timeout is a host-side
+    #     thread.join, and the container-level cancellation its docstring
+    #     promises is a no-op. `while True: pass` went on consuming the
+    #     sandbox's whole CPU ceiling until the sandbox was destroyed, and
+    #     nothing in this suite noticed, because asserting that the CALL
+    #     returned says nothing about whether the WORK stopped.
+    #
+    #     Read from /proc with the interpreter that is PID 1 in these
+    #     images: `ps` lives in procps, which the slim images do not ship,
+    #     so a check that shells out to it would pass by finding nothing
+    #     for the wrong reason.
+    container = engine.get_container(handle.backend, handle.meta["container_ref"])
+    survivors = ""
+    try:
+        result = container.exec_run(
+            ["python3", "-c", lsr._LIST_SANDBOX_PIDS]
+        )
+        raw = result[1] if isinstance(result, tuple) else result.output
+        survivors = (raw or b"").decode("utf-8", "replace").strip()
+    except Exception as exc:  # noqa: BLE001
+        survivors = f"could not ask the container: {exc}"
+    check(
+        "timeout: the code is actually dead, not merely abandoned",
+        survivors == "",
+        f"submitted-code PIDs still running: {survivors or 'none'}",
+    )
+
+    # 5a-ii. Killing it must not have unsealed it. The fallback path
+    #        restarts the container, and a restart that silently restored
+    #        the default network would hand back a sandbox described as
+    #        sealed and connected to the internet.
+    container.reload()
+    attached = list(
+        ((container.attrs.get("NetworkSettings") or {}).get("Networks") or {})
+    )
+    check(
+        "timeout: the sandbox is still sealed afterwards",
+        attached == [],
+        f"networks attached after the timeout: {attached or 'none'}",
+    )
+
+    # 5a-iii. And still usable — a timeout must cost the run, not the
+    #         sandbox.
+    after = rt.run(handle, snip["hello"], timeout=30)
+    check(
+        "timeout: the sandbox still works afterwards",
+        after.success and MARKER in after.stdout,
+        str(after),
     )
 
     # 5b. The startup output check runs ONCE per sandbox and does not
