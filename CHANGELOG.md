@@ -5,7 +5,39 @@ All notable changes to HyperBox are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] — 2026-09-07
+
+First public release. No behaviour changes — everything here is about
+being installable and readable by someone who did not write it.
+
+### Added
+
+- Published to PyPI: `pip install hyperbox-mcp`.
+- A dedicated PyPI project page, separate from the GitHub README. The
+  README opens with a mermaid diagram, which PyPI renders as a raw code
+  block, and links to paths in the repo tree that do not resolve on a
+  package page.
+- Trusted publishing from GitHub Actions (OIDC), so no API token exists
+  in the repository, in its secrets, or on a laptop. Releases carry
+  PEP 740 attestations.
+- CI running the host-side suite on Linux, macOS and Windows across
+  Python 3.11 and 3.13.
+- `CONTRIBUTING.md` and this changelog.
+
+### Changed
+
+- Documentation reduced to four public pages — README, setup, security
+  model, troubleshooting — from ten. The five per-client config pages are
+  folded into `docs/setup.md`.
+- The YAML client config format is described by its shape, a list-shaped
+  `mcpServers` config as used by Continue-based clients, rather than by
+  one specific tool's name.
+- Licence metadata uses the PEP 639 SPDX expression (`License-Expression:
+  MIT`) instead of the deprecated table form.
+
 ## [0.2.0] — 2026-09-06
+
+Tagged but never published to an index; its contents ship in 0.2.1.
 
 ### Added
 

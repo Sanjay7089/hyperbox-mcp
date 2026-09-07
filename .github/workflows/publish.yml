@@ -10,6 +10,17 @@ name: Publish
 #   workflow         publish.yml
 #   environment      pypi   (and testpypi for the TestPyPI publisher)
 
+# Two modes:
+#
+#   Run workflow (Actions tab, from main)  -> TestPyPI ONLY.
+#       The PyPI job is gated on a tag ref, so it is skipped. Use this to
+#       rehearse: check the rendered page and install from TestPyPI before
+#       anything reaches the real index.
+#
+#   Push a tag  v0.2.1                     -> TestPyPI, then PyPI.
+#       TestPyPI runs first with skip-existing, so a version already
+#       rehearsed there cannot fail the release.
+
 on:
   push:
     tags: ["v*"]
