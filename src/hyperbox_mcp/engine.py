@@ -352,6 +352,14 @@ def ensure_podman_transport(
         existing = current[len("unix://") :]
         if _socket_is_live(existing):
             return existing
+        if current != _own_container_host:
+            # Somebody chose this endpoint deliberately — a client config,
+            # an exported variable, a deployment. It is dead, and the
+            # honest answer is that it is dead. Quietly resolving a
+            # DIFFERENT endpoint and using that is the same wrong answer as
+            # handing back Podman to a caller who asked for Docker: the
+            # operation would succeed against something they did not name.
+            return ""
         os.environ.pop("CONTAINER_HOST", None)
 
     socket_path = podman_socket(cli_timeout=cli_timeout)
@@ -556,6 +564,15 @@ def _build_client(backend: str, cli_timeout: float = PODMAN_CLI_TIMEOUT) -> Any:
                 "Reinstall the project: `uv sync`.",
             ) from exc
         configured = os.environ.get("CONTAINER_HOST", "")
+        if configured.startswith("unix://") and not _socket_is_live(
+            configured[len("unix://") :]
+        ):
+            raise EngineUnavailableError(
+                f"CONTAINER_HOST is set to {configured}, and nothing is "
+                "listening there.",
+                "Start that Podman service, or unset CONTAINER_HOST to let "
+                "HyperBox find a live socket itself.",
+            )
         if not configured and _probe_failed_recently("podman", ""):
             raise EngineUnavailableError(
                 "No Podman socket is accepting connections (checked in the "
@@ -771,6 +788,62 @@ def classify(backend: str, exc: BaseException, what: str) -> BaseException:
         f"({type(exc).__name__}: {exc}).",
         fix,
     )
+
+
+#: Docker's exec stream frames an 8-byte header before each chunk:
+#: [stream_type, 0, 0, 0, size:uint32be], stream 1 = stdout, 2 = stderr.
+_FRAME_HEADER = 8
+
+
+def _looks_framed(raw: bytes) -> bool:
+    """Whether `raw` starts with something shaped like a frame header."""
+    return (
+        len(raw) >= _FRAME_HEADER
+        and raw[0] in (0, 1, 2)
+        and raw[1:4] == b"\x00\x00\x00"
+    )
+
+
+def demux_frames(raw: bytes) -> tuple[str, str]:
+    """Split multiplexed exec output into (stdout, stderr).
+
+    The two clients disagree about who does this, and the disagreement is
+    silent. docker-py demultiplexes for you and hands back plain bytes.
+    podman-py hands back the RAW framed stream, so code that decodes it
+    directly gets a string full of header bytes that reads as output and is
+    not. Measured on the same command:
+
+        docker-py   b'MARKER-42\n'
+        podman-py   b'\x01\x00\x00\x00\x00\x00\x00\tMARKER-42...'
+
+    This cost a real bug: a check for surviving processes parsed podman's
+    frame bytes, found no digits in them, and reported "nothing running" —
+    on a container it had never actually read. It answered correctly by
+    accident, which is worse than answering wrongly.
+
+    Unframed input is returned as stdout unchanged, and anything that stops
+    parsing cleanly falls back the same way, so this is safe on either
+    client's result.
+    """
+    if not raw or not _looks_framed(raw):
+        return raw.decode("utf-8", "replace"), ""
+    out: list[str] = []
+    err: list[str] = []
+    at = 0
+    while at + _FRAME_HEADER <= len(raw):
+        kind = raw[at]
+        size = int.from_bytes(raw[at + 4 : at + _FRAME_HEADER], "big")
+        at += _FRAME_HEADER
+        chunk = raw[at : at + size]
+        if len(chunk) < size:
+            # Truncated: trust nothing after this point rather than
+            # inventing a boundary.
+            break
+        at += size
+        (err if kind == 2 else out).append(chunk.decode("utf-8", "replace"))
+    if at == 0:
+        return raw.decode("utf-8", "replace"), ""
+    return "".join(out), "".join(err)
 
 
 def session_kwargs(backend: str) -> dict:

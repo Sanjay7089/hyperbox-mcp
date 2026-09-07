@@ -200,7 +200,11 @@ def main() -> int:
             ["python3", "-c", lsr._LIST_SANDBOX_PIDS]
         )
         raw = result[1] if isinstance(result, tuple) else result.output
-        survivors = (raw or b"").decode("utf-8", "replace").strip()
+        # Demux: podman-py returns the raw framed stream where docker-py
+        # returns plain bytes. Decoding podman's directly gives a string of
+        # 8-byte headers that contains no digits, so this check would report
+        # "nothing running" without ever having read the container.
+        survivors = engine.demux_frames(bytes(raw or b""))[0].strip()
     except Exception as exc:  # noqa: BLE001
         survivors = f"could not ask the container: {exc}"
     check(

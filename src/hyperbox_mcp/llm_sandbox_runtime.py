@@ -683,20 +683,34 @@ class LLMSandboxRuntime:
 
     @staticmethod
     def _exec(container, argv: list[str]) -> tuple[int, str]:
-        """Run a command in the container, flattening the two client shapes.
+        """Run a command in the container, returning (exit_code, stdout).
 
-        docker-py returns an ExecResult object; podman-py returns a plain
-        (exit_code, output) tuple. Neither is worth knowing about at the
-        call site.
+        Flattens two separate client disagreements, both of which produce
+        wrong answers rather than errors:
+
+        - docker-py returns an ExecResult; podman-py returns a plain
+          (exit_code, output) tuple.
+        - docker-py demultiplexes the exec stream; podman-py hands back the
+          raw framed bytes. Decoding those directly yields a string of
+          header bytes that reads as output. See engine.demux_frames.
         """
         result = container.exec_run(argv)
-        if isinstance(result, tuple):
-            code, output = result
-        else:
-            code, output = result.exit_code, result.output
-        if isinstance(output, bytes):
-            output = output.decode("utf-8", "replace")
-        return (code or 0), (output or "")
+        code, output = (
+            result if isinstance(result, tuple)
+            else (result.exit_code, result.output)
+        )
+        if output is None:
+            output = b""
+        elif not isinstance(output, (bytes, bytearray)):
+            # A streamed exec yields chunks. Join them rather than str()ing
+            # the iterator, which produces "<generator object ...>" and
+            # looks like output.
+            try:
+                output = b"".join(output)
+            except TypeError:
+                output = b""
+        stdout, _ = engine.demux_frames(bytes(output))
+        return (code or 0), stdout
 
     def _sandbox_processes(self, container) -> list[str]:
         """PIDs inside the container that are running submitted code.

@@ -328,6 +328,39 @@ def main() -> int:
             "only a socket this process resolved is ours to drop",
         )
 
+    # --- 5b-iii. the two clients disagree about demultiplexing --------
+    #
+    # docker-py demuxes the exec stream and returns plain bytes; podman-py
+    # returns the RAW framed stream. Decoding podman's directly gives a
+    # string of 8-byte headers that reads as output and is not — a check
+    # for surviving processes found no digits in those headers and reported
+    # "nothing running" about a container it had never actually read. It
+    # answered correctly by accident, which is worse than answering wrongly.
+    framed = (b"\x01\x00\x00\x00\x00\x00\x00\x09MARKER-42"
+              b"\x02\x00\x00\x00\x00\x00\x00\x04oops")
+    out, err = engine.demux_frames(framed)
+    check(
+        "framed exec output is demultiplexed (podman-py's shape)",
+        out == "MARKER-42" and err == "oops",
+        f"stdout={out!r} stderr={err!r}",
+    )
+    plain_out, plain_err = engine.demux_frames(b"MARKER-42\n")
+    check(
+        "unframed exec output passes through (docker-py's shape)",
+        plain_out == "MARKER-42\n" and plain_err == "",
+        f"stdout={plain_out!r} stderr={plain_err!r}",
+    )
+    check(
+        "a truncated frame does not invent output",
+        engine.demux_frames(b"\x01\x00\x00\x00\x00\x00\x00\x63short") == ("", ""),
+        "a length longer than the payload stops parsing rather than guessing",
+    )
+    check(
+        "empty exec output is empty, not an error",
+        engine.demux_frames(b"") == ("", ""),
+        "",
+    )
+
     # --- 5c. `config --local` pins the checkout, not PATH -------------
     #
     # Gate-critical, and it fails silently without a test. A machine that
