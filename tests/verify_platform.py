@@ -263,6 +263,71 @@ def main() -> int:
             except OSError:
                 pass
 
+    # --- 5b-ii. refused-is-retryable and transport-reset are a PAIR ---
+    #
+    # "connection refused" is treated as a retryable, connection-shaped
+    # failure. That is only safe because reset_clients() also drops the
+    # resolved socket, so the retry re-resolves instead of reconnecting to
+    # the same dead path. Keep the marker without the reset and every
+    # refused call becomes two guaranteed failures instead of one, with the
+    # process still latched to a socket that can never work.
+    #
+    # Neither half is wrong on its own, which is exactly why this is
+    # tested: a future reader tidying up one of them would see nothing
+    # break.
+    refused = engine.EngineUnavailableError(
+        "Podman is not reachable (APIError: ConnectionRefusedError(61, "
+        "'Connection refused'))"
+    )
+    check(
+        "a refused connection is treated as retryable",
+        engine.is_stale_connection(refused),
+        "paired with the transport reset checked below",
+    )
+    if WINDOWS:
+        skip(
+            "reset_clients drops the resolved socket, not just the client",
+            "no unix socket transport to resolve on Windows.",
+        )
+    else:
+        previous = os.environ.get("CONTAINER_HOST")
+        try:
+            engine._own_container_host = "unix:///tmp/hyperbox-probe.sock"
+            os.environ["CONTAINER_HOST"] = engine._own_container_host
+            engine.reset_clients()
+            cleared = "CONTAINER_HOST" not in os.environ
+        finally:
+            if previous is None:
+                os.environ.pop("CONTAINER_HOST", None)
+            else:
+                os.environ["CONTAINER_HOST"] = previous
+            engine._own_container_host = ""
+        check(
+            "reset_clients drops the resolved socket, not just the client",
+            cleared,
+            "otherwise the retry reconnects to the same dead path",
+        )
+
+        # And it must NOT discard a setting the user chose themselves.
+        previous = os.environ.get("CONTAINER_HOST")
+        try:
+            os.environ["CONTAINER_HOST"] = "tcp://someone-elses-choice:2375"
+            engine._own_container_host = ""
+            engine.reset_clients()
+            kept = os.environ.get("CONTAINER_HOST") == (
+                "tcp://someone-elses-choice:2375"
+            )
+        finally:
+            if previous is None:
+                os.environ.pop("CONTAINER_HOST", None)
+            else:
+                os.environ["CONTAINER_HOST"] = previous
+        check(
+            "a user's own CONTAINER_HOST survives reset_clients",
+            kept,
+            "only a socket this process resolved is ours to drop",
+        )
+
     # --- 5c. `config --local` pins the checkout, not PATH -------------
     #
     # Gate-critical, and it fails silently without a test. A machine that
