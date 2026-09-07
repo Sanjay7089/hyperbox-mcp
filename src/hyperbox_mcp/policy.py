@@ -137,6 +137,18 @@ CPU_QUOTA = int(CPU_PERIOD * CPUS)
 TMPFS_SIZE = "64m"
 TMPFS_PATHS = ("/work",)
 
+#: Where submitted code is written. Deliberately NOT under TMPFS_PATHS.
+#:
+#: The engine's archive API cannot write through a tmpfs mount on Docker:
+#: it writes into the image layer underneath, where the mount shadows it,
+#: and returns 200 having done nothing observable. Podman writes through,
+#: so this is invisible on one engine and fatal on the other -- a silent
+#: no-op of exactly the kind the read-back checks exist to catch.
+#:
+#: /work stays the caller's scratch space. Code running inside the sandbox
+#: writes there normally; only the archive API cannot.
+CODE_DIR = "/sandbox"
+
 #: Blocks setuid/setgid escalation inside the container. Safe on every
 #: image; unlike cap_drop it does not interfere with the workdir chown
 #: the backend performs during environment setup.

@@ -421,6 +421,34 @@ def main() -> int:
         "a frame whose payload never arrived contributes nothing",
     )
 
+    # --- 5b-v. writing under a tmpfs is refused, not silently lost ----
+    #
+    # Measured on both engines: the archive API cannot write through a
+    # tmpfs mount on Docker. It returns 200, puts the file in the image
+    # layer beneath the mount, and nothing ever sees it. Podman writes
+    # through, so the same call works on one engine and vanishes on the
+    # other -- which is why this is a refusal rather than a note.
+    #
+    # The guard runs before any I/O, so no engine is needed here.
+    from hyperbox_mcp import errors as hb_errors  # noqa: PLC0415
+    from hyperbox_mcp.rest import api as rest_api  # noqa: PLC0415
+
+    refusals = []
+    for path in ("/work/code.py", "/work/nested/code.py"):
+        try:
+            rest_api.put_file(None, "cid", path, b"x")
+        except hb_errors.ProvisionError as exc:
+            refusals.append(bool(exc.fix))
+        except Exception:  # noqa: BLE001 - anything else is the wrong answer
+            refusals.append(False)
+        else:
+            refusals.append(False)
+    check(
+        "writing under a tmpfs mount is refused with a way out",
+        len(refusals) == 2 and all(refusals),
+        f"submitted code goes to {policy.CODE_DIR}, which is not a tmpfs",
+    )
+
     # --- 5c. `config --local` pins the checkout, not PATH -------------
     #
     # Gate-critical, and it fails silently without a test. A machine that
