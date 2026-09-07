@@ -321,13 +321,17 @@ async def main() -> int:
     # point — so this orphan is aged past it before the sweep.
     import hyperbox_mcp.policy as pol
 
+    # Patch policy itself, not a copy of it. Reaching into whichever
+    # module happens to implement the sweep made this test depend on where
+    # the code lives: it broke the moment that function moved, and it
+    # broke by SILENTLY doing nothing -- the orphan simply stayed inside
+    # its grace period and GC was blamed for not collecting it.
     original_grace = pol.GC_GRACE_SECONDS
-    srv_runtime_module = sys.modules["hyperbox_mcp.llm_sandbox_runtime"]
-    srv_runtime_module.GC_GRACE_SECONDS = 0.0
+    pol.GC_GRACE_SECONDS = 0.0
     try:
         reclaimed = srv.collect_garbage()
     finally:
-        srv_runtime_module.GC_GRACE_SECONDS = original_grace
+        pol.GC_GRACE_SECONDS = original_grace
 
     check("GC reclaimed the orphan", oid in reclaimed, f"reclaimed={reclaimed}")
     check(

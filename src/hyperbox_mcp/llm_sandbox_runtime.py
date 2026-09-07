@@ -49,7 +49,7 @@ from llm_sandbox import (
 )
 from llm_sandbox.exceptions import SandboxTimeoutError
 
-from hyperbox_mcp import engine, policy
+from hyperbox_mcp import engine, policy, sandbox_ops
 from hyperbox_mcp.engine import ContainerGoneError, EngineUnavailableError
 from hyperbox_mcp.policy import (
     CPU_PERIOD,
@@ -170,9 +170,9 @@ class UnsupportedEnvironmentError(ValueError):
 UnsupportedBackendError = engine.UnsupportedBackendError
 
 
-class SandboxRuntimeError(RuntimeError):
-    """Wraps any backend exception so callers never see raw llm-sandbox
-    types — keeps the backend replaceable."""
+#: Defined in sandbox_ops so both runtimes raise the same type; every
+#: existing `except SandboxRuntimeError` keeps working unchanged.
+SandboxRuntimeError = sandbox_ops.SandboxRuntimeError
 
 
 def image_for(language: str) -> str:
@@ -216,105 +216,18 @@ class LLMSandboxRuntime:
 
     @staticmethod
     def _engine_specific(backend: str) -> dict:
-        """The same policy, spelled the way this engine's client accepts.
-
-        The two clients diverge in three places and there is no common
-        vocabulary:
-
-        - CPU: docker-py takes `nano_cpus`; podman-py DISCARDS it
-          silently and honours `cpu_period` / `cpu_quota` instead.
-        - Scratch space: docker-py takes a `tmpfs` mapping; podman-py
-          rejects that keyword outright and wants tmpfs entries in
-          `mounts`.
-        - Privilege: `security_opt` versus a `no_new_privileges` flag.
-
-        Getting any of these wrong produces a container that looks
-        configured and is not, which is why every one of them is read
-        back off the container afterwards.
-        """
-        if engine.client_dialect(backend) == "podman":
-            return {
-                "cpu_period": CPU_PERIOD,
-                "cpu_quota": CPU_QUOTA,
-                "mounts": [
-                    {
-                        "type": "tmpfs",
-                        # Without an explicit source podman creates a
-                        # plain directory instead of a tmpfs mount.
-                        "source": "tmpfs",
-                        "target": path,
-                        "size": TMPFS_SIZE,
-                        "chown": True,
-                    }
-                    for path in TMPFS_PATHS
-                ],
-                "no_new_privileges": NO_NEW_PRIVILEGES,
-            }
-        return {
-            "nano_cpus": NANO_CPUS,
-            "tmpfs": {
-                path: f"rw,size={TMPFS_SIZE},mode=1777" for path in TMPFS_PATHS
-            },
-            "security_opt": ["no-new-privileges"] if NO_NEW_PRIVILEGES else [],
-        }
+        return sandbox_ops.engine_specific(backend)
 
     def _runtime_configs(self, sandbox_id: str, backend: str) -> dict:
-        """Everything the engine must apply. Server policy, start to
-        finish — no part of this comes from a caller."""
-        return {
-            "labels": {LABEL_MANAGED: "true", LABEL_ID: sandbox_id},
-            "mem_limit": MEM_LIMIT,
-            "pids_limit": PIDS_LIMIT,
-            **self._engine_specific(backend),
-        }
+        return sandbox_ops.runtime_configs(sandbox_id, backend)
 
     @staticmethod
     def _cpu_limited(host: dict) -> bool:
-        """Whether a CPU ceiling is genuinely in force.
-
-        Docker records it as NanoCpus; Podman as a quota over a period.
-        Either is proof, neither being present is not.
-        """
-        if host.get("NanoCpus") == NANO_CPUS:
-            return True
-        quota, period = host.get("CpuQuota"), host.get("CpuPeriod")
-        return bool(quota) and bool(period) and quota == CPU_QUOTA and period == CPU_PERIOD
+        return sandbox_ops.cpu_limited(host)
 
     @staticmethod
     def _assert_policy_applied(attrs: dict, sandbox_id: str) -> None:
-        """Confirm the engine actually applied what we asked for.
-
-        An engine that accepts a config and silently ignores half of it
-        hands back a container we would go on to DESCRIBE as limited.
-        That is the worst failure mode available to this project: the
-        agent is told it is sandboxed and it is not. So the limits are
-        read back off the real container and a mismatch is fatal.
-        """
-        host = attrs.get("HostConfig") or {}
-        config = attrs.get("Config") or {}
-        expected = {"Memory": MEM_LIMIT_BYTES, "PidsLimit": PIDS_LIMIT}
-        wrong = {
-            key: host.get(key)
-            for key, want in expected.items()
-            if host.get(key) != want
-        }
-        if not LLMSandboxRuntime._cpu_limited(host):
-            wrong["cpu"] = (
-                f"NanoCpus={host.get('NanoCpus')} "
-                f"CpuQuota={host.get('CpuQuota')} "
-                f"CpuPeriod={host.get('CpuPeriod')}"
-            )
-        labels = config.get("Labels") or {}
-        if labels.get(LABEL_ID) != sandbox_id:
-            wrong["Labels"] = labels.get(LABEL_ID)
-        if wrong:
-            raise SandboxRuntimeError(
-                "The container engine did not apply this server's resource "
-                f"policy for sandbox '{sandbox_id}'. Expected {expected}, a "
-                f"CPU ceiling of {CPUS} and label {sandbox_id}, but the "
-                f"container reports {wrong}. Refusing to hand back a sandbox "
-                "that is not actually limited."
-            )
+        sandbox_ops.assert_policy_applied(attrs, sandbox_id)
 
     def _container(self, handle: SandboxHandle):
         """Look up this sandbox's container.
@@ -347,57 +260,15 @@ class LLMSandboxRuntime:
 
     @staticmethod
     def _attached_networks(container) -> list[str]:
-        """Names of networks attached right now.
-
-        Docker and Podman both expose NetworkSettings.Networks, but the key
-        vanishes entirely once the last network is detached, so this must
-        tolerate its absence rather than KeyError.
-        """
-        settings = container.attrs.get("NetworkSettings") or {}
-        return list((settings.get("Networks") or {}).keys())
+        return sandbox_ops.attached_networks(container)
 
     def _seal(self, handle: SandboxHandle) -> None:
-        """Detach every network. Fails closed: if we cannot seal, the
-        caller must not be handed a sandbox we claim is sealed."""
-        def seal_once():
-            client = engine.client(handle.backend)
-            container = self._container(handle)
-            container.reload()
-            for name in self._attached_networks(container):
-                client.networks.get(name).disconnect(container)
-
-        try:
-            engine.with_retry(seal_once, "network sealing")
-        except (EngineUnavailableError, ContainerGoneError):
-            raise
-        except Exception as exc:  # noqa: BLE001
-            raise SandboxRuntimeError(
-                f"Could not seal network for '{handle.sandbox_id}': "
-                f"{type(exc).__name__}: {exc}"
-            ) from exc
+        sandbox_ops.seal(
+            handle.backend, lambda: self._container(handle), handle.sandbox_id
+        )
 
     def _unseal(self, handle: SandboxHandle) -> None:
-        """Attach the backend's default network for a build phase.
-
-        Docker calls it "bridge"; Podman calls it "podman". Hardcoding
-        either one breaks the other backend, so the name is chosen per
-        backend and verified against the engine before use.
-        """
-        client = engine.client(handle.backend)
-        container = self._container(handle)
-        preferred = _DEFAULT_NETWORK.get(handle.backend, "bridge")
-        try:
-            network = client.networks.get(preferred)
-        except Exception:  # noqa: BLE001 - fall back to whatever exists
-            available = [getattr(n, "name", "") for n in client.networks.list()]
-            usable = [n for n in available if n and n != "none"]
-            if not usable:
-                raise SandboxRuntimeError(
-                    f"No usable network on backend '{handle.backend}' for a "
-                    "dependency install."
-                ) from None
-            network = client.networks.get(usable[0])
-        network.connect(container)
+        sandbox_ops.unseal(handle.backend, lambda: self._container(handle))
 
     def _session_for(self, handle: SandboxHandle):
         """Return a live session for `handle`, reattaching to its
@@ -829,22 +700,7 @@ class LLMSandboxRuntime:
         return note
 
     def _explain_sigkill(self, handle: SandboxHandle) -> str:
-        """Turn a bare 137 into something actionable."""
-        try:
-            container = self._container(handle)
-            if container.attrs.get("State", {}).get("OOMKilled"):
-                return (
-                    f"Killed (SIGKILL): the sandbox exceeded its memory limit "
-                    f"of {MEM_LIMIT}. Reduce the working set, or process the "
-                    "data in chunks."
-                )
-        except Exception:  # noqa: BLE001 - explanation is best-effort
-            pass
-        return (
-            "Killed (SIGKILL): the process was terminated by the sandbox, "
-            f"most likely for exceeding the memory limit of {MEM_LIMIT} "
-            f"or the process limit of {PIDS_LIMIT}."
-        )
+        return sandbox_ops.explain_sigkill(lambda: self._container(handle))
 
     def alive(self, handle: SandboxHandle) -> bool:
         """Ask the engine, not our own bookkeeping.
@@ -896,72 +752,5 @@ class LLMSandboxRuntime:
 
     def gc(self, known_ids: set[str]) -> list[str]:
         """Remove our containers whose sandbox_id is unknown to the
-        registry. Matches on our labels only.
-
-        Best effort by design: an engine that is not installed or not
-        running is skipped rather than failing the sweep, because GC runs
-        at server startup and must never stop the server from serving.
-        """
-        reclaimed: list[str] = []
-        for backend in _BACKENDS:
-            try:
-                containers = engine.list_managed(
-                    backend,
-                    f"{LABEL_MANAGED}=true",
-                    # A stopped engine must not stall a timed sweep for the
-                    # full interactive budget. GC probes BOTH backends every
-                    # time, so on a machine with only one of them installed
-                    # this is paid on every pass.
-                    cli_timeout=engine.PODMAN_CLI_TIMEOUT_FAST,
-                )
-            except (EngineUnavailableError, ContainerGoneError):
-                continue
-            for container in containers:
-                labels = getattr(container, "labels", None) or {}
-                sandbox_id = labels.get(LABEL_ID)
-                if not sandbox_id or sandbox_id in known_ids:
-                    continue
-                if self._too_young(container):
-                    # Another process may be creating this right now, in
-                    # the window before its registration lands.
-                    continue
-                try:
-                    container.remove(force=True)
-                    reclaimed.append(sandbox_id)
-                except Exception:  # noqa: BLE001 - best effort
-                    continue
-        return reclaimed
-
-    @staticmethod
-    def _too_young(container) -> bool:
-        """Whether a container is inside the creation grace period.
-
-        Unparseable or missing timestamps return False: an unknown age
-        must not make a container permanently unreclaimable.
-        """
-        created = (container.attrs or {}).get("Created")
-        if not isinstance(created, str) or not created:
-            return False
-        # Engines emit more fractional-second digits than fromisoformat
-        # accepts on 3.11, so the fraction is trimmed to microseconds
-        # while any timezone suffix is preserved.
-        stamp = created.strip().replace("Z", "+00:00")
-        match = re.match(
-            r"^(?P<head>[\dT:-]+)"
-            r"(?:\.(?P<frac>\d+))?"
-            r"(?P<tz>[+-]\d{2}:?\d{2})?$",
-            stamp,
-        )
-        if match:
-            frac = (match.group("frac") or "")[:6]
-            stamp = match.group("head")
-            if frac:
-                stamp += "." + frac.ljust(6, "0")
-            stamp += match.group("tz") or "+00:00"
-        try:
-            born = datetime.fromisoformat(stamp)
-        except ValueError:
-            return False
-        if born.tzinfo is None:
-            born = born.replace(tzinfo=timezone.utc)
-        return (time.time() - born.timestamp()) < GC_GRACE_SECONDS
+        registry. Matches on our labels only."""
+        return sandbox_ops.collect_orphans(known_ids, _BACKENDS)
