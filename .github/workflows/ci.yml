@@ -7,9 +7,13 @@ on:
 
 jobs:
   host-checks:
-    # The host-side suite: file locking, engine discovery, path handling,
-    # config generation, environment resolution, log rotation. It needs no
-    # container, so it runs on every push.
+    # The host-side suite: file locking, path handling, config generation,
+    # environment resolution, log rotation, engine discovery.
+    #
+    # It creates no container, but parts of it do need an engine to answer.
+    # GitHub's ubuntu runners ship Docker; the macOS and Windows ones do
+    # not, so those set HYPERBOX_SKIP_ENGINE_CHECKS and the engine-dependent
+    # checks report SKIP instead of FAIL. Skips are never counted as passes.
     #
     # It is NOT the full acceptance suite. Containment, resource limits and
     # the lifecycle are proven against real Docker and Podman containers,
@@ -31,6 +35,9 @@ jobs:
         run: pip install -e .
 
       - name: Host portability suite
+        # ubuntu runners have Docker, so they check the engine paths for real.
+        env:
+          HYPERBOX_SKIP_ENGINE_CHECKS: ${{ matrix.os == 'ubuntu-latest' && '0' || '1' }}
         run: python tests/verify_platform.py
 
       - name: The CLI runs without a container engine

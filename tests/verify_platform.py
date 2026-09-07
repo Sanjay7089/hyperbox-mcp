@@ -32,6 +32,17 @@ from hyperbox_mcp.filelock import WINDOWS, FileLock  # noqa: E402
 from hyperbox_mcp.registry import Registry  # noqa: E402
 
 results: list[tuple[str, bool, str]] = []
+skipped: list[tuple[str, str]] = []
+
+#: Set on a machine that legitimately has no container engine — a CI
+#: runner, typically. The engine-dependent checks below are then reported
+#: as SKIP rather than FAIL.
+#:
+#: This is opt-in, never auto-detected. A developer whose Docker is simply
+#: stopped must see a failure, not a green run: "no engine here" and "the
+#: engine here is broken" are different answers, and only the machine's
+#: owner knows which one applies.
+ENGINE_OPTIONAL = os.environ.get("HYPERBOX_SKIP_ENGINE_CHECKS") == "1"
 
 
 def check(name: str, condition: bool, detail: str = "") -> None:
@@ -39,6 +50,13 @@ def check(name: str, condition: bool, detail: str = "") -> None:
     print(f"{'PASS' if condition else 'FAIL'}  {name}", flush=True)
     if detail:
         print(f"        {detail}")
+
+
+def skip(name: str, reason: str) -> None:
+    """Record a check that could not run here. Never counted as a pass."""
+    skipped.append((name, reason))
+    print(f"SKIP  {name}", flush=True)
+    print(f"        {reason}")
 
 
 def main() -> int:
@@ -154,11 +172,18 @@ def main() -> int:
         )
 
     reachable = [b for b, s in statuses.items() if s.reachable]
-    check(
-        "at least one container engine is reachable",
-        bool(reachable),
-        f"reachable: {', '.join(reachable) or 'NONE — see the fix lines above'}",
-    )
+    if not reachable and ENGINE_OPTIONAL:
+        skip(
+            "at least one container engine is reachable",
+            "HYPERBOX_SKIP_ENGINE_CHECKS=1: no engine on this machine by "
+            "design. The host-only checks below still run.",
+        )
+    else:
+        check(
+            "at least one container engine is reachable",
+            bool(reachable),
+            f"reachable: {', '.join(reachable) or 'NONE — see the fix lines above'}",
+        )
 
     # --- 6. the Windows-specific routing is correct ------------------
     dialect = engine.client_dialect("podman")
@@ -198,29 +223,42 @@ def main() -> int:
     # The selection logic under a shared endpoint, exercised without
     # needing a machine where that is true. This is the case that made
     # backend="podman" fail while backend="auto" worked.
-    real_identify = engine.identify
-    try:
-        engine.identify = lambda _client: "podman"
-        engine.reset_clients()
-        resolved = engine.detect("auto")
-        check(
+    if not reachable:
+        # engine.detect() needs something to answer, so this case cannot be
+        # exercised here. It is not merely unchecked: it crashed the whole
+        # suite with an uncaught EngineUnavailableError before this guard.
+        skip(
             "auto reports the real engine when one serves another's endpoint",
-            resolved == "podman",
-            f"auto resolved to {resolved!r} with every endpoint served by podman",
+            "needs a reachable engine to resolve against",
         )
-        refused = False
-        try:
-            engine.detect("docker")
-        except engine.EngineUnavailableError as exc:
-            refused = "podman" in str(exc)
-        check(
+        skip(
             "asking for the wrong engine is refused, not silently honoured",
-            refused,
-            "requesting docker on a podman-only machine names podman in the error",
+            "needs a reachable engine to refuse against",
         )
-    finally:
-        engine.identify = real_identify
-        engine.reset_clients()
+    else:
+        real_identify = engine.identify
+        try:
+            engine.identify = lambda _client: "podman"
+            engine.reset_clients()
+            resolved = engine.detect("auto")
+            check(
+                "auto reports the real engine when one serves another's endpoint",
+                resolved == "podman",
+                f"auto resolved to {resolved!r} with every endpoint served by podman",
+            )
+            refused = False
+            try:
+                engine.detect("docker")
+            except engine.EngineUnavailableError as exc:
+                refused = "podman" in str(exc)
+            check(
+                "asking for the wrong engine is refused, not silently honoured",
+                refused,
+                "requesting docker on a podman-only machine names podman in the error",
+            )
+        finally:
+            engine.identify = real_identify
+            engine.reset_clients()
 
     # --- 6c. a dropped connection is not an outage -------------------
     stale_cases = {
@@ -482,7 +520,13 @@ def main() -> int:
 
 def summarize() -> int:
     failed = [r for r in results if not r[1]]
-    print(f"\n{len(results) - len(failed)}/{len(results)} passed")
+    tail = f"  ({len(skipped)} skipped)" if skipped else ""
+    print(f"\n{len(results) - len(failed)}/{len(results)} passed{tail}")
+    if skipped:
+        print("\nSkipped, so NOT proven here:")
+        for name, reason in skipped:
+            print(f"  - {name}")
+        print("  Run this on a machine with a container engine to cover them.")
     if failed:
         print("\nThis machine is NOT ready. Fix the FAIL lines, then run:")
         print("  hyperbox doctor")
