@@ -93,6 +93,66 @@ echo "$DOCKER_HOST"      # if set, it wins over the context
 If your MCP client launches HyperBox with a trimmed environment, it may
 not inherit `DOCKER_HOST`. Set it explicitly in the client's `env` block.
 
+## "connection refused" from Podman, but Podman is running
+
+Fixed in 0.2.2. A stopped `podman machine` leaves its socket **file** on
+disk:
+
+```bash
+ls -l /var/folders/*/*/T/podman/*-api.sock   # still there after `machine stop`
+```
+
+HyperBox used to accept any socket path that existed, so it pointed
+`CONTAINER_HOST` at a socket nothing was listening on and every call came
+back `connection refused`. Two things turned that into a permanent
+condition rather than a passing one:
+
+- the resolved socket was never re-checked, so a server process that
+  latched onto a dead path kept it for its whole life — and a server inside
+  an editor runs for days, including across a `podman machine restart` that
+  fixed the underlying problem;
+- dropping the cached client left the dead path in place, so the retry
+  reconnected to the same socket.
+
+HyperBox now connects to a candidate before trusting it, re-resolves a
+setting that has gone dead, and drops the resolved socket whenever it drops
+its clients. Restarting the Podman machine no longer needs the MCP client
+restarted with it.
+
+If you still see it, `hyperbox doctor` names the socket actually in use.
+
+## A run timed out — did the code stop?
+
+Yes, since 0.2.2. Before that it did not: the timeout returned
+`timed_out: true` while the code kept running at the sandbox's full CPU
+limit until the sandbox was destroyed.
+
+The result now says which happened:
+
+- *"The code was killed; the sandbox is still usable."* — the normal case.
+  Files, including `/work`, are untouched.
+- *"The sandbox was restarted…"* — the fallback, when something survived.
+  `/work` is tmpfs, so it comes back empty; installed packages and the rest
+  of the filesystem survive. The sandbox is re-sealed and checked before
+  being handed back.
+- A warning naming what could not be done, if neither worked. Call
+  `destroy_sandbox` in that case.
+
+## Testing an unreleased checkout in a client
+
+`hyperbox config` resolves `hyperbox` through PATH, which is right for an
+installed release and wrong for a branch you are testing: if a release is
+already installed, the generated config launches **that**, your checkout
+never runs, and nothing about the config looks wrong.
+
+```bash
+hyperbox config --local --format json
+```
+
+`--local` pins the executable in the environment you ran it from. The
+config is then tied to that directory and breaks if you move it, which is
+the intended trade.
+
 ## Podman is installed but nothing finds it
 
 Two separate problems, often confused.
