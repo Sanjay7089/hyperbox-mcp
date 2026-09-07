@@ -138,6 +138,29 @@ def main() -> int:
     # anything this suite abandoned does not, because every path that
     # forgets a sandbox removes its row first. That is the discriminator.
     leaked = set(managed_containers(backend)) - before
+    if leaked and others:
+        # Cannot be attributed, so must not be reported as a verdict.
+        #
+        # Another server shares this machine's engines, label and registry,
+        # and creates sandboxes throughout a run that takes minutes. A
+        # container that appeared in that window may be this suite's leak
+        # or may be theirs, and there is no way to tell from here -- the
+        # sandbox ids are opaque and the registry row may already be gone.
+        #
+        # Reporting it as FAIL is a confident wrong answer of exactly the
+        # kind this project exists to avoid; hiding it would be worse. So
+        # it is reported as unattributable, and the run is not failed on
+        # it. With no other server running, this stays a hard failure.
+        print(
+            f"  WARN  {len(leaked)} container(s) appeared during the run and "
+            "cannot be attributed"
+        )
+        print(f"        {sorted(leaked)}")
+        print(
+            "        Another HyperBox server was running throughout. Quit it "
+            "and re-run to make this check meaningful."
+        )
+        leaked = set()
     if leaked:
         try:
             live = {r.sandbox_id for r in Registry().all_records()}
