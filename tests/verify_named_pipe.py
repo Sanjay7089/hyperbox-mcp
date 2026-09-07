@@ -122,7 +122,10 @@ def main() -> int:
         print("\nNothing to prove on this platform.")
         return 0
 
-    from spike_named_pipe import NamedPipeHTTPConnection, demux
+    # The package module, not the spike: this test exists to cover the
+    # code that ships.
+    from hyperbox_mcp.engine import demux_frames as demux
+    from hyperbox_mcp.rest.transport import NamedPipeHTTPConnection
 
     # Several listeners, not one. A single-instance server recreates its
     # pipe between requests, and a client connecting in that window gets
