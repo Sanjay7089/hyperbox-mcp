@@ -361,6 +361,66 @@ def main() -> int:
         "",
     )
 
+    # --- 5b-iv. the exec frame parser, fed the way a socket feeds it --
+    #
+    # Whole-buffer demuxing is the easy half and is checked above. The
+    # streaming parser is the one that matters, because read boundaries
+    # have nothing to do with frame boundaries: a recv can return three
+    # bytes of a header, or a header plus half a payload, or two frames and
+    # a fragment. Parsing each chunk independently corrupts output in a way
+    # that looks like the program's own, so this feeds the same bytes at
+    # every possible split and demands the same answer each time.
+    import random  # noqa: PLC0415
+
+    from hyperbox_mcp.rest.client import FrameReader  # noqa: PLC0415
+
+    def framed(stream: int, text: bytes) -> bytes:
+        return bytes([stream, 0, 0, 0]) + len(text).to_bytes(4, "big") + text
+
+    stream_bytes = (
+        framed(1, b"alpha")
+        + framed(2, b"warn-1")
+        + framed(1, b"")          # a zero-length frame is a frame, not EOF
+        + framed(1, b"beta-" + b"x" * 9000)   # spans several reads
+        + framed(2, b"warn-2")
+    )
+    want = ("alpha" + "" + "beta-" + "x" * 9000, "warn-1warn-2")
+
+    def run_with(sizes):
+        reader, at = FrameReader(), 0
+        for size in sizes:
+            if at >= len(stream_bytes):
+                break
+            reader.feed(stream_bytes[at : at + size])
+            at += size
+        reader.feed(stream_bytes[at:])
+        return reader.result()
+
+    bad = []
+    for chunk in (1, 2, 3, 7, 8, 9, 13, 4096, 65536):
+        if run_with([chunk] * (len(stream_bytes) // max(chunk, 1) + 2)) != want:
+            bad.append(f"fixed:{chunk}")
+    rng = random.Random(20260908)
+    for _ in range(200):
+        sizes = [rng.randint(1, 40) for _ in range(len(stream_bytes))]
+        if run_with(sizes) != want:
+            bad.append(f"random:{sizes[:6]}")
+            break
+    check(
+        "the exec frame parser survives every read boundary",
+        not bad,
+        f"9 fixed chunk sizes + 200 random splits of {len(stream_bytes)} bytes"
+        + (f" — FAILED: {bad[:2]}" if bad else ""),
+    )
+
+    truncated = FrameReader()
+    truncated.feed(framed(1, b"kept") + b"\x01\x00\x00\x00\x00\x00\x27\x10sh")
+    check(
+        "a truncated final frame is dropped, not guessed at",
+        truncated.result() == ("kept", ""),
+        "a frame whose payload never arrived contributes nothing",
+    )
+
     # --- 5c. `config --local` pins the checkout, not PATH -------------
     #
     # Gate-critical, and it fails silently without a test. A machine that
