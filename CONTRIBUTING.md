@@ -29,6 +29,52 @@ that way.
 The full suite must pass on **both** engines before a change lands. It
 also asserts that no containers were left behind.
 
+## Testing an unreleased branch
+
+Automated suites cannot cover the client integration, and the machine you
+develop on is usually not the one that breaks. To exercise a branch on
+another machine — Windows especially — without installing from PyPI:
+
+```bash
+git clone -b <branch> https://github.com/Sanjay7089/hyperbox-mcp hyperbox-branch
+cd hyperbox-branch
+python -m venv .venv && . .venv/bin/activate     # Windows: .\.venv\Scripts\Activate.ps1
+pip install -e .
+
+hyperbox --version                                # confirm it is the branch
+python tests/verify_platform.py                   # host side, seconds
+python tests/run_all.py docker                    # full suite
+```
+
+**Check which `hyperbox` you are actually running.** If a release is
+already installed, `hyperbox` resolves through PATH to *that* build — so
+generate the client config with `--local`, which pins the executable in the
+environment you ran it from:
+
+```bash
+hyperbox config --local --format json          # Claude Desktop
+hyperbox config --local --format antigravity   # Antigravity
+```
+
+Without it, the client launches the installed release, your branch never
+runs, and nothing about the config looks wrong. `where hyperbox` (or
+`which`) is worth a glance either way.
+
+Then drive the loop by hand in a real client. The steps that catch what the
+suites cannot:
+
+1. create → code that succeeds → code that fails → read the real traceback
+   → destroy.
+2. **Restart the client, then destroy a sandbox created before the
+   restart.** Cross-process ownership is the property most likely to break
+   silently.
+3. **Open a second client window and use both at once.** Multi-client
+   problems reproduce nowhere else.
+4. `hyperbox build` an environment while the server is running, then use it
+   from the agent without restarting.
+5. `docker ps -a --filter label=hyperbox-mcp.managed=true` — should be
+   empty when you are done.
+
 ## The rules that hold this together
 
 A few constraints are load-bearing. A change that breaks one of these
