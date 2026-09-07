@@ -124,11 +124,18 @@ def main() -> int:
 
     from spike_named_pipe import NamedPipeHTTPConnection, demux
 
+    # Several listeners, not one. A single-instance server recreates its
+    # pipe between requests, and a client connecting in that window gets
+    # ERROR_FILE_NOT_FOUND -- a race in the stub that looks exactly like a
+    # transport bug. CreateNamedPipe allows many instances of one name, so
+    # there is always one waiting.
     ready, stop = threading.Event(), threading.Event()
-    server = threading.Thread(target=serve_once, args=(ready, stop), daemon=True)
-    server.start()
+    for _ in range(4):
+        threading.Thread(
+            target=serve_once, args=(ready, stop), daemon=True
+        ).start()
     ready.wait(5)
-    time.sleep(0.3)
+    time.sleep(0.5)
 
     def get(path: str):
         conn = NamedPipeHTTPConnection(PIPE, timeout=15)
