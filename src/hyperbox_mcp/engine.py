@@ -23,8 +23,10 @@ from __future__ import annotations
 import glob
 import os
 import shutil
+import socket
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -106,6 +108,30 @@ _PODMAN_SOCKET_GLOBS = (
     "/tmp/podman/*-api.sock",
 )
 
+#: How long to wait for a socket to accept a connection before calling it
+#: dead.
+#:
+#: Existence is NOT liveness, and conflating them is what produced
+#: "connection refused to podman" on a machine whose Podman was fine. A
+#: stopped `podman machine` leaves its `*-api.sock` file on disk; connecting
+#: to it gives ECONNREFUSED rather than ENOENT.
+#:
+#: Kept short deliberately. This runs once per candidate on the
+#: create_sandbox path, so at one second apiece a handful of dead
+#: candidates would add seconds to every sandbox creation. A unix socket
+#: that has not accepted in 200ms is not going to.
+SOCKET_PROBE_TIMEOUT = 0.2
+
+#: How long to let the podman CLI answer. The full timeout is for paths
+#: where a person is waiting; the short one is for background work
+#: (garbage collection) where a stopped engine must not stall a sweep.
+PODMAN_CLI_TIMEOUT = 15.0
+PODMAN_CLI_TIMEOUT_FAST = 2.0
+
+#: How long a failed resolution is remembered, so a stopped engine is not
+#: re-probed on every sweep.
+PROBE_FAILURE_TTL = 60.0
+
 
 @dataclass
 class EngineStatus:
@@ -137,7 +163,9 @@ def podman_binary() -> str:
     return ""
 
 
-def _podman_machine_state(binary: str) -> str:
+def _podman_machine_state(
+    binary: str, cli_timeout: float = PODMAN_CLI_TIMEOUT
+) -> str:
     """Ask the podman CLI whether a VM is running. Best effort: this is
     context for an error message, never a gate on anything."""
     if not binary:
@@ -147,66 +175,146 @@ def _podman_machine_state(binary: str) -> str:
             [binary, "machine", "list", "--format", "{{.Name}} {{.LastUp}}"],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=cli_timeout,
         )
     except (OSError, subprocess.SubprocessError):
         return ""
     return out.stdout.strip() if out.returncode == 0 else ""
 
 
-def podman_socket(binary: str = "") -> str:
-    """The unix socket path for the local Podman service, if there is one.
+def _socket_is_live(path: str) -> bool:
+    """Whether anything is actually LISTENING on this unix socket.
 
-    Asks the CLI where its machine put the socket, then falls back to the
-    rootless locations used when Podman runs natively.
+    Existence is not the test, and treating it as one is the bug this
+    function exists to close. A `podman machine stop` leaves its
+    `*-api.sock` file on disk; so does a reboot, and so does a machine
+    recreated under a new path. Connecting to such a file gives
+    ECONNREFUSED — not ENOENT — which is precisely the "connection refused
+    to podman" a healthy machine was reported as.
+
+    Never raises: an unprobeable candidate is simply not a candidate.
     """
-    reported = ""
-    binary = binary or podman_binary()
-    if binary:
-        try:
-            out = subprocess.run(
-                [
-                    binary,
-                    "machine",
-                    "inspect",
-                    "--format",
-                    "{{.ConnectionInfo.PodmanSocket.Path}}",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=15,
-            )
-        except (OSError, subprocess.SubprocessError):
-            out = None
-        if out is not None and out.returncode == 0 and out.stdout.strip():
-            reported = out.stdout.strip().splitlines()[0].strip()
+    if WINDOWS or not path:
+        return False
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        probe.settimeout(SOCKET_PROBE_TIMEOUT)
+        probe.connect(path)
+        return True
+    except OSError:
+        return False
+    finally:
+        probe.close()
 
-    if reported and os.path.exists(reported):
-        return reported
 
-    # The reported path can be wrong without TMPDIR, but its basename
-    # still names the right machine, so prefer a glob hit that matches it.
-    wanted = os.path.basename(reported) if reported else ""
-    fallbacks: list[str] = []
+def _cli_reported_socket(binary: str, cli_timeout: float) -> str:
+    """Where the podman CLI says its machine put the socket.
+
+    Only consulted when the cheap paths found nothing live, because it
+    costs a subprocess: on a stopped machine that is the single slowest
+    thing in engine discovery, and it used to run on every sandbox
+    creation and every garbage-collection sweep.
+    """
+    if not binary:
+        return ""
+    try:
+        out = subprocess.run(
+            [
+                binary,
+                "machine",
+                "inspect",
+                "--format",
+                "{{.ConnectionInfo.PodmanSocket.Path}}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=cli_timeout,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if out.returncode != 0 or not out.stdout.strip():
+        return ""
+    return out.stdout.strip().splitlines()[0].strip()
+
+
+def _glob_candidates() -> list[str]:
+    """Socket paths the machine has left lying around, newest first.
+
+    Newest first because when several are present the survivor of the most
+    recent `podman machine` run is overwhelmingly the live one; liveness is
+    still checked, this only decides what to check first.
+    """
+    found: list[str] = []
     for pattern in _PODMAN_SOCKET_GLOBS:
-        fallbacks.extend(sorted(glob.glob(pattern)))
-    for candidate in fallbacks:
-        if wanted and os.path.basename(candidate) == wanted:
+        found.extend(glob.glob(pattern))
+    unique = list(dict.fromkeys(found))
+
+    def age(path: str) -> float:
+        try:
+            return -os.stat(path).st_mtime
+        except OSError:
+            return 0.0
+
+    return sorted(unique, key=age)
+
+
+def podman_socket(
+    binary: str = "", cli_timeout: float = PODMAN_CLI_TIMEOUT
+) -> str:
+    """A unix socket for the local Podman service that is ACCEPTING now.
+
+    Returns "" when nothing is listening, so a caller reports "no Podman
+    socket is accepting connections" instead of handing back a path that
+    is guaranteed to fail with ECONNREFUSED further down.
+
+    Cheap candidates are tried first and the podman CLI is consulted only
+    if none of them are live. That ordering is not a micro-optimisation:
+    the CLI call is a subprocess with a multi-second timeout, it used to
+    run on every sandbox creation, and once liveness is the test it has
+    nothing left to contribute on the happy path — any live socket is
+    usable, whichever machine put it there.
+    """
+    for candidate in _glob_candidates():
+        if _socket_is_live(candidate):
             return candidate
-    if fallbacks:
-        return fallbacks[0]
 
     # POSIX-only: Windows has no unix sockets, and getuid does not exist.
     if not WINDOWS:
         for template in _PODMAN_NATIVE_SOCKETS:
             candidate = template.format(uid=os.getuid())
-            if os.path.exists(candidate):
+            if _socket_is_live(candidate):
+                return candidate
+
+    reported = _cli_reported_socket(binary or podman_binary(), cli_timeout)
+    if _socket_is_live(reported):
+        return reported
+
+    # The reported path can be wrong without TMPDIR, but its basename still
+    # names the right machine. Nothing globbed was live, so this is a last
+    # look rather than a likely hit.
+    wanted = os.path.basename(reported) if reported else ""
+    if wanted:
+        for candidate in _glob_candidates():
+            if os.path.basename(candidate) == wanted and _socket_is_live(
+                candidate
+            ):
                 return candidate
     return ""
 
 
-def ensure_podman_transport() -> str:
-    """Point podman-py at the unix socket rather than a TCP forward.
+#: The CONTAINER_HOST value this process set for itself, if any.
+#:
+#: Tracked so `reset_podman_transport` can drop OUR resolution without
+#: discarding one the user set deliberately. A user pointing at a remote or
+#: unusual endpoint has made a choice; silently overwriting it would be the
+#: same class of confident wrongness this module exists to avoid.
+_own_container_host: str = ""
+
+
+def ensure_podman_transport(
+    cli_timeout: float = PODMAN_CLI_TIMEOUT,
+) -> str:
+    """Point podman-py at a unix socket that is alive right now.
 
     This is not a preference, it is a correctness fix. `PodmanClient.from_env()`
     will happily pick the TCP port that `podman machine` forwards, and over
@@ -219,25 +327,63 @@ def ensure_podman_transport() -> str:
     returns `b''` with the right exit code; over the unix socket the same
     exec returns a correctly framed `\x01...` stdout stream.
 
-    Setting CONTAINER_HOST in this process's environment fixes it for
-    every podman client created afterwards, including the ones the
-    execution backend builds internally.
+    An existing `unix://` value is RE-VALIDATED rather than trusted. It used
+    to be returned untouched, which meant a process that resolved a socket
+    once kept it forever — and a server inside an editor runs for days. Stop
+    the podman machine and the socket file stays on disk, so every later call
+    failed with ECONNREFUSED against a path that could never work again, on a
+    machine whose Podman was restarted and perfectly healthy.
 
-    Returns the socket in use, or "" if none could be found. An explicit
-    unix:// CONTAINER_HOST from the user is always left alone.
+    A user-supplied value that is dead is replaced only if a live socket is
+    found; otherwise it is put back, because refusing with their own setting
+    intact is more useful than refusing with it silently erased.
+
+    Returns the socket in use, or "" if none could be found.
     """
+    global _own_container_host
+
     if WINDOWS:
         # Nothing to choose: there is no unix socket to prefer, and the
         # named-pipe route goes through the docker client instead.
         return ""
+
     current = os.environ.get("CONTAINER_HOST", "")
     if current.startswith("unix://"):
-        return current[len("unix://") :]
-    socket_path = podman_socket()
+        existing = current[len("unix://") :]
+        if _socket_is_live(existing):
+            return existing
+        os.environ.pop("CONTAINER_HOST", None)
+
+    socket_path = podman_socket(cli_timeout=cli_timeout)
     if socket_path:
-        os.environ["CONTAINER_HOST"] = f"unix://{socket_path}"
+        _own_container_host = f"unix://{socket_path}"
+        os.environ["CONTAINER_HOST"] = _own_container_host
         return socket_path
+
+    if current and not current.startswith("unix://"):
+        # Not ours to resolve — a TCP or ssh endpoint the user chose.
+        return ""
+    if current:
+        os.environ["CONTAINER_HOST"] = current
     return ""
+
+
+def reset_podman_transport() -> None:
+    """Forget our resolved Podman socket so the next client re-resolves.
+
+    Called from `reset_clients`, and the pairing is load-bearing: dropping
+    the cached clients while leaving CONTAINER_HOST pointing at a dead
+    socket rebuilds a client against the same dead path, so the retry is
+    guaranteed to fail for exactly the reason the first attempt did. That
+    is what turns one stopped machine into a permanently broken process.
+
+    Only clears a value this process set. A user's own CONTAINER_HOST is
+    left alone.
+    """
+    global _own_container_host
+    if _own_container_host and os.environ.get("CONTAINER_HOST") == _own_container_host:
+        os.environ.pop("CONTAINER_HOST", None)
+    _own_container_host = ""
 
 
 def identify(engine_client: Any) -> str:
@@ -385,9 +531,17 @@ def _build_client(backend: str) -> Any:
                 "The docker client library is not installed.",
                 "Reinstall the project: `uv sync`.",
             ) from exc
+        endpoint = os.environ.get("DOCKER_HOST", "")
+        if _probe_failed_recently("docker", endpoint):
+            raise EngineUnavailableError(
+                f"Docker is not reachable (checked in the last "
+                f"{PROBE_FAILURE_TTL:.0f}s).",
+                _DOCKER_FIX,
+            )
         try:
             return _docker_client()
         except Exception as exc:  # noqa: BLE001 - any failure here is "unreachable"
+            _record_probe_failure("docker", endpoint)
             raise EngineUnavailableError(
                 f"Docker is not reachable ({type(exc).__name__}: {exc}).",
                 _DOCKER_FIX,
@@ -401,13 +555,29 @@ def _build_client(backend: str) -> Any:
                 "The podman client library is not installed.",
                 "Reinstall the project: `uv sync`.",
             ) from exc
+        if _probe_failed_recently("podman", ""):
+            raise EngineUnavailableError(
+                "No Podman socket is accepting connections (checked in the "
+                f"last {PROBE_FAILURE_TTL:.0f}s).",
+                _PODMAN_MACHINE_FIX,
+            )
+
         # Must happen before the client is built: over a TCP forward,
         # exec output never arrives. See ensure_podman_transport.
-        ensure_podman_transport()
+        socket_path = ensure_podman_transport()
+        if not socket_path and not os.environ.get("CONTAINER_HOST"):
+            _record_probe_failure("podman", "")
+            raise EngineUnavailableError(
+                "No Podman socket is accepting connections. A stopped "
+                "machine leaves its socket file on disk, so a socket file "
+                "existing is not evidence that Podman is running.",
+                _PODMAN_MACHINE_FIX,
+            )
         try:
             client = PodmanClient.from_env()
             client.ping()
         except Exception as exc:  # noqa: BLE001
+            _record_probe_failure("podman", socket_path)
             raise EngineUnavailableError(
                 f"Podman is not reachable ({type(exc).__name__}: {exc}).",
                 _PODMAN_MACHINE_FIX,
@@ -420,6 +590,26 @@ def _build_client(backend: str) -> Any:
 
 
 _clients: dict[str, Any] = {}
+
+#: Recent failed resolutions, so a stopped engine is not re-probed on every
+#: call.
+#:
+#: Keyed on (backend, endpoint) rather than on backend alone. A machine can
+#: serve two Podman sockets — a default machine and a named one — and one of
+#: them being dead says nothing whatsoever about the other. Keying on the
+#: backend would let the first dead socket mark the whole engine
+#: unreachable, which is the same collapse of "this endpoint" into "this
+#: engine" that the rest of this module exists to prevent.
+_probe_failures: dict[tuple[str, str], float] = {}
+
+
+def _probe_failed_recently(backend: str, endpoint: str) -> bool:
+    stamp = _probe_failures.get((backend, endpoint))
+    return stamp is not None and (time.monotonic() - stamp) < PROBE_FAILURE_TTL
+
+
+def _record_probe_failure(backend: str, endpoint: str) -> None:
+    _probe_failures[(backend, endpoint)] = time.monotonic()
 
 #: Substrings of the errors a dead-but-cached connection produces.
 #:
@@ -445,6 +635,11 @@ _STALE_CONNECTION_MARKERS = (
     "winerror 232",
     "winerror 109",
     "cannot connect to host",
+    # Safe to retry ONLY because reset_clients now also drops the resolved
+    # transport, so the retry re-resolves the socket instead of reconnecting
+    # to the same dead path. Without that pairing this marker would turn one
+    # stopped machine into two guaranteed failures instead of one.
+    "connection refused",
 )
 
 
@@ -501,8 +696,18 @@ def client(backend: str) -> Any:
 
 
 def reset_clients() -> None:
-    """Drop cached clients, so the next call builds a fresh connection."""
+    """Drop cached clients, the resolved Podman transport, and remembered
+    failures, so the next call builds a fresh connection against a freshly
+    resolved endpoint.
+
+    Dropping the transport alongside the clients is load-bearing, not
+    tidiness: rebuilding a client while CONTAINER_HOST still points at a
+    dead socket reconnects to the same dead path, so the retry fails for
+    exactly the reason the first attempt did. See reset_podman_transport.
+    """
     _clients.clear()
+    _probe_failures.clear()
+    reset_podman_transport()
 
 
 def _not_found_types(backend: str) -> tuple[type[BaseException], ...]:

@@ -185,6 +185,84 @@ def main() -> int:
             f"reachable: {', '.join(reachable) or 'NONE — see the fix lines above'}",
         )
 
+    # --- 5b. a socket FILE is not a listener -------------------------
+    #
+    # The regression this guards is the whole reason v0.3 exists: a
+    # stopped `podman machine` leaves its *-api.sock file on disk, and the
+    # resolver used to accept any path that os.path.exists(). Connecting to
+    # such a file gives ECONNREFUSED rather than ENOENT, so a healthy
+    # machine was reported as "connection refused to podman" for the entire
+    # life of a server process — days, inside an editor.
+    #
+    # POSIX only: Windows has no unix sockets, and the named-pipe route
+    # does not go through this resolver at all.
+    if WINDOWS:
+        skip(
+            "a dead socket file is never chosen as a transport",
+            "Windows has no unix sockets; Podman is reached over a named pipe.",
+        )
+    else:
+        import socket as _socket
+
+        sock_dir = tempfile.mkdtemp(prefix="hb-sock-")
+        dead_path = os.path.join(sock_dir, "dead-api.sock")
+        live_path = os.path.join(sock_dir, "live-api.sock")
+
+        # Bound but never listening: the file exists, nothing accepts.
+        dead = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        dead.bind(dead_path)
+        dead.close()
+
+        live = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        live.bind(live_path)
+        live.listen(1)
+        try:
+            check(
+                "a bound-but-dead socket file is reported as not live",
+                os.path.exists(dead_path)
+                and not engine._socket_is_live(dead_path),
+                "the file exists and is still rejected — existence is not "
+                "liveness",
+            )
+            check(
+                "a listening socket is reported as live",
+                engine._socket_is_live(live_path),
+                f"probe timeout {engine.SOCKET_PROBE_TIMEOUT}s",
+            )
+
+            # The latch: a CONTAINER_HOST pointing at a dead socket must be
+            # re-resolved, not returned. Returning it is what made the
+            # failure permanent for the process.
+            previous = os.environ.get("CONTAINER_HOST")
+            os.environ["CONTAINER_HOST"] = f"unix://{dead_path}"
+            try:
+                resolved = engine.ensure_podman_transport(
+                    cli_timeout=engine.PODMAN_CLI_TIMEOUT_FAST
+                )
+            finally:
+                if previous is None:
+                    os.environ.pop("CONTAINER_HOST", None)
+                else:
+                    os.environ["CONTAINER_HOST"] = previous
+                engine.reset_clients()
+            check(
+                "a dead CONTAINER_HOST is re-resolved, not latched",
+                resolved != dead_path,
+                f"resolved to {resolved or '(nothing live)'} instead of the "
+                "dead socket",
+            )
+        finally:
+            live.close()
+            for path in (dead_path, live_path):
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+            try:
+                os.rmdir(sock_dir)
+            except OSError:
+                pass
+
     # --- 6. the Windows-specific routing is correct ------------------
     dialect = engine.client_dialect("podman")
     if WINDOWS:
