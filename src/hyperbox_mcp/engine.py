@@ -464,6 +464,30 @@ def _windows_podman_pipes() -> list[str]:
     rather than trusted by name.
     """
     candidates: list[str] = []
+
+    # An explicit npipe:// endpoint wins outright. Two reasons, and the
+    # second is not a test convenience:
+    #
+    #   - Someone running a non-default Podman machine, or Podman Desktop
+    #     on a custom pipe, has no other way to say so on Windows. Every
+    #     other platform honours CONTAINER_HOST; this one silently did not.
+    #   - The acceptance suite makes an engine genuinely unreachable by
+    #     pointing a server at an address where nothing listens. On Windows
+    #     that had no effect at all, because this function ignored both
+    #     variables and went looking for the real pipe -- so the "outage"
+    #     server connected to a healthy engine and destroyed the container
+    #     the test was asserting had survived.
+    for variable in ("CONTAINER_HOST", "DOCKER_HOST"):
+        value = os.environ.get(variable, "").strip()
+        if value.startswith("npipe://"):
+            return [value]
+        if value:
+            # Set, but not to a pipe. On Windows there is no other
+            # transport, so honour the intent -- an endpoint that cannot be
+            # reached is the honest answer, not a fallback to a different
+            # engine than the one named.
+            return [value]
+
     binary = podman_binary()
     if binary:
         for args, prefix in (
