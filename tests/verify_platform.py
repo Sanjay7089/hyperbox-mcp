@@ -263,6 +263,39 @@ def main() -> int:
             except OSError:
                 pass
 
+    # --- 5c. `config --local` pins the checkout, not PATH -------------
+    #
+    # Gate-critical, and it fails silently without a test. A machine that
+    # already has a released hyperbox installed resolves `hyperbox` through
+    # PATH to THAT build, so a client configured from a branch checkout
+    # launches the release, the branch never runs, and the config looks
+    # entirely correct. Observed here: PATH held 0.2.0 while the checkout
+    # under test was newer.
+    from hyperbox_mcp import clientconfig  # noqa: PLC0415
+
+    local_exe = clientconfig.local_executable_path()
+    if not local_exe:
+        skip(
+            "config --local pins this checkout's executable",
+            "no `hyperbox` next to this interpreter — run `pip install -e .` "
+            "in the environment you are testing from.",
+        )
+    else:
+        rendered = json.loads(clientconfig.render("json", local=True))
+        command = rendered["mcpServers"]["hyperbox"]["command"]
+        check(
+            "config --local pins this checkout's executable",
+            Path(command).parent == Path(sys.executable).parent,
+            f"{command} (interpreter: {sys.executable})",
+        )
+        check(
+            "config --local says the config is checkout-bound",
+            any(
+                "--local" in line for line in clientconfig.notes("json", local=True)
+            ),
+            "the note explains why the path is tied to this directory",
+        )
+
     # --- 6. the Windows-specific routing is correct ------------------
     dialect = engine.client_dialect("podman")
     if WINDOWS:

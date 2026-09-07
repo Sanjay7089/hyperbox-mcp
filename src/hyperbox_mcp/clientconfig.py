@@ -29,6 +29,10 @@ from hyperbox_mcp import engine, policy
 #: The server name a client will show these tools under.
 SERVER_NAME = "hyperbox"
 
+
+class LocalExecutableMissing(RuntimeError):
+    """--local was asked for and there is nothing local to point at."""
+
 #: Directories that must be on PATH for the server to find its engine,
 #: beyond whatever the engine CLI's own directory turns out to be.
 _SYSTEM_PATH_DIRS = {
@@ -54,6 +58,26 @@ def executable_path() -> str:
     return "hyperbox"
 
 
+def local_executable_path() -> str:
+    """The `hyperbox` belonging to the interpreter running this code.
+
+    `executable_path` resolves through PATH, which is right for a normal
+    install and exactly wrong when testing a branch: a machine that already
+    has a released hyperbox installed would be configured to launch THAT,
+    the branch under test would never run, and nothing in the generated
+    config would look wrong. The failure appears as "my fix did nothing".
+
+    Returns "" if there is no sibling executable, so the caller can say so
+    rather than silently falling back to the very thing being avoided.
+    """
+    bindir = Path(sys.executable).parent
+    for name in ("hyperbox.exe", "hyperbox"):
+        candidate = bindir / name
+        if candidate.exists():
+            return str(candidate.resolve())
+    return ""
+
+
 def _looks_like_a_checkout(executable: str) -> bool:
     """Whether this executable lives inside a source tree rather than an
     installed tool — `uv run` in a clone produces exactly that."""
@@ -61,7 +85,7 @@ def _looks_like_a_checkout(executable: str) -> bool:
     return bool({".venv", "venv"} & parts)
 
 
-def path_entries() -> list[str]:
+def path_entries(local: bool = False) -> list[str]:
     """Directories a client must put on PATH, most specific first.
 
     Clients launch servers with a trimmed environment, so the container
@@ -76,7 +100,7 @@ def path_entries() -> list[str]:
 
     # The executable's own directory, so a client that resolves by name
     # still finds it.
-    add(os.path.dirname(executable_path()))
+    add(os.path.dirname(_resolve_executable(local)))
 
     for backend in policy.BACKENDS:
         try:
@@ -91,12 +115,27 @@ def path_entries() -> list[str]:
     return entries
 
 
-def _server_entry() -> dict:
+def _resolve_executable(local: bool) -> str:
+    """The command a client should launch, honouring --local."""
+    if not local:
+        return executable_path()
+    found = local_executable_path()
+    if not found:
+        raise LocalExecutableMissing(
+            "--local was asked for, but there is no `hyperbox` next to "
+            f"{sys.executable}. Install this checkout into the environment "
+            "you are running from first:\n"
+            "    pip install -e .        (or: uv sync)"
+        )
+    return found
+
+
+def _server_entry(local: bool = False) -> dict:
     separator = ";" if sys.platform == "win32" else ":"
     return {
-        "command": executable_path(),
+        "command": _resolve_executable(local),
         "args": [],
-        "env": {"PATH": separator.join(path_entries())},
+        "env": {"PATH": separator.join(path_entries(local))},
     }
 
 
@@ -111,9 +150,9 @@ def _yaml_scalar(value: str) -> str:
     return json.dumps(value)
 
 
-def render(fmt: str = "json") -> str:
+def render(fmt: str = "json", local: bool = False) -> str:
     """The configuration block for `fmt`, ready to paste."""
-    entry = _server_entry()
+    entry = _server_entry(local)
 
     if fmt == "yaml":
         # Continue-based clients: a YAML list under mcpServers.
@@ -135,9 +174,9 @@ def render(fmt: str = "json") -> str:
     return json.dumps({key: {SERVER_NAME: entry}}, indent=2)
 
 
-def notes(fmt: str) -> list[str]:
+def notes(fmt: str, local: bool = False) -> list[str]:
     """Guidance printed to stderr, so stdout stays paste-clean."""
-    executable = executable_path()
+    executable = _resolve_executable(local)
     out = []
 
     if fmt == "yaml":
@@ -159,7 +198,18 @@ def notes(fmt: str) -> list[str]:
                    "claude_desktop_config.json)")
 
     out.append("")
-    if _looks_like_a_checkout(executable):
+    if local:
+        out.append(
+            "Pinned to this checkout on purpose (--local), so the client "
+            "launches the code you are testing rather than whatever "
+            "`hyperbox` happens to be on PATH:"
+        )
+        out.append(f"    {executable}")
+        out.append(
+            "  This config breaks if you move or delete the checkout. That "
+            "is the point; drop --local once you install a release."
+        )
+    elif _looks_like_a_checkout(executable):
         out.append(
             "WARNING: this command lives inside a source checkout, so the "
             "config below is tied to that folder and breaks if you move or "
@@ -195,9 +245,15 @@ def notes(fmt: str) -> list[str]:
     return out
 
 
-def print_config(fmt: str = "json") -> int:
-    for line in notes(fmt):
+def print_config(fmt: str = "json", local: bool = False) -> int:
+    try:
+        rendered = render(fmt, local)
+        guidance = notes(fmt, local)
+    except LocalExecutableMissing as exc:
+        print(f"hyperbox config: {exc}", file=sys.stderr)
+        return 2
+    for line in guidance:
         print(line, file=sys.stderr)
     print("", file=sys.stderr)
-    print(render(fmt))
+    print(rendered)
     return 0

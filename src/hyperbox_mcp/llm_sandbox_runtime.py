@@ -892,7 +892,13 @@ class LLMSandboxRuntime:
         for backend in _BACKENDS:
             try:
                 containers = engine.list_managed(
-                    backend, f"{LABEL_MANAGED}=true"
+                    backend,
+                    f"{LABEL_MANAGED}=true",
+                    # A stopped engine must not stall a timed sweep for the
+                    # full interactive budget. GC probes BOTH backends every
+                    # time, so on a machine with only one of them installed
+                    # this is paid on every pass.
+                    cli_timeout=engine.PODMAN_CLI_TIMEOUT_FAST,
                 )
             except (EngineUnavailableError, ContainerGoneError):
                 continue

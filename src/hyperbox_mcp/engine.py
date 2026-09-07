@@ -516,7 +516,7 @@ def _build_windows_podman_client() -> Any:
     )
 
 
-def _build_client(backend: str) -> Any:
+def _build_client(backend: str, cli_timeout: float = PODMAN_CLI_TIMEOUT) -> Any:
     """Construct a client and prove it can talk. A client object that
     constructs but cannot reach its engine is precisely the failure that
     produced empty output with exit code 0."""
@@ -564,7 +564,7 @@ def _build_client(backend: str) -> Any:
 
         # Must happen before the client is built: over a TCP forward,
         # exec output never arrives. See ensure_podman_transport.
-        socket_path = ensure_podman_transport()
+        socket_path = ensure_podman_transport(cli_timeout=cli_timeout)
         if not socket_path and not os.environ.get("CONTAINER_HOST"):
             _record_probe_failure("podman", "")
             raise EngineUnavailableError(
@@ -681,16 +681,22 @@ def with_retry(operation, what: str = ""):
     return operation()
 
 
-def client(backend: str) -> Any:
+def client(backend: str, cli_timeout: float = PODMAN_CLI_TIMEOUT) -> Any:
     """A live, verified client for `backend`.
 
     Cached after the first successful ping so routine operations do not
     pay a round trip each.
+
+    `cli_timeout` bounds the podman CLI call that resolution may fall back
+    to. Background callers pass PODMAN_CLI_TIMEOUT_FAST: garbage collection
+    runs on a timer and must not stall for the full interactive budget just
+    because an engine is stopped. It only matters on the failing path — a
+    reachable engine never reaches the CLI at all.
     """
     existing = _clients.get(backend)
     if existing is not None:
         return existing
-    built = _build_client(backend)
+    built = _build_client(backend, cli_timeout=cli_timeout)
     _clients[backend] = built
     return built
 
@@ -788,11 +794,13 @@ def get_container(backend: str, ref: str) -> Any:
     return with_retry(op, f"container {ref[:12]}")
 
 
-def list_managed(backend: str, label: str) -> list[Any]:
+def list_managed(
+    backend: str, label: str, cli_timeout: float = PODMAN_CLI_TIMEOUT
+) -> list[Any]:
     """Every container carrying `label`. Raises if the engine is down —
     an empty list must mean 'none', never 'could not ask'."""
     def op():
-        engine = client(backend)
+        engine = client(backend, cli_timeout=cli_timeout)
         try:
             return list(engine.containers.list(all=True, filters={"label": label}))
         except Exception as exc:  # noqa: BLE001

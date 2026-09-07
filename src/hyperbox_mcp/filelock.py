@@ -67,10 +67,29 @@ if WINDOWS:  # pragma: no cover - platform-specific
 else:
     import fcntl
 
-    def _acquire(handle: IO, timeout: float) -> None:  # noqa: ARG001
-        # flock blocks until the lock is free and is interrupted by
-        # signals, so it needs no deadline of its own.
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    def _acquire(handle: IO, timeout: float) -> None:
+        # LOCK_EX alone blocks forever, which made DEFAULT_LOCK_TIMEOUT a
+        # comment rather than a behaviour: two clients touching one sandbox
+        # left the second waiting with no deadline and no way to say so,
+        # and the MCP client resolved that silence by killing the request.
+        #
+        # LOCK_NB returns EWOULDBLOCK immediately, so the sleep between
+        # attempts is load-bearing -- without it this is a spin loop that
+        # burns a core while waiting.
+        deadline = time.monotonic() + timeout
+        delay = 0.01
+        while True:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        "Timed out waiting for another HyperBox process to "
+                        "release this sandbox's lock."
+                    ) from None
+                time.sleep(delay)
+                delay = min(delay * 2, 0.25)
 
     def _release(handle: IO) -> None:
         try:

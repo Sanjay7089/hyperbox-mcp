@@ -638,16 +638,22 @@ def run_safely(code: str, language: str = "python") -> str:
 def _background_gc_loop() -> None:
     """Sweep for expired sandboxes for as long as the server is up.
 
-    Without this, the inactivity TTL is enforced only by restarting the
-    process: serve() swept once and then blocked in mcp.run(). A server
-    running inside an editor stays up for days, so every expired sandbox
-    stayed on the machine until the editor was closed.
+    Sweeps immediately, then on the interval. The first sweep used to run
+    synchronously in serve(), before mcp.run() — so the server did not
+    start listening until every engine had been probed, and probing a
+    stopped Podman costs a CLI subprocess with a multi-second timeout.
+    Several clients launching at once then all looked like servers that had
+    failed to start. Nothing about reclaiming an old container needs to
+    happen before the first tool call can be answered.
 
-    No new race: collect_garbage() takes the per-sandbox registry lock,
-    and so does every tool that touches one.
+    Without the loop, the inactivity TTL would be enforced only by
+    restarting the process, and a server running inside an editor stays up
+    for days.
+
+    No new race: collect_garbage() takes the per-sandbox registry lock, and
+    so does every tool that touches one.
     """
     while True:
-        time.sleep(policy.GC_INTERVAL_SECONDS)
         try:
             reclaimed = collect_garbage()
         except Exception:  # noqa: BLE001 - a failed sweep is not fatal
@@ -659,6 +665,7 @@ def _background_gc_loop() -> None:
                 logger.info(
                     "background GC reclaimed %d container(s)", len(reclaimed)
                 )
+        time.sleep(policy.GC_INTERVAL_SECONDS)
 
 
 def serve() -> None:
@@ -666,10 +673,12 @@ def serve() -> None:
     _setup_logging()
     logger.info("HyperBox server starting")
 
-    # Reclaim anything left behind by a previous process before serving.
-    collect_garbage()
-
-    # Daemon: it must never hold the process open at shutdown.
+    # Reclaiming what a previous process left behind happens on the GC
+    # thread's first pass, NOT here. Doing it here delayed the server's
+    # first response by however long it took to probe both engines, which
+    # on a machine with a stopped Podman is a CLI subprocess with a
+    # multi-second timeout. Daemon, so it never holds the process open at
+    # shutdown.
     threading.Thread(
         target=_background_gc_loop, daemon=True, name="hyperbox-gc"
     ).start()

@@ -23,6 +23,7 @@ def usage() -> str:
         "    --format cursor        servers block (.vscode/mcp.json)\n"
         "    --format yaml          YAML list (Continue-based clients)\n"
         "    --format antigravity   Antigravity mcp_config.json\n"
+        "    --local                Pin this checkout's executable, not PATH\n"
         "  hyperbox envs            List environments create_sandbox can use\n"
         "  hyperbox build <name>    Build an environment from a Dockerfile\n"
         "    --custom <path>        Copy that Dockerfile in and build it\n"
@@ -95,6 +96,7 @@ def dispatch(argv: list[str]) -> int:
 
     if command == "config":
         fmt = "json"
+        local = False
         rest_iter = list(rest)
         while rest_iter:
             arg = rest_iter.pop(0)
@@ -106,6 +108,8 @@ def dispatch(argv: list[str]) -> int:
                 fmt = rest_iter.pop(0)
             elif arg.startswith("--format="):
                 fmt = arg.split("=", 1)[1]
+            elif arg == "--local":
+                local = True
             else:
                 print(f"hyperbox config: unknown option {arg!r}\n")
                 print(usage())
@@ -116,7 +120,7 @@ def dispatch(argv: list[str]) -> int:
             return 2
         from hyperbox_mcp.clientconfig import print_config
 
-        return print_config(fmt)
+        return print_config(fmt, local=local)
 
     if command == "logs":
         unknown = [a for a in rest if a not in {"--follow", "-f"}]
