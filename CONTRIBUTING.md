@@ -110,6 +110,61 @@ python tests/verify_platform.py
 python tests/run_all.py podman
 ```
 
+### What needs Administrator on Windows, and what does not
+
+Measured on a clean Windows Server 2025 box with a non-admin account, not
+assumed.
+
+**No administrator needed:**
+
+- `pip install hyperbox-mcp` into a virtualenv, straight from PyPI.
+- Running everything: `hyperbox`, `hyperbox doctor`, `hyperbox config`, the
+  MCP server itself, and the test suites. HyperBox writes only to
+  `%USERPROFILE%\.hyperbox`.
+
+**Administrator needed, once, to prepare the machine:**
+
+- Installing Python, Git and Podman *machine-wide*. A per-user Python is
+  enough if you never need other accounts to run it.
+- Enabling the `Microsoft-Windows-Subsystem-Linux` and
+  `VirtualMachinePlatform` Windows features, which Podman needs and which
+  require a reboot.
+
+So a reviewer can install and exercise HyperBox as an ordinary user; only
+preparing the host needs elevation.
+
+### Two traps when automating a Windows box
+
+Both cost real time to diagnose, and neither is obvious.
+
+**WSL will not run as `NT AUTHORITY\SYSTEM`.** It fails with
+`Wsl/WSL_E_LOCAL_SYSTEM_NOT_SUPPORTED`. Remote-execution tooling
+(AWS SSM `send-command`, many CI agents, services) runs as SYSTEM by
+default, so Podman can never start there however the machine is
+configured. Run container work as a real user account — a scheduled task
+with `/RU <user>` is enough.
+
+**Per-user MSIs installed as SYSTEM land in SYSTEM's profile.** Installing
+Podman over SSM put it at
+`C:\Windows\System32\config\systemprofile\AppData\Local\Programs\Podman\`,
+where no interactive user can see it, while the uninstall registry happily
+reported it installed. Pass `ALLUSERS=1 MSIINSTALLPERUSER=0` to msiexec and
+confirm the binary is where you expect.
+
+### A cloud Windows box cannot run the container suites
+
+Worth knowing before renting one. Podman on Windows runs its Linux VM under
+WSL2, WSL2 needs nested virtualisation, and AWS provides that only on
+bare-metal instance types. On an ordinary instance WSL reports
+*"virtualisation is not enabled on this machine"* even with every feature
+enabled and `SecondLevelAddressTranslationExtensions` reporting true.
+
+What such a box **can** prove: the host-portability suite, the named-pipe
+transport (`tests/verify_named_pipe.py`, which uses a stub server and needs
+no engine), client-config generation, and the packaging and privilege
+questions above. Anything touching a real container needs a bare-metal
+instance or a physical machine.
+
 ### The client checks the suites cannot do
 
 Drive the loop by hand in a real client. In rough order of what they catch:
