@@ -33,17 +33,16 @@ also asserts that no containers were left behind.
 
 Automated suites cannot cover the client integration, and the machine you
 develop on is usually not the one that breaks. To exercise a branch on
-another machine — Windows especially — without installing from PyPI:
+another machine without installing from PyPI:
 
 ```bash
 git clone -b <branch> https://github.com/Sanjay7089/hyperbox-mcp hyperbox-branch
 cd hyperbox-branch
-python -m venv .venv && . .venv/bin/activate     # Windows: .\.venv\Scripts\Activate.ps1
+python -m venv .venv && . .venv/bin/activate
 pip install -e .
-
-hyperbox --version                                # confirm it is the branch
-python tests/verify_platform.py                   # host side, seconds
-python tests/run_all.py docker                    # full suite
+hyperbox --version                 # confirm it is the branch, not a release
+python tests/verify_platform.py    # host side, seconds
+python tests/run_all.py docker     # or: podman
 ```
 
 **Check which `hyperbox` you are actually running.** If a release is
@@ -57,23 +56,80 @@ hyperbox config --local --format antigravity   # Antigravity
 ```
 
 Without it, the client launches the installed release, your branch never
-runs, and nothing about the config looks wrong. `where hyperbox` (or
-`which`) is worth a glance either way.
+runs, and nothing about the config looks wrong.
 
-Then drive the loop by hand in a real client. The steps that catch what the
-suites cannot:
+### On Windows, in Git Bash
 
-1. create → code that succeeds → code that fails → read the real traceback
-   → destroy.
+Git Bash works, with three differences that will otherwise waste an hour.
+
+```bash
+# 1. Remove any installed release first: PATH wins over a checkout.
+pip uninstall -y hyperbox-mcp
+
+git clone -b <branch> https://github.com/Sanjay7089/hyperbox-mcp hyperbox-branch
+cd hyperbox-branch
+
+# 2. The venv lives in Scripts/, not bin/, and activate has no extension.
+py -3.11 -m venv .venv
+source .venv/Scripts/activate
+
+pip install -e .
+which hyperbox        # must be .../hyperbox-branch/.venv/Scripts/hyperbox
+hyperbox --version
+```
+
+**Disable MSYS path conversion for container commands.** Git Bash rewrites
+arguments that look like Unix paths, so `podman exec ... /bin/sh` becomes
+`C:/Program Files/Git/usr/bin/sh` inside the container and fails with a
+confusing "no such file". Prefix any engine command that carries an
+absolute path:
+
+```bash
+MSYS_NO_PATHCONV=1 podman run -d --rm --name probe alpine sleep 300
+MSYS_NO_PATHCONV=1 podman exec probe /bin/sh -c 'echo hello'
+```
+
+The Python suites are unaffected — they never pass paths through the shell.
+
+**Podman is the usual Windows engine, and it is the harder one.** podman-py
+has no named-pipe transport at all, so HyperBox reaches Podman on Windows
+through the Docker-compatible API it already serves. Confirm a machine is
+actually up before blaming HyperBox:
+
+```bash
+podman machine list      # a machine must be "Currently running"
+podman machine start     # first time: podman machine init
+podman version           # does the CLI itself reach it?
+hyperbox doctor          # names the pipe actually in use
+```
+
+Then run the suites against podman, not docker:
+
+```bash
+python tests/verify_platform.py
+python tests/run_all.py podman
+```
+
+### The client checks the suites cannot do
+
+Drive the loop by hand in a real client. In rough order of what they catch:
+
+1. **Open a second client window and use both at once.** Multi-client
+   problems reproduce nowhere else.
 2. **Restart the client, then destroy a sandbox created before the
    restart.** Cross-process ownership is the property most likely to break
    silently.
-3. **Open a second client window and use both at once.** Multi-client
-   problems reproduce nowhere else.
+3. create → code that succeeds → code that fails → read the real traceback
+   → destroy.
 4. `hyperbox build` an environment while the server is running, then use it
    from the agent without restarting.
-5. `docker ps -a --filter label=hyperbox-mcp.managed=true` — should be
-   empty when you are done.
+5. Nothing left behind:
+   `podman ps -a --filter label=hyperbox-mcp.managed=true`
+
+Quit every other HyperBox server first. They share the machine's engines,
+the `hyperbox-mcp.managed` label and the registry, so a second one creates
+containers your run did not and garbage-collects on its own schedule.
+`python tests/run_all.py` warns when it finds them.
 
 ## The rules that hold this together
 

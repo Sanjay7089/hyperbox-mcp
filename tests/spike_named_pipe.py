@@ -215,15 +215,36 @@ if WINDOWS:
 # --- endpoint discovery -------------------------------------------------
 
 
+def windows_pipes() -> list[str]:
+    """Named pipes on this machine that might be an engine.
+
+    Enumerated, not guessed. `\\.\pipe\` is listable on Windows, and
+    guessing from a fixed list is how an earlier bug happened: on a
+    Podman-only machine Podman answers `docker_engine` and nothing else, so
+    an explicit podman lookup failed while auto worked. Anything named like
+    an engine is tried and identified by what answers, never by its name.
+    """
+    known = [r"\\.\pipe\podman-machine-default",
+             r"\\.\pipe\docker_engine",
+             r"\\.\pipe\podman"]
+    try:
+        listed = os.listdir(r"\\.\pipe")
+    except OSError:
+        listed = []
+    for name in sorted(listed):
+        low = name.lower()
+        if "podman" in low or "docker" in low:
+            full = r"\\.\pipe" + "\\" + name
+            if full not in known:
+                known.append(full)
+    return known
+
+
 def endpoints() -> list[tuple[str, str]]:
     """(label, target) pairs worth trying on this machine."""
     found: list[tuple[str, str]] = []
     if WINDOWS:
-        for pipe in (r"\\.\pipe\docker_engine",
-                     r"\\.\pipe\podman-machine-default",
-                     r"\\.\pipe\podman"):
-            found.append((pipe, pipe))
-        return found
+        return [(pipe, pipe) for pipe in windows_pipes()]
     for path in ("/var/run/docker.sock", os.path.expanduser("~/.docker/run/docker.sock")):
         if os.path.exists(path):
             found.append((path, path))
@@ -406,10 +427,27 @@ def main() -> int:
     if reached:
         print("VERDICT: stdlib http.client speaks the Docker REST API here. "
               "Phase 1 proceeds as planned on this platform.")
+        if WINDOWS:
+            print(
+                "         On Windows this is the load-bearing result: "
+                "podman-py has NO named-pipe transport, so v0.2 reaches "
+                "Podman here by pointing docker-py at its pipe. A ctypes "
+                "transport that works means Phase 1 can drop docker-py "
+                "outright rather than keeping it for this one case."
+            )
         return 0
-    print("VERDICT: no endpoint answered. On Windows this decides between "
-          "shipping the platform as experimental and keeping docker-py for "
-          "it -- record which, and why, before Phase 1 starts.")
+    print("VERDICT: no endpoint answered.")
+    if WINDOWS:
+        print("  Check first that this is a HyperBox problem and not a "
+              "stopped engine:")
+        print("    podman machine list        # is a machine running?")
+        print("    podman version            # does the CLI reach it?")
+        print("  Pipes visible right now:")
+        for pipe in windows_pipes():
+            print(f"    {pipe}")
+        print("  If a machine IS running and none of these answered, that "
+              "is the finding: Phase 1 ships Windows as experimental or "
+              "keeps docker-py for it. Send this output either way.")
     return 1
 
 
