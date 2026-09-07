@@ -1,0 +1,107 @@
+name: Publish
+
+# Trusted publishing (OIDC). There is no API token anywhere in this repo
+# or in its secrets: PyPI verifies the workflow's identity directly.
+#
+# One-time setup, per index, at
+# https://pypi.org/manage/account/publishing/ :
+#   owner            Sanjay7089
+#   repository       hyperbox-mcp
+#   workflow         publish.yml
+#   environment      pypi   (and testpypi for the TestPyPI publisher)
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build distributions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build wheel and sdist
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+
+      - name: Check the rendered description and metadata
+        run: |
+          python -m pip install --upgrade twine
+          twine check dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+
+  publish-to-testpypi:
+    name: Publish to TestPyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/hyperbox-mcp
+    permissions:
+      id-token: write        # mandatory for trusted publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          # A version already on TestPyPI must not fail the release.
+          skip-existing: true
+
+  publish-to-pypi:
+    name: Publish to PyPI
+    needs: [build, publish-to-testpypi]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/hyperbox-mcp
+    permissions:
+      id-token: write        # mandatory for trusted publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+      # Signs the distributions and uploads PEP 740 attestations by default.
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    name: Attach the distributions to the GitHub release
+    needs: publish-to-pypi
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write        # to create a release and upload assets
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+      - name: Create the release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME"
+          --repo "$GITHUB_REPOSITORY"
+          --title "$GITHUB_REF_NAME"
+          --notes "See CHANGELOG.md for what changed."
+      - name: Upload the distributions
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          gh release upload "$GITHUB_REF_NAME" dist/**
+          --repo "$GITHUB_REPOSITORY"
