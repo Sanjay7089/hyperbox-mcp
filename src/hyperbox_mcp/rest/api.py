@@ -34,6 +34,7 @@ from hyperbox_mcp.policy import (
     LABEL_ID,
     LABEL_MANAGED,
     MEM_LIMIT_BYTES,
+    MEM_SWAP_BYTES,
     NANO_CPUS,
     NO_NEW_PRIVILEGES,
     PIDS_LIMIT,
@@ -65,6 +66,8 @@ def host_config(product: str) -> dict:
     """
     config: dict[str, Any] = {
         "Memory": MEM_LIMIT_BYTES,
+        # Without this Docker defaults it to twice Memory. See policy.
+        "MemorySwap": MEM_SWAP_BYTES,
         "PidsLimit": PIDS_LIMIT,
         "Tmpfs": {path: f"rw,size={TMPFS_SIZE},mode=1777" for path in TMPFS_PATHS},
         "SecurityOpt": ["no-new-privileges"] if NO_NEW_PRIVILEGES else [],

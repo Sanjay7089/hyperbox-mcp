@@ -176,6 +176,30 @@ MEM_LIMIT_BYTES = 1024 * 1024 * 1024
 CPUS = 1.0
 PIDS_LIMIT = 128
 
+#: The memory ceiling INCLUDING swap, which is what actually bounds a
+#: container. Equal to MEM_LIMIT_BYTES, so swap is disabled and the limit
+#: means what `hyperbox://capabilities` says it means.
+#:
+#: Setting Memory without MemorySwap does not do what it looks like it
+#: does. Docker then defaults MemorySwap to TWICE Memory, so a sandbox
+#: advertising "1g" ran with a 2 GB ceiling. Measured on Docker 29.1.3:
+#:
+#:     --memory=1g                  -> MemorySwap 2147483648, and
+#:                                     bytearray(2 * 1024**3) SUCCEEDS
+#:     --memory=1g --memory-swap=1g -> MemorySwap 1073741824, and the
+#:                                     same allocation is killed (137)
+#:
+#: Podman does not double it and enforced 1 GB either way, so this was
+#: invisible on one engine and wrong on the other -- the same shape as
+#: the CPU story below. Both engines record MemorySwap in inspect, so it
+#: is read back with everything else.
+#:
+#: The two engines also FAIL differently, which any test here must allow
+#: for: Docker OOM-kills the process (137) while Podman refuses the
+#: allocation (MemoryError). Assert that the allocation did not succeed,
+#: never a specific exit code.
+MEM_SWAP_BYTES = MEM_LIMIT_BYTES
+
 #: The same ceiling, spelled two ways, because the clients disagree.
 #: docker-py takes `nano_cpus`; podman-py silently DISCARDS that keyword
 #: (it is in its "Ignore these keywords" list) and honours only

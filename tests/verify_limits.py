@@ -241,6 +241,42 @@ async def main() -> int:
             f"stdout={(r.get('stdout') or '')[:70]!r}",
         )
 
+        # --- the ceiling is the ceiling, not twice it --------------------
+        #
+        # The unbounded loop below grows until something stops it, so it
+        # dies whether the limit is 1 GB or 2 GB. That is why it passed
+        # for two releases while Docker was silently doubling the ceiling:
+        # setting Memory without MemorySwap defaults MemorySwap to 2x
+        # Memory, and a single 2 GB allocation fitted inside 1 GB of RAM
+        # plus 1 GB of swap.
+        #
+        # So ask for ONE allocation comfortably over the limit and under
+        # twice it. Assert only that it did not succeed: Docker OOM-kills
+        # the process (137) while Podman refuses the allocation
+        # (MemoryError), and pinning either exit code fails on the other
+        # engine.
+        over = int(policy.MEM_LIMIT_BYTES * 1.5)
+        r = data(
+            await c.call_tool(
+                "run",
+                {
+                    "sandbox_id": sid,
+                    "code": (
+                        f"a = bytearray({over})\n"
+                        "print('ALLOCATED', len(a))\n"
+                    ),
+                    "timeout": 60,
+                },
+            )
+        )
+        check(
+            "a single allocation over the memory limit is refused",
+            r.get("success") is False
+            and "ALLOCATED" not in (r.get("stdout") or ""),
+            f"exit={r.get('exit_code')} stdout={(r.get('stdout') or '')[:60]!r} "
+            f"stderr={(r.get('stderr') or '')[:80]!r}",
+        )
+
         # --- memory bomb, bounded by the container -----------------------
         r = data(
             await c.call_tool(

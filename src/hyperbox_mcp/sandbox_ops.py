@@ -41,6 +41,7 @@ from hyperbox_mcp.policy import (
     LABEL_MANAGED,
     MEM_LIMIT,
     MEM_LIMIT_BYTES,
+    MEM_SWAP_BYTES,
     NANO_CPUS,
     NO_NEW_PRIVILEGES,
     PIDS_LIMIT,
@@ -114,6 +115,9 @@ def runtime_configs(sandbox_id: str, backend: str) -> dict:
     return {
         "labels": {LABEL_MANAGED: "true", LABEL_ID: sandbox_id},
         "mem_limit": MEM_LIMIT,
+        # docker-py's spelling for MemorySwap. Equal to mem_limit, so
+        # swap is off: without it Docker doubles the ceiling silently.
+        "memswap_limit": MEM_LIMIT,
         "pids_limit": PIDS_LIMIT,
         **engine_specific(backend),
     }
@@ -142,7 +146,14 @@ def assert_policy_applied(attrs: dict, sandbox_id: str) -> None:
     """
     host = attrs.get("HostConfig") or {}
     config = attrs.get("Config") or {}
-    expected = {"Memory": MEM_LIMIT_BYTES, "PidsLimit": PIDS_LIMIT}
+    # MemorySwap is in here deliberately. Reading back only Memory
+    # verified the field we set rather than the ceiling that applies, and
+    # passed for two releases while the real limit was double.
+    expected = {
+        "Memory": MEM_LIMIT_BYTES,
+        "MemorySwap": MEM_SWAP_BYTES,
+        "PidsLimit": PIDS_LIMIT,
+    }
     wrong = {
         key: host.get(key) for key, want in expected.items() if host.get(key) != want
     }
