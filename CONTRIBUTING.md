@@ -186,6 +186,173 @@ the `hyperbox-mcp.managed` label and the registry, so a second one creates
 containers your run did not and garbage-collects on its own schedule.
 `python tests/run_all.py` warns when it finds them.
 
+## Building HyperBox on macOS
+
+```bash
+git clone https://github.com/Sanjay7089/hyperbox-mcp && cd hyperbox-mcp
+uv sync                                   # or: python -m venv .venv && pip install -e .
+uv run hyperbox doctor                    # is this machine able to run sandboxes?
+```
+
+You need Python 3.11+ and Docker or Podman running. Both work; `auto`
+prefers Docker only as a stable default.
+
+**Podman on macOS needs its machine started**, and HyperBox talks to its
+unix socket rather than the TCP port the machine also publishes — over the
+forward, exec returns correct exit codes and zero bytes of output:
+
+```bash
+brew install podman        # or the .pkg, which installs to /opt/podman/bin
+podman machine init && podman machine start
+```
+
+`podman` need not be on PATH: HyperBox finds the socket itself and reports
+what it used in `hyperbox doctor`.
+
+### Running it
+
+```bash
+uv run python tests/verify_platform.py         # host side, seconds, no engine
+uv run python tests/run_all.py docker          # full suite, 4-5 minutes
+uv run python tests/run_all.py podman          # 10-16 minutes; podman is slower
+HYPERBOX_RUNTIME=native uv run python tests/run_all.py docker
+```
+
+`HYPERBOX_RUNTIME` selects the execution backend — `llm-sandbox` or
+`native`. Both must pass before a change lands.
+
+### Building a release artifact
+
+```bash
+rm -rf dist build
+uv build                                       # wheel + sdist into dist/
+uv tool run --from twine twine check dist/*
+uv tool run --from twine twine upload --repository testpypi dist/*
+```
+
+Install what you built into a clean environment before publishing for real
+— an editable install hides packaging mistakes, because it never exercises
+the wheel:
+
+```bash
+uv tool install --force ./dist/hyperbox_mcp-*.whl
+hyperbox doctor
+```
+
+## Standing up a Windows test box on EC2
+
+Recorded because it took several wrong turns, two of which looked like
+hardware limits and were not.
+
+**It works.** An ordinary `m7i-flex.large` running Windows Server 2025 runs
+WSL2, Podman and the full container suite. Nested virtualisation is
+available; the failures below are what it looks like when it is not yet
+*enabled*.
+
+### 1. The instance
+
+Any general-purpose type with **at least 80 GB** of root volume. Windows
+Server 2025 alone occupies about 25 GB; a Podman VM plus the five language
+images needs roughly 20 GB more. A 30 GB disk fills silently and the first
+symptom is SSM refusing every command with *"There is not enough space on
+the disk"* — at which point the machine cannot be fixed remotely, because
+the tool you would fix it with needs somewhere to write.
+
+Attach an instance profile granting `AmazonSSMManagedInstanceCore`, then:
+
+```bash
+aws ssm describe-instance-information --region <region> \
+  --filters "Key=InstanceIds,Values=<id>" --query 'InstanceInformationList[].PingStatus'
+```
+
+### 2. Run commands as a real user, not as SYSTEM
+
+`aws ssm send-command` executes as `NT AUTHORITY\SYSTEM`, and **WSL refuses
+to run as SYSTEM** — `Wsl/WSL_E_LOCAL_SYSTEM_NOT_SUPPORTED`. No amount of
+configuration changes that, so Podman can never start over plain SSM.
+
+Create a real account and drive it through a scheduled task:
+
+```powershell
+New-LocalUser -Name hbtest -Password (ConvertTo-SecureString "<pw>" -AsPlainText -Force) -PasswordNeverExpires
+Add-LocalGroupMember -Group Administrators -Member hbtest
+# grant SeBatchLogonRight via secedit, then:
+schtasks /create /tn hbjob /tr "cmd.exe /c powershell -File C:\job.ps1 > C:\out.txt 2>&1" `
+         /sc once /st 00:00 /ru hbtest /rp "<pw>" /rl HIGHEST /f
+schtasks /run /tn hbjob
+```
+
+### 3. Install the toolchain machine-wide
+
+```powershell
+# Git (brings Git Bash), Python 3.11, both silent and for all users
+Start-Process git-installer.exe -ArgumentList "/VERYSILENT","/NORESTART" -Wait
+Start-Process python-installer.exe -ArgumentList "/quiet","InstallAllUsers=1","PrependPath=1" -Wait
+
+# Podman: ALLUSERS=1 matters. A per-user MSI run as SYSTEM installs into
+# C:\Windows\System32\config\systemprofile\..., where no interactive user
+# can see it, while the uninstall registry cheerfully reports it installed.
+msiexec /i podman-installer-windows-amd64.msi /quiet /norestart ALLUSERS=1 MSIINSTALLPERUSER=0
+```
+
+### 4. WSL2 — and the reboot that is easy to miss
+
+```powershell
+dism /online /enable-feature /featurename:Microsoft-Windows-Subsystem-Linux /all /norestart
+dism /online /enable-feature /featurename:VirtualMachinePlatform /all /norestart
+Restart-Computer -Force
+# then the standalone MSI: `wsl --install` fetches from the Store, which
+# SYSTEM cannot reach
+msiexec /i wsl.<version>.x64.msi /quiet /norestart
+Restart-Computer -Force        # <-- REQUIRED, and the one that gets skipped
+```
+
+**Two reboots, not one.** The first activates the Windows features; the
+second activates the kernel driver the WSL MSI installs. Between them, WSL
+reports *"WSL2 is unable to start since virtualization is not enabled on
+this machine"* — which reads exactly like an unsupported instance type and
+is not. Verify with a throwaway distro before blaming the hardware:
+
+```powershell
+wsl --install -d Ubuntu --no-launch
+wsl -d Ubuntu -- echo WORKS
+wsl --unregister Ubuntu
+```
+
+### 5. Podman, as `hbtest`
+
+```powershell
+podman machine init --now
+podman machine list          # must say "Currently running"
+podman run --rm alpine echo WORKS
+```
+
+It publishes `npipe:////./pipe/docker_engine`, which is what HyperBox's
+named-pipe transport dials.
+
+### 6. Run the suites
+
+```bash
+git clone -b <branch> https://github.com/Sanjay7089/hyperbox-mcp
+cd hyperbox-mcp && py -3.11 -m venv .venv && .venv\Scripts\python -m pip install -e .
+.venv\Scripts\python tests\verify_named_pipe.py          # no engine needed
+set HYPERBOX_RUNTIME=native
+.venv\Scripts\python tests\run_all.py podman
+```
+
+Run long jobs detached and poll a log file. SSM's document worker times out
+well before a full suite finishes, and it takes the output with it:
+
+```powershell
+Start-Process cmd.exe -ArgumentList "/c suite.cmd > C:\suite.log 2>&1"
+```
+
+### Costs worth knowing
+
+Stop the instance when idle. Growing an EBS volume is **one-way** — they
+can be enlarged but never shrunk — so size the root volume correctly at
+launch rather than discovering it full later.
+
 ## The rules that hold this together
 
 A few constraints are load-bearing. A change that breaks one of these
