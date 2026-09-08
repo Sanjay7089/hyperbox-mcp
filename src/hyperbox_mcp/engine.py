@@ -488,6 +488,31 @@ def endpoint_for(backend: str) -> str:
     return found
 
 
+def identify_version(raw: dict) -> str:
+    """Which engine a /version payload describes — the product, not the pipe.
+
+    THE identity function. Everything that needs to know which engine is
+    answering calls this, because two implementations of it drifted once
+    already: over REST and over an SDK they disagreed on Windows, where
+    Podman commonly serves the `docker_engine` pipe, and a create was
+    refused with "podman was requested, but the engine answering is docker"
+    on a machine with no Docker installed.
+
+    The API distinguishes them plainly, verified against both engines:
+
+        docker  Components: ['Engine', 'containerd', 'runc', ...]
+        podman  Components: ['Podman Engine', 'Conmon', 'OCI Runtime']
+
+    Falls back to "docker" when the field is missing, because the
+    Docker-shaped API is what we are speaking at that point.
+    """
+    raw = raw or {}
+    components = raw.get("Components") or []
+    names = " ".join(str(c.get("Name", "")) for c in components).lower()
+    blob = f"{names} {raw.get('Version', '')} {raw.get('Platform', '')}".lower()
+    return "podman" if "podman" in blob else "docker"
+
+
 def identify(engine_client: Any) -> str:
     """Which engine is actually answering — the product, not the pipe.
 
@@ -509,10 +534,7 @@ def identify(engine_client: Any) -> str:
         raw = engine_client.version() or {}
     except Exception:  # noqa: BLE001 - identity is best effort
         return "docker"
-    components = raw.get("Components") or []
-    names = " ".join(str(c.get("Name", "")) for c in components).lower()
-    blob = f"{names} {raw.get('Version', '')} {raw.get('Platform', '')}".lower()
-    return "podman" if "podman" in blob else "docker"
+    return identify_version(raw)
 
 
 def client_dialect(backend: str) -> str:
@@ -1174,7 +1196,7 @@ def resolve(preferred: str = "auto") -> Resolution:
         try:
             target = endpoint_for(backend)
             client = EngineClient(target)
-            product = api.identify(client)
+            product = identify_version(client.version)
             version = str(client.version.get("Version", "?"))
         except Exception as exc:  # noqa: BLE001 - collected, then reported
             message = getattr(exc, "message", None) or str(exc)
@@ -1182,11 +1204,19 @@ def resolve(preferred: str = "auto") -> Resolution:
             continue
         if preferred != "auto" and product != preferred:
             # Asking for Docker and being handed Podman is a wrong answer,
-            # not a successful resolution.
-            rejected.append(
-                (backend, f"that endpoint is served by {product}, not {preferred}")
+            # not a successful resolution — and it is a DIFFERENT answer
+            # from "nothing is running". An engine replied; it is simply
+            # not the one that was named, which is exactly the case a
+            # person needs told plainly, because on Windows Podman
+            # commonly serves Docker's endpoint.
+            raise EngineUnavailableError(
+                f"'{preferred}' was requested, but the engine answering at "
+                f"{target} is {product}.",
+                fix=f"Use backend='{product}', or 'auto' to take whichever "
+                    "engine is running.",
+                context={"requested": preferred, "answered_by": product,
+                         "endpoint": target},
             )
-            continue
         return Resolution(backend, target, version, product, rejected)
 
     raise NoEngineError(
@@ -1202,44 +1232,16 @@ def resolve(preferred: str = "auto") -> Resolution:
 def detect(preferred: str = "auto") -> str:
     """Resolve a backend choice to an engine that is reachable right now.
 
+    One code path, deliberately: this delegates to resolve(), which asks
+    the engine over REST and identifies it from what answers. There used to
+    be a second, SDK-based path here, and on Windows the two disagreed --
+    Podman commonly serves the `docker_engine` pipe, so "which engine is
+    this?" got different answers depending on which resolver asked, and a
+    create could be refused with "podman was requested, but the engine
+    answering is docker" on a machine with no Docker at all.
+
     "auto" prefers docker and falls back to podman. A named backend is
     still verified rather than assumed, so a caller never receives a
     sandbox id for an engine that cannot run it.
     """
-    if preferred != "auto":
-        if preferred not in BACKENDS:
-            raise UnsupportedBackendError(
-                f"Unsupported backend '{preferred}'. Supported: "
-                f"auto, {', '.join(BACKENDS)}"
-            )
-        engine_client = client(preferred)  # raises, with a fix
-        product = identify(engine_client)
-        if product != preferred:
-            # Asking for Docker and being handed Podman is not a
-            # successful resolution, it is a wrong answer that would then
-            # be reported under the wrong name for the sandbox's whole
-            # life.
-            raise EngineUnavailableError(
-                f"'{preferred}' was requested, but the engine answering is "
-                f"{product}. Use backend='{product}', or 'auto'."
-            )
-        return preferred
-
-    problems: list[str] = []
-    for backend in BACKENDS:
-        try:
-            engine_client = client(backend)
-        except EngineUnavailableError as exc:
-            problems.append(f"  {backend}: {exc}")
-            continue
-        # Report what is actually running, not which client reached it.
-        # Podman commonly answers the Docker pipe; calling that "docker"
-        # misleads every later message about the sandbox.
-        product = identify(engine_client)
-        if product != backend:
-            _clients.setdefault(product, engine_client)
-        return product
-    raise EngineUnavailableError(
-        "No container engine is reachable, so there is nowhere to run code.\n"
-        + "\n".join(problems)
-    )
+    return resolve(preferred).product

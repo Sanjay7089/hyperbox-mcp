@@ -533,9 +533,12 @@ def main() -> int:
             "needs a reachable engine to refuse against",
         )
     else:
-        real_identify = engine.identify
+        # Patch THE identity function. There is one now: this used to
+        # patch a copy that detect() no longer consulted, so the case
+        # passed while measuring nothing.
+        real_identify = engine.identify_version
         try:
-            engine.identify = lambda _client: "podman"
+            engine.identify_version = lambda _raw: "podman"
             engine.reset_clients()
             resolved = engine.detect("auto")
             check(
@@ -554,7 +557,7 @@ def main() -> int:
                 "requesting docker on a podman-only machine names podman in the error",
             )
         finally:
-            engine.identify = real_identify
+            engine.identify_version = real_identify
             engine.reset_clients()
 
     # --- 6c. a dropped connection is not an outage -------------------

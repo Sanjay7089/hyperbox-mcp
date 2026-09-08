@@ -29,8 +29,10 @@ from hyperbox_mcp.progress import EngineProgress, say
 from hyperbox_mcp.rest import api
 from hyperbox_mcp.rest.client import EngineClient
 
-HYPERBOX_DIR = Path.home() / ".hyperbox"
-ENV_DIR = HYPERBOX_DIR / "environments"
+def env_dir() -> Path:
+    """Where to write environments. Follows policy, including its
+    HYPERBOX_ENV_DIR override, rather than keeping its own copy."""
+    return policy.env_dir()
 
 
 def _resolve_engine(choice: str) -> tuple[EngineClient, engine.Resolution]:
@@ -48,7 +50,7 @@ def _write_manifest(name: str, image: str, source: str, product: str) -> Path:
     A pulled image has no Dockerfile and no predictable tag, so the
     directory alone can no longer say what to run. The manifest can.
     """
-    directory = ENV_DIR / name
+    directory = env_dir() / name
     directory.mkdir(parents=True, exist_ok=True)
     manifest = directory / "env.json"
     manifest.write_text(
@@ -73,7 +75,7 @@ def list_environments() -> int:
     print(f"{'ENVIRONMENT':<20} {'IMAGE':<46} SOURCE")
     print("-" * 84)
     for name, image in sorted(envs.items()):
-        directory = ENV_DIR / name
+        directory = env_dir() / name
         manifest = directory / "env.json"
         if manifest.is_file():
             try:
@@ -105,7 +107,7 @@ def run_build(
         say("Use --dockerfile or --image, not both.", icon="fail")
         return 2
     if not dockerfile and not image:
-        existing = ENV_DIR / name / "Dockerfile"
+        existing = env_dir() / name / "Dockerfile"
         if not existing.is_file():
             say(f"Nothing to build '{name}' from.", icon="fail")
             print("  hyperbox build <name> --dockerfile <path>   build one")

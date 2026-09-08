@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import tempfile
 import sys
 import time
 
@@ -79,6 +80,17 @@ def main() -> int:
         f"(runtime: {runtime}) ===\n",
         flush=True,
     )
+
+    # Isolate the environment directory for this run.
+    #
+    # Two runs against different runtimes otherwise share
+    # ~/.hyperbox/environments, so each sees environments the other built
+    # and the second one fails checks about what should be there. Measured:
+    # the same two cases passed on one runtime and failed on the other in a
+    # single session, for no reason connected to either.
+    if not os.environ.get("HYPERBOX_ENV_DIR"):
+        os.environ["HYPERBOX_ENV_DIR"] = tempfile.mkdtemp(prefix="hyperbox-envs-")
+        print(f"environments isolated to {os.environ['HYPERBOX_ENV_DIR']}\n")
 
     others = other_servers()
     if others:

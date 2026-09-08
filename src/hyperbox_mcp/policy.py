@@ -50,9 +50,23 @@ _BUILTIN_ENVIRONMENTS: dict[str, str] = {
     "python": "ghcr.io/vndee/sandbox-python-311-bullseye:latest",
 }
 
-_ENV_DIR = Path.home() / ".hyperbox" / "environments"
+def env_dir() -> Path:
+    """Where locally built environments live.
+
+    Resolved per call and overridable with HYPERBOX_ENV_DIR, mirroring
+    HYPERBOX_STATE_DIR. Two acceptance runs against different runtimes
+    otherwise share this directory and each sees environments the other
+    built, which reads as a failure in whichever ran second.
+    """
+    override = os.environ.get("HYPERBOX_ENV_DIR")
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".hyperbox" / "environments"
+
+
 _env_cache: dict[str, str] | None = None
 _env_mtime: float = 0.0
+_env_root: Path | None = None
 
 
 def _image_from_manifest(directory: Path) -> str | None:
@@ -81,13 +95,20 @@ def environments() -> dict[str, str]:
     Always returns a fresh dict: callers must never be handed the cache
     itself, or a caller that mutates the result corrupts every later one.
     """
-    global _env_cache, _env_mtime
+    global _env_cache, _env_mtime, _env_root
 
-    if not _ENV_DIR.exists():
+    directory = env_dir()
+    if directory != _env_root:
+        # The location moved (a test isolating itself, an override set
+        # after import). A cache keyed only on mtime would happily serve
+        # the previous directory's contents.
+        _env_cache, _env_mtime, _env_root = None, 0.0, directory
+
+    if not directory.exists():
         return dict(_BUILTIN_ENVIRONMENTS)
 
     try:
-        current_mtime = _ENV_DIR.stat().st_mtime
+        current_mtime = directory.stat().st_mtime
     except OSError:
         # An unreadable environment directory is not a reason to fail a
         # sandbox that asked for a built-in.
@@ -97,7 +118,7 @@ def environments() -> dict[str, str]:
         return dict(_env_cache)
 
     result = dict(_BUILTIN_ENVIRONMENTS)
-    for item in sorted(_ENV_DIR.iterdir()):
+    for item in sorted(directory.iterdir()):
         if not item.is_dir() or item.name in result:
             # A built-in name is never shadowed by a local directory.
             continue

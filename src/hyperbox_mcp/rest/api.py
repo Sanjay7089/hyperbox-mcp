@@ -46,18 +46,13 @@ from hyperbox_mcp.rest.client import EngineClient
 def identify(client: EngineClient) -> str:
     """Which engine is actually answering — the product, not the pipe.
 
-    Podman serves a Docker-compatible endpoint, so "something answered"
-    says nothing about what is running. The API distinguishes them plainly:
-
-        docker  Components: ['Engine', 'containerd', 'runc', ...]
-        podman  Components: ['Podman Engine', 'Conmon', 'OCI Runtime']
+    Delegates to engine.identify_version so there is exactly one
+    implementation. Two of them disagreed on Windows once, which is why
+    this is a one-line wrapper rather than a copy.
     """
-    raw = client.version
-    names = " ".join(
-        str(c.get("Name", "")) for c in (raw.get("Components") or [])
-    ).lower()
-    blob = f"{names} {raw.get('Version', '')} {raw.get('Platform', '')}".lower()
-    return "podman" if "podman" in blob else "docker"
+    from hyperbox_mcp import engine
+
+    return engine.identify_version(client.version)
 
 
 def host_config(product: str) -> dict:
