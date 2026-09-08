@@ -200,6 +200,32 @@ def pull_image(client: EngineClient, image: str) -> Iterator[dict]:
     )
 
 
+def tag_image(client: EngineClient, image: str, repo: str, tag: str) -> None:
+    client.request(
+        "POST", f"/images/{image}/tag?repo={repo}&tag={tag}", expect=(201, 200)
+    )
+
+
+def build_image(
+    client: EngineClient, context: bytes, tag: str, dockerfile: str = "Dockerfile",
+    no_cache: bool = False,
+) -> Iterator[dict]:
+    """Build from a tar'd context, yielding the engine's progress events.
+
+    The context is a tar the CALLER assembles, because the build API takes
+    nothing else — and because assembling it is where .dockerignore has to
+    be honoured. The engine does not read that file; the client is expected
+    to have excluded already.
+    """
+    query = f"?t={tag}&dockerfile={dockerfile}"
+    if no_cache:
+        query += "&nocache=true"
+    yield from client.stream_json(
+        "POST", f"/build{query}", body=context,
+        headers={"Content-Type": "application/x-tar"},
+    )
+
+
 # --- networks ---------------------------------------------------------
 
 

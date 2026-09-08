@@ -46,6 +46,7 @@ from hyperbox_mcp.policy import BACKENDS
 EngineUnavailableError = errors.EngineUnavailableError
 ContainerGoneError = errors.ContainerGoneError
 UnsupportedBackendError = errors.UnsupportedBackendError
+NoEngineError = errors.NoEngineError
 
 
 WINDOWS = sys.platform == "win32"
@@ -1121,6 +1122,81 @@ def probe(backend: str) -> EngineStatus:
             )
             status.fix = _PODMAN_MACHINE_FIX
     return status
+
+
+@dataclass
+class Resolution:
+    """Which engine was chosen, how it was reached, and what was not.
+
+    The rejected list is the point. "No container engine is reachable" is
+    a true statement that helps nobody; naming what was tried and what each
+    one said is the difference between a message and a diagnosis.
+    """
+
+    backend: str
+    endpoint: str
+    version: str
+    product: str
+    rejected: list[tuple[str, str]]
+
+    def banner(self) -> str:
+        lines = []
+        for name, why in self.rejected:
+            lines.append(f"  {name:8} not reachable — {why}")
+        lines.append(
+            f"  {self.product:8} ready — {self.product} {self.version} "
+            f"via {self.endpoint}"
+        )
+        lines.append(f"using {self.product}")
+        return "\n".join(lines)
+
+
+def resolve(preferred: str = "auto") -> Resolution:
+    """Pick an engine and report how, without raising for the ones that failed.
+
+    Goes through the REST client rather than an SDK, so the answer names
+    the endpoint actually dialled. `auto` prefers docker and falls back —
+    a missing engine is never an error while the other one works, which is
+    the behaviour `hyperbox build` was lacking when it failed outright on a
+    machine with a perfectly good Podman.
+    """
+    from hyperbox_mcp.rest import api
+    from hyperbox_mcp.rest.client import EngineClient
+
+    if preferred != "auto" and preferred not in BACKENDS:
+        raise UnsupportedBackendError(
+            f"Unsupported backend '{preferred}'. Supported: auto, "
+            f"{', '.join(BACKENDS)}"
+        )
+    candidates = BACKENDS if preferred == "auto" else (preferred,)
+    rejected: list[tuple[str, str]] = []
+    for backend in candidates:
+        try:
+            target = endpoint_for(backend)
+            client = EngineClient(target)
+            product = api.identify(client)
+            version = str(client.version.get("Version", "?"))
+        except Exception as exc:  # noqa: BLE001 - collected, then reported
+            message = getattr(exc, "message", None) or str(exc)
+            rejected.append((backend, message.split("\n")[0][:110]))
+            continue
+        if preferred != "auto" and product != preferred:
+            # Asking for Docker and being handed Podman is a wrong answer,
+            # not a successful resolution.
+            rejected.append(
+                (backend, f"that endpoint is served by {product}, not {preferred}")
+            )
+            continue
+        return Resolution(backend, target, version, product, rejected)
+
+    raise NoEngineError(
+        "No container engine is reachable, so there is nowhere to run code.\n"
+        + "\n".join(f"  {name}: {why}" for name, why in rejected),
+        fix="Start one:\n"
+            "  Docker  — open Docker Desktop, or `sudo systemctl start docker`\n"
+            "  Podman  — `podman machine start` (first time: `podman machine init`)",
+        context={"tried": [name for name, _ in rejected]},
+    )
 
 
 def detect(preferred: str = "auto") -> str:

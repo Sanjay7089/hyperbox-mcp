@@ -25,8 +25,11 @@ def usage() -> str:
         "    --format antigravity   Antigravity mcp_config.json\n"
         "    --local                Pin this checkout's executable, not PATH\n"
         "  hyperbox envs            List environments create_sandbox can use\n"
-        "  hyperbox build <name>    Build an environment from a Dockerfile\n"
-        "    --custom <path>        Copy that Dockerfile in and build it\n"
+        "  hyperbox build <name>    Create an environment agents can select\n"
+        "    --dockerfile <path>    Build it, from a file or a directory\n"
+        "    --image <ref>          Pull an existing image and register it\n"
+        "    --engine docker|podman Override which engine to use\n"
+        "    --no-cache             Build without reusing cached layers\n"
         "  hyperbox logs            Show the server log\n"
         "    --follow               Keep printing as new lines arrive\n"
         "  hyperbox --version       Print the installed version\n"
@@ -145,24 +148,37 @@ def dispatch(argv: list[str]) -> int:
             print(usage())
             return 2
         name, *opts = rest
-        custom = None
+        dockerfile = image = None
+        engine_choice, no_cache = "auto", False
+        takes_value = {"--dockerfile", "--custom", "--image", "--engine"}
         while opts:
             arg = opts.pop(0)
-            if arg == "--custom":
-                if not opts:
-                    print("hyperbox build: --custom needs a path\n")
+            key, _, inline = arg.partition("=")
+            if key in takes_value:
+                value = inline if inline else (opts.pop(0) if opts else "")
+                if not value:
+                    print(f"hyperbox build: {key} needs a value\n")
                     print(usage())
                     return 2
-                custom = opts.pop(0)
-            elif arg.startswith("--custom="):
-                custom = arg.split("=", 1)[1]
+                if key in ("--dockerfile", "--custom"):
+                    dockerfile = value          # --custom is the v0.2 spelling
+                elif key == "--image":
+                    image = value
+                else:
+                    engine_choice = value
+            elif arg == "--no-cache":
+                no_cache = True
             else:
                 print(f"hyperbox build: unknown option {arg!r}\n")
                 print(usage())
                 return 2
+        if engine_choice not in ("auto", "docker", "podman"):
+            print(f"hyperbox build: unknown engine {engine_choice!r}. "
+                  "Use auto, docker or podman.\n")
+            return 2
         from hyperbox_mcp.builder import run_build
 
-        return run_build(name, custom)
+        return run_build(name, dockerfile, image, engine_choice, no_cache)
 
     print(usage())
     return 2

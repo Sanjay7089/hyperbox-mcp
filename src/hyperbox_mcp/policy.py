@@ -12,6 +12,7 @@ import the other to learn what a sandbox is allowed to do.
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -54,6 +55,23 @@ _env_cache: dict[str, str] | None = None
 _env_mtime: float = 0.0
 
 
+def _image_from_manifest(directory: Path) -> str | None:
+    """The image an environment's manifest names, if it has one.
+
+    A pulled image has no Dockerfile and no predictable tag, so the
+    directory alone stopped being able to say what to run. An unreadable
+    manifest returns None rather than raising: one corrupt environment must
+    not make every other one unresolvable.
+    """
+    manifest = directory / "env.json"
+    if not manifest.is_file():
+        return None
+    try:
+        return json.loads(manifest.read_text(encoding="utf-8")).get("image") or None
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
 def environments() -> dict[str, str]:
     """Resolve the environment map, cached on the environment directory's mtime.
 
@@ -80,10 +98,16 @@ def environments() -> dict[str, str]:
 
     result = dict(_BUILTIN_ENVIRONMENTS)
     for item in sorted(_ENV_DIR.iterdir()):
-        if item.is_dir() and (item / "Dockerfile").exists():
+        if not item.is_dir() or item.name in result:
             # A built-in name is never shadowed by a local directory.
-            if item.name not in result:
-                result[item.name] = f"hyperbox-local/{item.name}:latest"
+            continue
+        image = _image_from_manifest(item)
+        if image is None and (item / "Dockerfile").exists():
+            # v0.2 directories have no manifest. The tag it would have
+            # produced is still the right answer, so they keep working.
+            image = f"hyperbox-local/{item.name}:latest"
+        if image:
+            result[item.name] = image
     _env_cache = result
     _env_mtime = current_mtime
     return dict(result)

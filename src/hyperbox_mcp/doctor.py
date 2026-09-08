@@ -54,7 +54,25 @@ class Report:
 
     def add(self, check: Check) -> Check:
         self.checks.append(check)
+        # Printed as it completes, not collected for the end. Several of
+        # these take real time -- probing a stopped engine, pulling a
+        # multi-gigabyte image -- and a command that prints nothing while
+        # it works is indistinguishable from one that has hung.
+        print(self._render_one(check), flush=True)
         return check
+
+    @staticmethod
+    def _render_one(c: Check) -> str:
+        lines = [f"{_MARK[c.status]}  {c.name}"]
+        if c.detail:
+            lines.append(f"        {c.detail}")
+        for note in c.notes:
+            lines.append(f"        {note}")
+        if c.fix and c.status != OK:
+            for i, line in enumerate(c.fix.splitlines()):
+                prefix = "  fix:  " if i == 0 else "        "
+                lines.append(f"      {prefix}{line}")
+        return "\n".join(lines)
 
     @property
     def failed(self) -> list[Check]:
@@ -65,18 +83,9 @@ class Report:
         return [c for c in self.checks if c.status == WARN]
 
     def render(self) -> str:
-        lines = []
-        for c in self.checks:
-            lines.append(f"{_MARK[c.status]}  {c.name}")
-            if c.detail:
-                lines.append(f"        {c.detail}")
-            for note in c.notes:
-                lines.append(f"        {note}")
-            if c.fix and c.status != OK:
-                for i, line in enumerate(c.fix.splitlines()):
-                    prefix = "  fix:  " if i == 0 else "        "
-                    lines.append(f"      {prefix}{line}")
-        return "\n".join(lines)
+        """Every check, for a caller that wants them collected. Checks are
+        already printed as they complete; this is not used by run_doctor."""
+        return "\n".join(self._render_one(c) for c in self.checks)
 
 
 def _version(package: str) -> str:
@@ -321,7 +330,9 @@ def check_round_trip(report: Report, backend: str) -> None:
             Check(name="live sandbox round trip", status=FAIL, detail=str(exc))
         )
         return
-    runtime = LLMSandboxRuntime()
+    from hyperbox_mcp.server import select_runtime
+
+    runtime = select_runtime()
     sandbox_id = uuid.uuid4().hex[:12]
     started = time.time()
     handle = None
@@ -392,8 +403,11 @@ def check_round_trip(report: Report, backend: str) -> None:
 
 
 def run_doctor(pull: bool = False, live: bool = True) -> int:
+    import os
+
     report = Report()
-    print("HyperBox doctor\n")
+    runtime = os.environ.get("HYPERBOX_RUNTIME", "llm-sandbox")
+    print(f"HyperBox doctor  (runtime: {runtime})\n")
     check_environment(report)
     statuses = check_engines(report)
     backend = check_selection(report, statuses)
@@ -411,7 +425,6 @@ def run_doctor(pull: bool = False, live: bool = True) -> int:
             )
         )
 
-    print(report.render())
     failed, warned = report.failed, report.warned
     total = len(report.checks)
     print(f"\n{total - len(failed)}/{total} checks passed", end="")
