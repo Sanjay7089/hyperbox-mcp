@@ -36,7 +36,7 @@ from pathlib import Path
 
 from fastmcp import Context, FastMCP
 
-from hyperbox_mcp import engine, errors, policy, validate
+from hyperbox_mcp import engine, errors, policy, slots, validate
 from hyperbox_mcp.engine import EngineUnavailableError
 from hyperbox_mcp.errors import (
     UnknownEnvironmentError as UnsupportedEnvironmentError,
@@ -486,7 +486,14 @@ async def create_sandbox(
             # them, so it is offered only where it means something.
             if packages:
                 create_kwargs["packages"] = packages
-            handle = await asyncio.to_thread(_runtime.create, **create_kwargs)
+            def create_under_slot():
+                # Bounded across processes: several servers commonly share
+                # one engine, and simultaneous image pulls are what
+                # saturates it.
+                with slots.engine_slot(f"creating {language} sandbox"):
+                    return _runtime.create(**create_kwargs)
+
+            handle = await asyncio.to_thread(create_under_slot)
     except (
         UnsupportedLanguageError,
         UnsupportedEnvironmentError,
@@ -532,7 +539,8 @@ async def create_sandbox(
         "openWorldHint": True,
     }
 )
-def run(
+async def run(
+    ctx: Context,
     sandbox_id: str,
     code: str,
     libraries: list[str] | None = None,
@@ -575,22 +583,33 @@ def run(
     except InvalidInput as exc:
         return errors.to_result(exc)
 
-    try:
-        # Held for the whole call so two processes cannot drive the same
-        # container's session concurrently, and re-read inside the lock so
-        # a destroy that landed first is seen.
+    def execute():
+        # The lock is held for the whole call so two processes cannot drive
+        # one container concurrently, and the record is re-read inside it
+        # so a destroy that landed first is seen.
         with _registry.lock(sandbox_id):
             rec = _registry.get_ready(sandbox_id)
             if rec is None:
-                return _no_sandbox(sandbox_id)
-            result = _runtime.run(
+                return None
+            outcome = _runtime.run(
                 _handle_for(rec), code=code, libraries=libraries, timeout=timeout
             )
             _registry.touch(sandbox_id)
-            logger.info(
-                "run in %s finished (exit_code=%s, timed_out=%s)",
-                sandbox_id, result.exit_code, result.timed_out,
-            )
+            return outcome
+
+    try:
+        # Offloaded and reported on. A run can legitimately take the full
+        # timeout, and before this the tool went silent for all of it --
+        # silence a client resolves by killing the request, which loses the
+        # result of work that had already finished.
+        async with _heartbeat(ctx, "running your code"):
+            result = await asyncio.to_thread(execute)
+        if result is None:
+            return _no_sandbox(sandbox_id)
+        logger.info(
+            "run in %s finished (exit_code=%s, timed_out=%s)",
+            sandbox_id, result.exit_code, result.timed_out,
+        )
     except (EngineUnavailableError, SandboxRuntimeError) as exc:
         return errors.to_result(exc)
     except Exception as exc:  # noqa: BLE001
@@ -626,7 +645,7 @@ def run(
         "openWorldHint": False,
     }
 )
-def destroy_sandbox(sandbox_id: str) -> dict:
+async def destroy_sandbox(ctx: Context, sandbox_id: str) -> dict:
     """Tear down a sandbox and free its resources.
 
     Idempotent — destroying one that is already gone is a success, not an
@@ -643,7 +662,8 @@ def destroy_sandbox(sandbox_id: str) -> dict:
     except InvalidInput as exc:
         return errors.to_result(exc)
 
-    try:
+    def teardown() -> dict | None:
+        """Returns a result to send back, or None when it plainly worked."""
         with _registry.lock(sandbox_id):
             rec = _registry.get(sandbox_id)
             if rec is None:
@@ -668,6 +688,16 @@ def destroy_sandbox(sandbox_id: str) -> dict:
                 )
             _registry.remove(sandbox_id)
             logger.info("destroyed sandbox %s", sandbox_id)
+            return None
+
+    try:
+        # Reported on, because this waits for another process's lock when
+        # two clients touch one sandbox, and a silent wait is what a client
+        # kills.
+        async with _heartbeat(ctx, "destroying the sandbox"):
+            early = await asyncio.to_thread(teardown)
+        if early is not None:
+            return early
     except EngineUnavailableError as exc:
         # The record is deliberately KEPT: a container that cannot be
         # reached has not been proven gone, and forgetting it here is how

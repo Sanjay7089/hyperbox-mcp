@@ -211,7 +211,18 @@ def main() -> int:
     # FastMCP may hand back the plain function or a wrapper; take
     # whichever is callable rather than assuming.
     run_fn = getattr(server.run, "fn", server.run)
-    bad = run_fn(sandbox_id="../etc/passwd", code="x")
+
+    class _Ctx:
+        """The Context a real client injects. run() reports progress on it
+        so a long call is not silence; here nothing is listening."""
+
+        async def report_progress(self, *a, **k):
+            return None
+
+    def call_run(**kwargs):
+        return asyncio.run(run_fn(_Ctx(), **kwargs))
+
+    bad = call_run(sandbox_id="../etc/passwd", code="x")
     payload = bad.get("error")
     check(
         "errors carry a machine-readable code and a compat string",
@@ -220,7 +231,7 @@ def main() -> int:
         and bad.get("error_message") == payload.get("message"),
         f"code={payload.get('code') if isinstance(payload, dict) else payload!r}",
     )
-    gone = run_fn(sandbox_id="000000000000", code="print(1)")
+    gone = call_run(sandbox_id="000000000000", code="print(1)")
     gone_payload = gone.get("error", {})
     check(
         "an unusable sandbox says so with a code and a next step",
