@@ -691,6 +691,37 @@ def main() -> int:
                 "only directories holding a Dockerfile count",
             )
 
+            # The same promise, proven where the filesystem does NOT
+            # notice the write.
+            #
+            # A directory's mtime is a change signal only if it changes.
+            # On Windows its granularity is coarse enough that a build
+            # finishing inside one tick of the previous resolution leaves
+            # it identical, so the cache is served and the environment
+            # stays invisible. Freezing the mtime across the write
+            # reproduces that on every platform, instead of waiting for
+            # Windows to lose the race -- which it did in about half of
+            # CI's windows-latest/3.11 runs, on the check above.
+            with tempfile.TemporaryDirectory() as frozen_td:
+                frozen_dir = Path(frozen_td) / "environments"
+                frozen_dir.mkdir()
+                # Pointing at a new directory resets the cache on its own.
+                os.environ["HYPERBOX_ENV_DIR"] = str(frozen_dir)
+
+                policy.environments()
+                stamp = frozen_dir.stat().st_mtime
+                (frozen_dir / "unnoticed").mkdir()
+                (frozen_dir / "unnoticed" / "Dockerfile").write_text("FROM x\n")
+                os.utime(frozen_dir, (stamp, stamp))
+
+                check(
+                    "an unchanged mtime does not hide a new environment",
+                    "unnoticed" in policy.environments(),
+                    "a just-written mtime is not proof nothing changed",
+                )
+
+            os.environ["HYPERBOX_ENV_DIR"] = str(fake_env_dir)
+
             # Validation, on the same live map.
             rejected = []
             for bad in ("../../etc", "has space", "", "x" * 65, 123):
