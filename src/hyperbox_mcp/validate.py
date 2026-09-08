@@ -226,6 +226,7 @@ def environment(value: object) -> str | None:
         raise InvalidInput(
             f"Unknown environment '{name}'. "
             f"Available: {', '.join(sorted(available))}. "
-            "Build one with: hyperbox build <name> --custom <Dockerfile>"
+            "The user can build one at their terminal with: "
+            "hyperbox build <name> --image <ref>   (or --dockerfile <path>)"
         )
     return name

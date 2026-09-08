@@ -314,7 +314,7 @@ if WINDOWS:
 
 
 def connection_for(target: str, timeout: float = 30.0):
-    """A connection to `target`, whatever kind of endpoint it names.
+    r"""A connection to `target`, whatever kind of endpoint it names.
 
     Accepts a bare path or a scheme-qualified URL, because callers get
     these from three places that disagree about the form: CONTAINER_HOST

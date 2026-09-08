@@ -792,6 +792,31 @@ def main() -> int:
         "a root StreamHandler must never reach stdout",
     )
 
+    # --- 6f2. the package compiles without warnings -------------------
+    #
+    # A SyntaxWarning is printed by the interpreter on every invocation
+    # of every command, and one shipped in 0.3.0 -- an invalid `\p`
+    # escape in a docstring -- because nothing ever looked. It is the
+    # cheapest possible check and it guards the whole package.
+    import warnings as _warnings
+
+    offenders = []
+    for source in sorted(Path("src").rglob("*.py")):
+        with _warnings.catch_warnings():
+            _warnings.simplefilter("error")
+            try:
+                compile(source.read_text(encoding="utf-8"), str(source), "exec")
+            except SyntaxError as exc:
+                # A SyntaxWarning promoted by simplefilter("error") is
+                # re-raised as SyntaxError, so catching only the warning
+                # crashed this suite instead of reporting a FAIL line.
+                offenders.append(f"{source}: {exc}")
+    check(
+        "every module compiles with no SyntaxWarning",
+        not offenders,
+        "; ".join(offenders) if offenders else "clean",
+    )
+
     # --- 6g. the background sweep keeps running -----------------------
     #
     # Before this loop existed the inactivity TTL was enforced only by
