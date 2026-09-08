@@ -55,7 +55,21 @@ BODY_VERSION = json.dumps(
      "Components": [{"Name": "Podman Engine"}]}
 ).encode()
 
-HIJACK = frame(1, "hyperbox_pipe_ok") + frame(2, "to-stderr") + frame(1, "\n")
+#: Big enough, and sent late enough, that it CANNOT be pre-buffered.
+#:
+#: The first version of this was 50 bytes sent immediately, so header
+#: parsing pulled the whole body into the BufferedReader and the test
+#: passed while the transport was closing the pipe out from under the
+#: reader. It passed on a shim that returned nothing at all against real
+#: Podman. A payload larger than the buffer, written after the headers,
+#: forces a read that actually touches the handle.
+BULK = "x" * 60000
+HIJACK = (
+    frame(1, "hyperbox_pipe_ok")
+    + frame(2, "to-stderr")
+    + frame(1, BULK)
+    + frame(1, "\n")
+)
 
 
 def serve_once(ready: threading.Event, stop: threading.Event) -> None:
@@ -94,11 +108,24 @@ def serve_once(ready: threading.Event, stop: threading.Event) -> None:
 
             if b"/exec/" in head and b"/start" in head:
                 # Hijacked: headers, then raw frames, then hang up. No
-                # Content-Length -- the client must read until the pipe
-                # closes, which is the case that broke against Podman.
-                resp = (b"HTTP/1.1 200 OK\r\n"
-                        b"Content-Type: application/vnd.docker.raw-stream\r\n"
-                        b"\r\n") + HIJACK
+                # Content-Length -- so http.client marks the response
+                # will_close and closes the socket immediately, while the
+                # body is still being read. That is the case that returned
+                # zero bytes against real Podman.
+                #
+                # Headers and body are written SEPARATELY with a pause
+                # between, so the body cannot arrive in time to be buffered
+                # during header parsing. Without the pause this test passes
+                # against a transport that does not work.
+                headers = (b"HTTP/1.1 200 OK\r\n"
+                           b"Content-Type: application/vnd.docker.raw-stream\r\n"
+                           b"\r\n")
+                written = wintypes.DWORD(0)
+                k32.WriteFile(handle, headers, len(headers),
+                              ctypes.byref(written), None)
+                k32.FlushFileBuffers(handle)
+                time.sleep(0.25)
+                resp = HIJACK
             elif b"/chunked" in head:
                 resp = (b"HTTP/1.1 200 OK\r\n"
                         b"Transfer-Encoding: chunked\r\n\r\n"
@@ -176,8 +203,10 @@ def main() -> int:
         out, err = demux(raw)
         check(
             "a hijacked stream is read to the end, not lost at the hangup",
-            "hyperbox_pipe_ok" in out and "to-stderr" in err,
-            f"{len(raw)} bytes -> stdout={out.strip()!r} stderr={err.strip()!r}",
+            "hyperbox_pipe_ok" in out and "to-stderr" in err
+            and out.count("x") == len(BULK),
+            f"{len(raw)} bytes -> {len(out)} stdout, {len(err)} stderr "
+            f"(bulk {out.count('x')}/{len(BULK)})",
         )
         check(
             "its frames demultiplex into separate streams",
