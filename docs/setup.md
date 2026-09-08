@@ -97,8 +97,14 @@ FROM ghcr.io/vndee/sandbox-python-311-bullseye
 RUN pip install numpy pandas
 DOCKERFILE
 
-hyperbox build data-science --custom ./Dockerfile
+hyperbox build data-science --dockerfile ./Dockerfile
 hyperbox envs
+```
+
+Or register an image that already exists, with no Dockerfile at all:
+
+```bash
+hyperbox build torch --image pytorch/pytorch:latest
 ```
 
 Your agent can then ask for it by name:
@@ -123,9 +129,21 @@ one. See [security.md](security.md).
 | `~/.hyperbox/logs/` | `server.log`, rotated at 5 MB, three kept |
 | `~/.hyperbox/environments/` | one directory per custom environment |
 
-Override the state directory with `HYPERBOX_STATE_DIR`. Set
-`HYPERBOX_TTL_SECONDS` to change how long an idle sandbox survives
-(default 1800).
+### Environment variables
+
+| Variable | Does |
+|---|---|
+| `HYPERBOX_STATE_DIR` | Move the registry and lock files |
+| `HYPERBOX_ENV_DIR` | Move locally built environments |
+| `HYPERBOX_TTL_SECONDS` | How long an idle sandbox survives (default 1800) |
+| `HYPERBOX_ENGINE_SLOTS` | Cap concurrent heavy engine work — pulls, builds, creates — across every HyperBox process on the machine |
+| `HYPERBOX_RUNTIME` | `native` (default) or `llm-sandbox` |
+
+**About `HYPERBOX_RUNTIME`.** HyperBox speaks the engine's REST API
+directly, over a unix socket or a Windows named pipe. That is the `native`
+runtime and it is the default. `llm-sandbox` selects the previous backend
+and exists as an escape hatch for one release — if you need it, please open
+an issue saying why, because it goes away in 0.4.0.
 
 ## Command reference
 
@@ -136,9 +154,13 @@ hyperbox doctor          Check this machine can run sandboxes
   --quick                Skip the live create/run/destroy check
 hyperbox config          Print a ready-to-paste MCP client config
   --format json|cursor|antigravity|yaml
+  --local                Pin this checkout's executable, not PATH
 hyperbox envs            List environments create_sandbox can use
-hyperbox build <name>    Build an environment from a Dockerfile
-  --custom <path>        Copy that Dockerfile in and build it
+hyperbox build <name>    Create an environment agents can select
+  --dockerfile <path>    Build it, from a file or a directory
+  --image <ref>          Pull an existing image and register it
+  --engine docker|podman Override which engine to use
+  --no-cache             Build without reusing cached layers
 hyperbox logs            Show the server log
   --follow               Keep printing as new lines arrive
 hyperbox --version       Print the installed version

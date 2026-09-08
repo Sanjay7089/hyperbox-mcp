@@ -399,4 +399,6 @@ needs a good argument, not just a passing test.
 
 ## Reporting security issues
 
-Please open a GitHub security advisory rather than a public issue.
+Please open a GitHub security advisory rather than a public issue. See
+[SECURITY.md](SECURITY.md) for what is in scope and what is a documented
+limitation.

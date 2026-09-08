@@ -24,12 +24,20 @@ Three tools, and nothing else:
 
 | Tool | What it does |
 |---|---|
-| `create_sandbox(language, backend, environment)` | A persistent, disposable container. Returns a `sandbox_id`. |
+| `create_sandbox(language, backend, environment, packages)` | A persistent, disposable container, with any declared packages installed before it is sealed. Returns a `sandbox_id`. |
 | `run(sandbox_id, code, libraries, timeout)` | Executes code. Returns `{stdout, stderr, exit_code, success, timed_out}`. |
 | `destroy_sandbox(sandbox_id)` | Tears it down. Idempotent, and confirmed against the engine before claiming success. |
 
 Plus a `hyperbox://capabilities` resource publishing the exact limits, so
 an agent can read them instead of discovering them by failing.
+
+**Five languages** — `python`, `javascript`, `bash`, `go` and `java` — each
+on an official tagged image.
+
+**Declare dependencies at creation.** `packages=["requests"]` installs while
+the sandbox may still reach the network, which is then cut off for good.
+`run(libraries=[...])` still works and returns a `deprecation` field, but it
+has to reopen the network on an already-sealed sandbox.
 
 Within one sandbox the filesystem and installed packages persist between
 runs; variables do not, because each run is a fresh process. Write what
@@ -122,7 +130,7 @@ something:
 A typical exchange looks like:
 
 ```
-create_sandbox(language="python")
+create_sandbox(language="python", packages=["requests"])
   → {"sandbox_id": "6f5eaaefb938", ...}
 
 run(sandbox_id="6f5eaaefb938", code="import re; print(re.match(r'^\\d+$', ''))")
@@ -150,7 +158,8 @@ Start sandboxes from a heavier image so you do not pay a package install
 every time:
 
 ```bash
-hyperbox build data-science --custom ./Dockerfile
+hyperbox build data-science --dockerfile ./Dockerfile
+hyperbox build torch --image pytorch/pytorch:latest     # or pull one
 hyperbox envs
 ```
 
@@ -186,7 +195,8 @@ hyperbox                 Start the MCP server on stdio (default)
 hyperbox doctor          Check this machine can run sandboxes
 hyperbox config          Print a ready-to-paste MCP client config
 hyperbox envs            List environments create_sandbox can use
-hyperbox build <name>    Build an environment from a Dockerfile
+hyperbox build <name>    Create an environment agents can select
+                         (--dockerfile <path> or --image <ref>)
 hyperbox logs            Show the server log
 ```
 

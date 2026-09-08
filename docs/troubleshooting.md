@@ -293,7 +293,7 @@ hyperbox envs
 If the one you want is missing, build it — an agent cannot, by design:
 
 ```bash
-hyperbox build my-env --custom ./Dockerfile
+hyperbox build my-env --dockerfile ./Dockerfile
 ```
 
 A running server picks up the new environment without a restart; the map
