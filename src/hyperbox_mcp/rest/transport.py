@@ -74,15 +74,18 @@ if WINDOWS:
 
     #: Codes that mean "the stream ended", not "something went wrong".
     #:
-    #: Measured against Podman 5.5.1 on Windows: reading the hijacked exec
-    #: stream ends with ERROR_INVALID_HANDLE (6) rather than the
-    #: ERROR_BROKEN_PIPE (109) a socket would give. Treating 6 as a failure
-    #: turns a completed exec into a ConnectionResetError with the whole
-    #: payload already in hand. docker-py avoids this by reading through
-    #: overlapped I/O; this is the same conclusion reached from the error
-    #: codes instead.
-    _PIPE_EOF = (ERROR_BROKEN_PIPE, ERROR_NO_DATA, ERROR_PIPE_NOT_CONNECTED,
-                 ERROR_INVALID_HANDLE)
+    #: ERROR_INVALID_HANDLE is deliberately NOT here. It was, briefly, after
+    #: a hijacked exec against Podman on Windows ended with it — and that
+    #: read the symptom as the cause. The handle really had been closed:
+    #: http.client closes the connection as soon as it sees a response with
+    #: no length (`will_close`), and this shim was closing the pipe out from
+    #: under the reader that was still holding it. Treating 6 as
+    #: end-of-stream turned that into a silent zero-byte read, which is the
+    #: exact failure this project exists to prevent.
+    #:
+    #: With the handle refcounted (see below) an invalid handle can only
+    #: mean a real bug, so it stays an error and stays loud.
+    _PIPE_EOF = (ERROR_BROKEN_PIPE, ERROR_NO_DATA, ERROR_PIPE_NOT_CONNECTED)
 
     _k32.CreateFileW.argtypes = [
         wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
@@ -118,12 +121,24 @@ if WINDOWS:
         of npipeconn.py on.
         """
 
-        def __init__(self, handle) -> None:
-            self._handle = handle
+        def __init__(self, sock) -> None:
+            # Holds the socket, not the handle: closing this reader has to
+            # release a reference rather than close the pipe, because the
+            # socket may still be in use — and vice versa.
+            self._sock = sock
             self.eof_code = 0
+
+        @property
+        def _handle(self):
+            return self._sock._handle
 
         def readable(self) -> bool:
             return True
+
+        def close(self) -> None:
+            if not self.closed:
+                super().close()
+                self._sock._release_io()
 
         def readinto(self, buffer) -> int:
             want = len(buffer)
@@ -166,6 +181,17 @@ if WINDOWS:
 
         def __init__(self, handle) -> None:
             self._handle = handle
+            # Reference counting, exactly as socket.socket does it.
+            #
+            # http.client hands the connection to the response and closes
+            # the socket whenever a reply has no length — every hijacked
+            # exec stream — while the file object returned by makefile() is
+            # still reading from it. A real socket survives that because
+            # makefile() takes a reference and the descriptor lives until
+            # both are done. Without the same behaviour the pipe is closed
+            # mid-body and every hijacked read returns nothing.
+            self._io_refs = 0
+            self._closed = False
 
         def sendall(self, data: bytes) -> None:
             view, total = memoryview(data), 0
@@ -188,7 +214,20 @@ if WINDOWS:
         def makefile(self, mode: str = "rb", buffering: int = -1):
             if "b" not in mode:
                 raise ValueError("only binary mode is supported")
-            return io.BufferedReader(_PipeRaw(self._handle))
+            self._io_refs += 1
+            return io.BufferedReader(_PipeRaw(self))
+
+        def _release_io(self) -> None:
+            """One file object is done with the pipe."""
+            if self._io_refs > 0:
+                self._io_refs -= 1
+            if self._closed and self._io_refs <= 0:
+                self._shut()
+
+        def _shut(self) -> None:
+            if self._handle is not None:
+                _k32.CloseHandle(self._handle)
+                self._handle = None
 
         def settimeout(self, _timeout) -> None:
             # Synchronous pipe handles carry no per-call timeout. Noted
@@ -198,9 +237,10 @@ if WINDOWS:
             return None
 
         def close(self) -> None:
-            if self._handle is not None:
-                _k32.CloseHandle(self._handle)
-                self._handle = None
+            """Close, unless a file object is still reading from it."""
+            self._closed = True
+            if self._io_refs <= 0:
+                self._shut()
 
     class NamedPipeHTTPConnection(http.client.HTTPConnection):
         def __init__(self, pipe: str, timeout: float = 30.0) -> None:
