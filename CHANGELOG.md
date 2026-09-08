@@ -80,6 +80,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   moved into `sandbox_ops.py` so a second execution backend shares the
   behaviour rather than a description of it.
 
+### Verified
+
+Against real containers on macOS, every engine crossed with every runtime,
+each leaving no containers behind:
+
+| engine | runtime | result |
+|---|---|---|
+| Docker 29.1.3 | native | 6/6 suites, 2.2 min |
+| Docker 29.1.3 | llm-sandbox | 6/6 suites, 3.5 min |
+| Podman 6.1.1 | native | 6/6 suites, 4.9 min |
+| Podman 6.1.1 | llm-sandbox | 6/6 suites, 13.8 min |
+
+Host-side checks additionally run in CI on Linux, macOS and Windows across
+Python 3.11 and 3.13.
+
 ## [0.2.2] — 2026-09-08
 
 Never tagged or published on its own; its contents ship in 0.3.0.
