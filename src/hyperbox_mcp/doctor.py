@@ -20,7 +20,7 @@ import uuid
 from dataclasses import dataclass, field
 
 from hyperbox_mcp import engine, policy
-from hyperbox_mcp.engine import EngineUnavailableError
+from hyperbox_mcp.errors import EngineError, EngineUnavailableError
 from hyperbox_mcp.llm_sandbox_runtime import LLMSandboxRuntime
 from hyperbox_mcp.registry import Registry, state_dir
 
@@ -64,10 +64,15 @@ class Report:
     @staticmethod
     def _render_one(c: Check) -> str:
         lines = [f"{_MARK[c.status]}  {c.name}"]
-        if c.detail:
-            lines.append(f"        {c.detail}")
+        # Indent continuation lines, as the fix block below already does:
+        # a multi-line detail (the no-engine block lists every engine it
+        # tried) otherwise falls back to column zero and reads as though
+        # the report had ended.
+        for line in c.detail.splitlines():
+            lines.append(f"        {line}")
         for note in c.notes:
-            lines.append(f"        {note}")
+            for line in note.splitlines():
+                lines.append(f"        {line}")
         if c.fix and c.status != OK:
             for i, line in enumerate(c.fix.splitlines()):
                 prefix = "  fix:  " if i == 0 else "        "
@@ -157,13 +162,16 @@ def check_engines(report: Report) -> dict[str, engine.EngineStatus]:
 def check_selection(report: Report, statuses: dict) -> str:
     try:
         chosen = engine.detect("auto")
-    except EngineUnavailableError as exc:
+    except EngineError as exc:
         report.add(
             Check(
                 name="backend selection",
                 status=FAIL,
-                detail="No container engine is reachable, so no code can run.",
-                fix=str(exc),
+                # The error already separates what is wrong from what to
+                # do about it; str(exc) joins them, which printed the
+                # same sentence twice under "detail" and "fix".
+                detail=exc.message,
+                fix=exc.fix,
             )
         )
         return ""
@@ -195,7 +203,7 @@ def check_image(report: Report, backend: str, pull: bool) -> None:
     image = python_image()
     try:
         client = engine.client(backend)
-    except EngineUnavailableError as exc:
+    except EngineError as exc:
         report.add(
             Check(name="python sandbox image", status=FAIL, detail=str(exc))
         )
@@ -325,7 +333,7 @@ def check_round_trip(report: Report, backend: str) -> None:
                 )
             )
             return
-    except EngineUnavailableError as exc:
+    except EngineError as exc:
         report.add(
             Check(name="live sandbox round trip", status=FAIL, detail=str(exc))
         )

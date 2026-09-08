@@ -10,6 +10,8 @@ from __future__ import annotations
 import sys
 from importlib.metadata import PackageNotFoundError, version
 
+from hyperbox_mcp.errors import HyperBoxError
+
 
 def usage() -> str:
     return (
@@ -77,6 +79,24 @@ def _logs(follow: bool = False) -> int:
 
 
 def dispatch(argv: list[str]) -> int:
+    """Run a subcommand, turning a deliberate failure into a readable block.
+
+    HyperBoxError is documented as the base a boundary catches when it
+    must not crash, and the CLI is one: every error carries a message
+    and, where one exists, the command that fixes it, and __str__ already
+    joins them. Without this the terminal got a traceback instead --
+    `hyperbox doctor` on a machine with neither engine running raised
+    NoEngineError straight out, so the one command whose whole job is to
+    explain an unhealthy machine was the one that crashed on it.
+    """
+    try:
+        return _dispatch(argv)
+    except HyperBoxError as exc:
+        print(f"hyperbox: {exc}", file=sys.stderr)
+        return 1
+
+
+def _dispatch(argv: list[str]) -> int:
     command, *rest = argv
 
     if command in {"--version", "-V"}:
