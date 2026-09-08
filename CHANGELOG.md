@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Five languages**: python, javascript, bash, go and java, on official
+  tagged images. bash and java were not previously possible.
+- **`create_sandbox(packages=[...])`.** Declare what you need up front; it
+  is installed before the sandbox is sealed, and the network is then cut
+  off for good. The seal is verified from inside the container with a TCP
+  connection *and* a DNS lookup, both of which must fail, or the sandbox is
+  destroyed rather than handed back.
+- **`hyperbox build --dockerfile <path>` and `--image <ref>`**: build an
+  environment from a file or directory, or pull an existing image and
+  register it. The build context honours `.dockerignore`.
+- Engine reflection: commands say which engine they chose and why, and a
+  missing engine is no longer an error while the other one works.
+- Live progress for pulls and builds, from the engine's own event stream.
+- `HYPERBOX_ENGINE_SLOTS` bounds concurrent heavy engine work across
+  processes; `HYPERBOX_ENV_DIR` relocates locally built environments.
+
+### Changed
+
+- **The execution backend is now HyperBox's own**, speaking the Docker
+  REST API directly over a unix socket or a Windows named pipe. Set
+  `HYPERBOX_RUNTIME=llm-sandbox` for one release to go back.
+- `run` and `destroy_sandbox` report progress instead of going silent.
+- A timeout now kills the process group, so anything the code forked dies
+  with it.
+
+### Fixed
+
+- A hijacked exec stream on Windows returned nothing, or hung forever,
+  depending on the moment. Both are gone; large outputs round-trip intact.
+- Asking for an engine that is not the one answering now reports what did
+  answer, instead of claiming no engine is reachable.
+
+
 ### Changed — breaking, with a migration window
 
 - **Tool errors are now structured.** A failing tool call returns

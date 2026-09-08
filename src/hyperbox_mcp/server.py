@@ -101,15 +101,22 @@ def _setup_logging() -> None:
 
 mcp = FastMCP("HyperBox")
 
-#: Which execution backend to use. `llm-sandbox` is the default through
-#: the overlap release; `native` speaks the engine's REST API directly and
-#: takes no execution dependency at all.
+#: Which execution backend to use.
+#:
+#: `native` speaks the engine's REST API directly and takes no execution
+#: dependency at all. It is the default because it does more and does it
+#: better: five languages against one, packages installed before the
+#: sandbox is sealed rather than through a window re-opened per run, a
+#: timeout that kills a forked child, and images that are official and
+#: tagged rather than mutable `latest` from one personal namespace.
+#:
+#: `llm-sandbox` remains selectable for exactly one release, so anyone it
+#: works better for has a way back that is not a downgrade. It goes after
+#: that, and this switch goes with it.
 #:
 #: An environment variable rather than a config file, because the point of
-#: the overlap is that one machine can run either and compare. It becomes
-#: the default in a later release, and this switch goes when llm-sandbox
-#: does.
-RUNTIME_CHOICES = ("llm-sandbox", "native")
+#: an overlap is that one machine can run either and compare.
+RUNTIME_CHOICES = ("native", "llm-sandbox")
 
 
 def select_runtime(choice: str | None = None) -> Runtime:
@@ -119,7 +126,7 @@ def select_runtime(choice: str | None = None) -> Runtime:
     llm-sandbox runtime pulls in llm_sandbox itself, and a server running
     natively should not load an execution backend it will never use.
     """
-    name = (choice or os.environ.get("HYPERBOX_RUNTIME") or "llm-sandbox").strip().lower()
+    name = (choice or os.environ.get("HYPERBOX_RUNTIME") or "native").strip().lower()
     if name == "native":
         from hyperbox_mcp.native_runtime import NativeRuntime
 

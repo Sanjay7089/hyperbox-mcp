@@ -406,7 +406,7 @@ def run_doctor(pull: bool = False, live: bool = True) -> int:
     import os
 
     report = Report()
-    runtime = os.environ.get("HYPERBOX_RUNTIME", "llm-sandbox")
+    runtime = os.environ.get("HYPERBOX_RUNTIME", "native")
     print(f"HyperBox doctor  (runtime: {runtime})\n")
     check_environment(report)
     statuses = check_engines(report)

@@ -15,7 +15,7 @@ caller, and is proven by the acceptance suite against a real container.
 | Memory | 1 GB, OOM-killed with a legible reason | read back off the container |
 | CPU | 1 core | read back off the container |
 | Processes | 128 PIDs | read back; a fork bomb halts at 126 |
-| Network | detached before any submitted code runs | zero attached networks, plus a live connection attempt |
+| Network | detached before any submitted code runs | zero attached networks, plus a TCP connection and a DNS lookup that must both fail, from inside |
 | Timeout | 60 s ceiling; null, negative, zero, NaN and infinity refused | validation suite |
 | Output | capped per stream, marked when truncated | limits suite |
 | Code size | 1 MiB per call | validation suite |
@@ -31,25 +31,43 @@ that accepts a configuration and silently applies none of it would
 otherwise hand back a sandbox that gets *described* to an agent as
 limited while being nothing of the sort.
 
-## The network exception
+## The network is severed before your code runs, and proven severed
 
-Submitted code never runs with network access. Declared dependencies are
-the one exception, and they are handled in a separate step:
+Submitted code never runs with network access. There is exactly one moment
+a sandbox can reach the internet, and it is over before the sandbox is
+handed to you:
 
-1. The container starts and is immediately detached from every network,
-   before any caller code runs.
-2. If a `run` call declares `libraries`, the network is reattached, a
-   **no-op program** is executed with the package list, and the network
-   is detached again in a `finally` block.
-3. Only then does your code run.
+1. The container starts with a network attached.
+2. Packages you declared in `create_sandbox(packages=[...])` are
+   installed. **No submitted code has run at this point** — only the
+   installer.
+3. Every network is detached.
+4. The seal is **verified from inside the container**: a TCP connection to
+   a public address and a DNS lookup must both fail. If either succeeds,
+   the container is destroyed and creation fails with `NETWORK_LEAK`.
+5. Only then do you get a sandbox id.
 
-Library names are matched against a narrow subset of PEP 508 — no URLs,
-paths, VCS references or flags. `--index-url http://…` is a real pip
-flag, and it would otherwise take effect during the one window where the
-sandbox has network access.
+Both probes matter. Detaching a network does not remove the resolver the
+container inherited from it — `/etc/resolv.conf` survives — so name
+resolution can keep working after every route is gone, and a TCP-only
+check would call that sealed.
 
-Sealing **fails closed**: if the network cannot be detached, no sandbox is
-returned.
+Sealing **fails closed** twice over: if the network cannot be detached, no
+sandbox is returned; if it is detached and the sandbox can still reach
+out, no sandbox is returned either.
+
+Package names are matched against a narrow subset of PEP 508 — no URLs,
+paths, VCS references or flags. `--index-url http://…` is a real pip flag,
+and it would otherwise take effect during the one window where the sandbox
+has network access.
+
+### `run(libraries=...)` is deprecated
+
+It still works, and it still installs in a separate step with the caller's
+code held back. But it re-opens the network **on a sandbox that was
+already sealed**, which is precisely the window create-time provisioning
+removes. Declare packages at create time instead. It will be refused in a
+future release.
 
 ## Custom environments
 
@@ -101,11 +119,14 @@ observed user on every run so this page cannot quietly drift.
 - **Denial of service against your own machine is only partly bounded.**
   Memory, CPU and PIDs are capped per sandbox, but many sandboxes, or a
   full `/tmp`, can still consume host resources.
-- **The brief network window during a dependency install** is real. It is
-  narrow and constrained to named packages, but it exists.
-- **A brief window exists between container start and network sealing.**
-  Only the backend's own environment setup runs in it; nothing an agent
-  submitted is ever executed unsealed.
+- **A window exists between container start and network sealing.** It is
+  when your declared packages are installed. Nothing you submitted runs in
+  it, and the sandbox is not handed back until the network is detached and
+  verified unreachable — but the window is real and is how a malicious
+  package would reach the network, so treat `packages` as the trusted
+  input it is.
+- **`run(libraries=...)`, if you use it, re-opens that window** on an
+  already-sealed sandbox. It is deprecated for exactly this reason.
 
 If you need a hard isolation boundary for genuinely adversarial code, you
 want a VM or microVM sandbox, not a local container.

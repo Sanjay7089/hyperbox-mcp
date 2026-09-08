@@ -517,6 +517,37 @@ class LLMSandboxRuntime:
         libraries: list[str] | None = None,
         timeout: float | None = None,
     ) -> ExecResult:
+        """Run code, retrying once if the session's connection went stale.
+
+        The backend's session holds its OWN engine client, which never goes
+        through engine.with_retry — so the retry that protects every other
+        engine call does not protect this one. Windows closes idle named
+        pipes within seconds, and the symptom is a run failing with
+        "Remote end closed connection without response" on a perfectly
+        healthy engine, purely because another sandbox was being worked on
+        in the meantime.
+
+        Dropping the cached session forces a reattach on the next call,
+        which builds a fresh connection. Exactly one retry: an engine that
+        drops two fresh connections is not having a transient problem, and
+        retrying a real outage into a false success is the distinction the
+        registry's correctness rests on.
+        """
+        try:
+            return self._run_once(handle, code, libraries, timeout)
+        except Exception as exc:  # noqa: BLE001 - classified immediately
+            if not engine.is_stale_connection(exc):
+                raise
+            self._sessions.pop(handle.sandbox_id, None)
+            return self._run_once(handle, code, libraries, timeout)
+
+    def _run_once(
+        self,
+        handle: SandboxHandle,
+        code: str,
+        libraries: list[str] | None = None,
+        timeout: float | None = None,
+    ) -> ExecResult:
         session = self._session_for(handle)
 
         # Build phase: the ONLY time a network exists. Dependencies are
