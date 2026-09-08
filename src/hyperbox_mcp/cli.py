@@ -84,7 +84,7 @@ def dispatch(argv: list[str]) -> int:
     HyperBoxError is documented as the base a boundary catches when it
     must not crash, and the CLI is one: every error carries a message
     and, where one exists, the command that fixes it, and __str__ already
-    joins them. Without this the terminal got a traceback instead --
+    joins them. Without this the terminal got a traceback instead —
     `hyperbox doctor` on a machine with neither engine running raised
     NoEngineError straight out, so the one command whose whole job is to
     explain an unhealthy machine was the one that crashed on it.

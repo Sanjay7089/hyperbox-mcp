@@ -700,7 +700,7 @@ def main() -> int:
             # it identical, so the cache is served and the environment
             # stays invisible. Freezing the mtime across the write
             # reproduces that on every platform, instead of waiting for
-            # Windows to lose the race -- which it did in about half of
+            # Windows to lose the race — which it did in about half of
             # CI's windows-latest/3.11 runs, on the check above.
             with tempfile.TemporaryDirectory() as frozen_td:
                 frozen_dir = Path(frozen_td) / "environments"

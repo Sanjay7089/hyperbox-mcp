@@ -76,14 +76,14 @@ _env_root: Path | None = None
 #: Windows a directory's timestamp is coarse enough that it does not: a
 #: `hyperbox build` finishing within one tick of the server's last resolution
 #: leaves the mtime identical, so the stale map is served and the new
-#: environment stays invisible until something else touches the directory --
+#: environment stays invisible until something else touches the directory —
 #: which is the one promise call-time resolution exists to keep.
 #:
 #: So an mtime is trusted only once it is old enough that no later write could
 #: still share its tick. Inside the window every call re-scans, which is
 #: exactly the moment a re-scan is wanted; a server that has been up for hours
 #: sees an old mtime and still pays one stat(). Reading st_mtime_ns instead
-#: would not help -- the value the filesystem records is the problem, not the
+#: would not help — the value the filesystem records is the problem, not the
 #: precision we read it at.
 _MTIME_SETTLE_SECONDS = 2.0
 
