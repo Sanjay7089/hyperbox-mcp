@@ -15,7 +15,7 @@ is a crash on Windows rather than a degradation, so they get a test.
 from __future__ import annotations
 
 import json
-import logging.handlers
+import logging.handlers  # noqa: F401 - submodule needed for RotatingFileHandler below
 import os
 import platform
 import subprocess
@@ -185,6 +185,303 @@ def main() -> int:
             f"reachable: {', '.join(reachable) or 'NONE — see the fix lines above'}",
         )
 
+    # --- 5b. a socket FILE is not a listener -------------------------
+    #
+    # The regression this guards is the whole reason v0.3 exists: a
+    # stopped `podman machine` leaves its *-api.sock file on disk, and the
+    # resolver used to accept any path that os.path.exists(). Connecting to
+    # such a file gives ECONNREFUSED rather than ENOENT, so a healthy
+    # machine was reported as "connection refused to podman" for the entire
+    # life of a server process — days, inside an editor.
+    #
+    # POSIX only: Windows has no unix sockets, and the named-pipe route
+    # does not go through this resolver at all.
+    if WINDOWS:
+        skip(
+            "a dead socket file is never chosen as a transport",
+            "Windows has no unix sockets; Podman is reached over a named pipe.",
+        )
+    else:
+        import socket as _socket
+
+        sock_dir = tempfile.mkdtemp(prefix="hb-sock-")
+        dead_path = os.path.join(sock_dir, "dead-api.sock")
+        live_path = os.path.join(sock_dir, "live-api.sock")
+
+        # Bound but never listening: the file exists, nothing accepts.
+        dead = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        dead.bind(dead_path)
+        dead.close()
+
+        live = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        live.bind(live_path)
+        live.listen(1)
+        try:
+            check(
+                "a bound-but-dead socket file is reported as not live",
+                os.path.exists(dead_path)
+                and not engine._socket_is_live(dead_path),
+                "the file exists and is still rejected — existence is not "
+                "liveness",
+            )
+            check(
+                "a listening socket is reported as live",
+                engine._socket_is_live(live_path),
+                f"probe timeout {engine.SOCKET_PROBE_TIMEOUT}s",
+            )
+
+            # The latch: a CONTAINER_HOST pointing at a dead socket must be
+            # re-resolved, not returned. Returning it is what made the
+            # failure permanent for the process.
+            previous = os.environ.get("CONTAINER_HOST")
+            os.environ["CONTAINER_HOST"] = f"unix://{dead_path}"
+            try:
+                resolved = engine.ensure_podman_transport(
+                    cli_timeout=engine.PODMAN_CLI_TIMEOUT_FAST
+                )
+            finally:
+                if previous is None:
+                    os.environ.pop("CONTAINER_HOST", None)
+                else:
+                    os.environ["CONTAINER_HOST"] = previous
+                engine.reset_clients()
+            check(
+                "a dead CONTAINER_HOST is re-resolved, not latched",
+                resolved != dead_path,
+                f"resolved to {resolved or '(nothing live)'} instead of the "
+                "dead socket",
+            )
+        finally:
+            live.close()
+            for path in (dead_path, live_path):
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+            try:
+                os.rmdir(sock_dir)
+            except OSError:
+                pass
+
+    # --- 5b-ii. refused-is-retryable and transport-reset are a PAIR ---
+    #
+    # "connection refused" is treated as a retryable, connection-shaped
+    # failure. That is only safe because reset_clients() also drops the
+    # resolved socket, so the retry re-resolves instead of reconnecting to
+    # the same dead path. Keep the marker without the reset and every
+    # refused call becomes two guaranteed failures instead of one, with the
+    # process still latched to a socket that can never work.
+    #
+    # Neither half is wrong on its own, which is exactly why this is
+    # tested: a future reader tidying up one of them would see nothing
+    # break.
+    refused = engine.EngineUnavailableError(
+        "Podman is not reachable (APIError: ConnectionRefusedError(61, "
+        "'Connection refused'))"
+    )
+    check(
+        "a refused connection is treated as retryable",
+        engine.is_stale_connection(refused),
+        "paired with the transport reset checked below",
+    )
+    if WINDOWS:
+        skip(
+            "reset_clients drops the resolved socket, not just the client",
+            "no unix socket transport to resolve on Windows.",
+        )
+    else:
+        previous = os.environ.get("CONTAINER_HOST")
+        try:
+            engine._own_container_host = "unix:///tmp/hyperbox-probe.sock"
+            os.environ["CONTAINER_HOST"] = engine._own_container_host
+            engine.reset_clients()
+            cleared = "CONTAINER_HOST" not in os.environ
+        finally:
+            if previous is None:
+                os.environ.pop("CONTAINER_HOST", None)
+            else:
+                os.environ["CONTAINER_HOST"] = previous
+            engine._own_container_host = ""
+        check(
+            "reset_clients drops the resolved socket, not just the client",
+            cleared,
+            "otherwise the retry reconnects to the same dead path",
+        )
+
+        # And it must NOT discard a setting the user chose themselves.
+        previous = os.environ.get("CONTAINER_HOST")
+        try:
+            os.environ["CONTAINER_HOST"] = "tcp://someone-elses-choice:2375"
+            engine._own_container_host = ""
+            engine.reset_clients()
+            kept = os.environ.get("CONTAINER_HOST") == (
+                "tcp://someone-elses-choice:2375"
+            )
+        finally:
+            if previous is None:
+                os.environ.pop("CONTAINER_HOST", None)
+            else:
+                os.environ["CONTAINER_HOST"] = previous
+        check(
+            "a user's own CONTAINER_HOST survives reset_clients",
+            kept,
+            "only a socket this process resolved is ours to drop",
+        )
+
+    # --- 5b-iii. the two clients disagree about demultiplexing --------
+    #
+    # docker-py demuxes the exec stream and returns plain bytes; podman-py
+    # returns the RAW framed stream. Decoding podman's directly gives a
+    # string of 8-byte headers that reads as output and is not — a check
+    # for surviving processes found no digits in those headers and reported
+    # "nothing running" about a container it had never actually read. It
+    # answered correctly by accident, which is worse than answering wrongly.
+    framed = (b"\x01\x00\x00\x00\x00\x00\x00\x09MARKER-42"
+              b"\x02\x00\x00\x00\x00\x00\x00\x04oops")
+    out, err = engine.demux_frames(framed)
+    check(
+        "framed exec output is demultiplexed (podman-py's shape)",
+        out == "MARKER-42" and err == "oops",
+        f"stdout={out!r} stderr={err!r}",
+    )
+    plain_out, plain_err = engine.demux_frames(b"MARKER-42\n")
+    check(
+        "unframed exec output passes through (docker-py's shape)",
+        plain_out == "MARKER-42\n" and plain_err == "",
+        f"stdout={plain_out!r} stderr={plain_err!r}",
+    )
+    check(
+        "a truncated frame does not invent output",
+        engine.demux_frames(b"\x01\x00\x00\x00\x00\x00\x00\x63short") == ("", ""),
+        "a length longer than the payload stops parsing rather than guessing",
+    )
+    check(
+        "empty exec output is empty, not an error",
+        engine.demux_frames(b"") == ("", ""),
+        "",
+    )
+
+    # --- 5b-iv. the exec frame parser, fed the way a socket feeds it --
+    #
+    # Whole-buffer demuxing is the easy half and is checked above. The
+    # streaming parser is the one that matters, because read boundaries
+    # have nothing to do with frame boundaries: a recv can return three
+    # bytes of a header, or a header plus half a payload, or two frames and
+    # a fragment. Parsing each chunk independently corrupts output in a way
+    # that looks like the program's own, so this feeds the same bytes at
+    # every possible split and demands the same answer each time.
+    import random  # noqa: PLC0415
+
+    from hyperbox_mcp.rest.client import FrameReader  # noqa: PLC0415
+
+    def framed(stream: int, text: bytes) -> bytes:
+        return bytes([stream, 0, 0, 0]) + len(text).to_bytes(4, "big") + text
+
+    stream_bytes = (
+        framed(1, b"alpha")
+        + framed(2, b"warn-1")
+        + framed(1, b"")          # a zero-length frame is a frame, not EOF
+        + framed(1, b"beta-" + b"x" * 9000)   # spans several reads
+        + framed(2, b"warn-2")
+    )
+    want = ("alpha" + "" + "beta-" + "x" * 9000, "warn-1warn-2")
+
+    def run_with(sizes):
+        reader, at = FrameReader(), 0
+        for size in sizes:
+            if at >= len(stream_bytes):
+                break
+            reader.feed(stream_bytes[at : at + size])
+            at += size
+        reader.feed(stream_bytes[at:])
+        return reader.result()
+
+    bad = []
+    for chunk in (1, 2, 3, 7, 8, 9, 13, 4096, 65536):
+        if run_with([chunk] * (len(stream_bytes) // max(chunk, 1) + 2)) != want:
+            bad.append(f"fixed:{chunk}")
+    rng = random.Random(20260908)
+    for _ in range(200):
+        sizes = [rng.randint(1, 40) for _ in range(len(stream_bytes))]
+        if run_with(sizes) != want:
+            bad.append(f"random:{sizes[:6]}")
+            break
+    check(
+        "the exec frame parser survives every read boundary",
+        not bad,
+        f"9 fixed chunk sizes + 200 random splits of {len(stream_bytes)} bytes"
+        + (f" — FAILED: {bad[:2]}" if bad else ""),
+    )
+
+    truncated = FrameReader()
+    truncated.feed(framed(1, b"kept") + b"\x01\x00\x00\x00\x00\x00\x27\x10sh")
+    check(
+        "a truncated final frame is dropped, not guessed at",
+        truncated.result() == ("kept", ""),
+        "a frame whose payload never arrived contributes nothing",
+    )
+
+    # --- 5b-v. writing under a tmpfs is refused, not silently lost ----
+    #
+    # Measured on both engines: the archive API cannot write through a
+    # tmpfs mount on Docker. It returns 200, puts the file in the image
+    # layer beneath the mount, and nothing ever sees it. Podman writes
+    # through, so the same call works on one engine and vanishes on the
+    # other -- which is why this is a refusal rather than a note.
+    #
+    # The guard runs before any I/O, so no engine is needed here.
+    from hyperbox_mcp import errors as hb_errors  # noqa: PLC0415
+    from hyperbox_mcp.rest import api as rest_api  # noqa: PLC0415
+
+    refusals = []
+    for path in ("/work/code.py", "/work/nested/code.py"):
+        try:
+            rest_api.put_file(None, "cid", path, b"x")
+        except hb_errors.ProvisionError as exc:
+            refusals.append(bool(exc.fix))
+        except Exception:  # noqa: BLE001 - anything else is the wrong answer
+            refusals.append(False)
+        else:
+            refusals.append(False)
+    check(
+        "writing under a tmpfs mount is refused with a way out",
+        len(refusals) == 2 and all(refusals),
+        f"submitted code goes to {policy.CODE_DIR}, which is not a tmpfs",
+    )
+
+    # --- 5c. `config --local` pins the checkout, not PATH -------------
+    #
+    # Gate-critical, and it fails silently without a test. A machine that
+    # already has a released hyperbox installed resolves `hyperbox` through
+    # PATH to THAT build, so a client configured from a branch checkout
+    # launches the release, the branch never runs, and the config looks
+    # entirely correct. Observed here: PATH held 0.2.0 while the checkout
+    # under test was newer.
+    from hyperbox_mcp import clientconfig  # noqa: PLC0415
+
+    local_exe = clientconfig.local_executable_path()
+    if not local_exe:
+        skip(
+            "config --local pins this checkout's executable",
+            "no `hyperbox` next to this interpreter — run `pip install -e .` "
+            "in the environment you are testing from.",
+        )
+    else:
+        rendered = json.loads(clientconfig.render("json", local=True))
+        command = rendered["mcpServers"]["hyperbox"]["command"]
+        check(
+            "config --local pins this checkout's executable",
+            Path(command).parent == Path(sys.executable).parent,
+            f"{command} (interpreter: {sys.executable})",
+        )
+        check(
+            "config --local says the config is checkout-bound",
+            any(
+                "--local" in line for line in clientconfig.notes("json", local=True)
+            ),
+            "the note explains why the path is tied to this directory",
+        )
+
     # --- 6. the Windows-specific routing is correct ------------------
     dialect = engine.client_dialect("podman")
     if WINDOWS:
@@ -236,9 +533,12 @@ def main() -> int:
             "needs a reachable engine to refuse against",
         )
     else:
-        real_identify = engine.identify
+        # Patch THE identity function. There is one now: this used to
+        # patch a copy that detect() no longer consulted, so the case
+        # passed while measuring nothing.
+        real_identify = engine.identify_version
         try:
-            engine.identify = lambda _client: "podman"
+            engine.identify_version = lambda _raw: "podman"
             engine.reset_clients()
             resolved = engine.detect("auto")
             check(
@@ -257,7 +557,7 @@ def main() -> int:
                 "requesting docker on a podman-only machine names podman in the error",
             )
         finally:
-            engine.identify = real_identify
+            engine.identify_version = real_identify
             engine.reset_clients()
 
     # --- 6c. a dropped connection is not an outage -------------------
@@ -344,11 +644,14 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as td:
         fake_env_dir = Path(td) / "environments"
         fake_env_dir.mkdir()
-        real_dir, real_cache, real_mtime = (
-            policy._ENV_DIR, policy._env_cache, policy._env_mtime
-        )
+        # Point the resolver at a scratch directory the supported way,
+        # rather than by rebinding a private module attribute. That
+        # attribute is gone, and reaching for it was how this case broke
+        # when the directory became configurable.
+        real_override = os.environ.get("HYPERBOX_ENV_DIR")
+        real_cache, real_mtime = policy._env_cache, policy._env_mtime
         try:
-            policy._ENV_DIR = fake_env_dir
+            os.environ["HYPERBOX_ENV_DIR"] = str(fake_env_dir)
             policy._env_cache, policy._env_mtime = None, 0.0
 
             before = policy.environments()
@@ -388,6 +691,37 @@ def main() -> int:
                 "only directories holding a Dockerfile count",
             )
 
+            # The same promise, proven where the filesystem does NOT
+            # notice the write.
+            #
+            # A directory's mtime is a change signal only if it changes.
+            # On Windows its granularity is coarse enough that a build
+            # finishing inside one tick of the previous resolution leaves
+            # it identical, so the cache is served and the environment
+            # stays invisible. Freezing the mtime across the write
+            # reproduces that on every platform, instead of waiting for
+            # Windows to lose the race — which it did in about half of
+            # CI's windows-latest/3.11 runs, on the check above.
+            with tempfile.TemporaryDirectory() as frozen_td:
+                frozen_dir = Path(frozen_td) / "environments"
+                frozen_dir.mkdir()
+                # Pointing at a new directory resets the cache on its own.
+                os.environ["HYPERBOX_ENV_DIR"] = str(frozen_dir)
+
+                policy.environments()
+                stamp = frozen_dir.stat().st_mtime
+                (frozen_dir / "unnoticed").mkdir()
+                (frozen_dir / "unnoticed" / "Dockerfile").write_text("FROM x\n")
+                os.utime(frozen_dir, (stamp, stamp))
+
+                check(
+                    "an unchanged mtime does not hide a new environment",
+                    "unnoticed" in policy.environments(),
+                    "a just-written mtime is not proof nothing changed",
+                )
+
+            os.environ["HYPERBOX_ENV_DIR"] = str(fake_env_dir)
+
             # Validation, on the same live map.
             rejected = []
             for bad in ("../../etc", "has space", "", "x" * 65, 123):
@@ -417,7 +751,10 @@ def main() -> int:
                 "the error names the CLI command",
             )
         finally:
-            policy._ENV_DIR = real_dir
+            if real_override is None:
+                os.environ.pop("HYPERBOX_ENV_DIR", None)
+            else:
+                os.environ["HYPERBOX_ENV_DIR"] = real_override
             policy._env_cache, policy._env_mtime = real_cache, real_mtime
 
     # --- 6f. the log rotates instead of growing without bound --------

@@ -33,9 +33,7 @@ in docs/security.md.
 
 from __future__ import annotations
 
-import re
 import time
-from datetime import datetime, timezone
 
 from llm_sandbox import (
     ContainerError,
@@ -49,23 +47,9 @@ from llm_sandbox import (
 )
 from llm_sandbox.exceptions import SandboxTimeoutError
 
-from hyperbox_mcp import engine, policy
-from hyperbox_mcp.engine import ContainerGoneError, EngineUnavailableError
-from hyperbox_mcp.policy import (
-    CPU_PERIOD,
-    CPU_QUOTA,
-    GC_GRACE_SECONDS,
-    LABEL_ID,
-    LABEL_MANAGED,
-    MEM_LIMIT,
-    CPUS,
-    MEM_LIMIT_BYTES,
-    NANO_CPUS,
-    NO_NEW_PRIVILEGES,
-    PIDS_LIMIT,
-    TMPFS_PATHS,
-    TMPFS_SIZE,
-)
+from hyperbox_mcp import engine, errors, policy, sandbox_ops
+from hyperbox_mcp.engine import ContainerGoneError
+from hyperbox_mcp.policy import TMPFS_PATHS
 from hyperbox_mcp.runtime import ExecResult, SandboxHandle
 
 _LANGUAGES = {
@@ -107,6 +91,48 @@ _NOOP = {"python": "pass"}
 CANARY_MARKER = "__hyperbox_canary__"
 _CANARY = {"python": f"print('{CANARY_MARKER}')"}
 
+#: Find, and kill, the processes running submitted code.
+#:
+#: Read /proc directly with the interpreter that is already PID 1 in these
+#: images. `ps` and `pkill` live in procps, which the slim language images
+#: do not install — and a kill that depends on a binary the image may not
+#: have is a kill that silently does nothing, which is the failure mode this
+#: whole module is written against.
+#:
+#: The match is on the path the backend writes snippets to, so only
+#: submitted code is ever a target: never PID 1, never the backend's own
+#: environment setup.
+_SCAN_PROC = """
+import os
+me = os.getpid()
+hits = []
+for entry in os.listdir('/proc'):
+    if not entry.isdigit() or int(entry) == me:
+        continue
+    try:
+        with open('/proc/' + entry + '/cmdline', 'rb') as fh:
+            line = fh.read().decode('utf-8', 'replace')
+    except OSError:
+        continue
+    if '/sandbox/' in line and '.py' in line:
+        hits.append(int(entry))
+"""
+
+_LIST_SANDBOX_PIDS = _SCAN_PROC + "print(' '.join(str(p) for p in hits))\n"
+
+_KILL_SANDBOX_PIDS = _SCAN_PROC + """
+import signal
+for pid in hits:
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        pass
+"""
+
+#: How long to wait for a restarted container to report itself running.
+RESTART_POLL_ATTEMPTS = 10
+RESTART_POLL_SECONDS = 0.5
+
 _BACKEND_EXCEPTIONS = (
     SandboxError,
     ContainerError,
@@ -116,21 +142,19 @@ _BACKEND_EXCEPTIONS = (
 )
 
 
-class UnsupportedLanguageError(ValueError):
-    pass
-
-
-class UnsupportedEnvironmentError(ValueError):
-    """Named environment does not exist. Distinct from a language error
-    so the agent is told to build one, not to pick another language."""
+#: Both defined in errors.py, still ValueErrors. Kept distinct from each
+#: other on purpose: an unknown environment tells the agent to build one,
+#: an unsupported language tells it to pick another.
+UnsupportedLanguageError = errors.UnsupportedLanguageError
+UnsupportedEnvironmentError = errors.UnknownEnvironmentError
 
 
 UnsupportedBackendError = engine.UnsupportedBackendError
 
 
-class SandboxRuntimeError(RuntimeError):
-    """Wraps any backend exception so callers never see raw llm-sandbox
-    types — keeps the backend replaceable."""
+#: Defined in sandbox_ops so both runtimes raise the same type; every
+#: existing `except SandboxRuntimeError` keeps working unchanged.
+SandboxRuntimeError = sandbox_ops.SandboxRuntimeError
 
 
 def image_for(language: str) -> str:
@@ -174,105 +198,18 @@ class LLMSandboxRuntime:
 
     @staticmethod
     def _engine_specific(backend: str) -> dict:
-        """The same policy, spelled the way this engine's client accepts.
-
-        The two clients diverge in three places and there is no common
-        vocabulary:
-
-        - CPU: docker-py takes `nano_cpus`; podman-py DISCARDS it
-          silently and honours `cpu_period` / `cpu_quota` instead.
-        - Scratch space: docker-py takes a `tmpfs` mapping; podman-py
-          rejects that keyword outright and wants tmpfs entries in
-          `mounts`.
-        - Privilege: `security_opt` versus a `no_new_privileges` flag.
-
-        Getting any of these wrong produces a container that looks
-        configured and is not, which is why every one of them is read
-        back off the container afterwards.
-        """
-        if engine.client_dialect(backend) == "podman":
-            return {
-                "cpu_period": CPU_PERIOD,
-                "cpu_quota": CPU_QUOTA,
-                "mounts": [
-                    {
-                        "type": "tmpfs",
-                        # Without an explicit source podman creates a
-                        # plain directory instead of a tmpfs mount.
-                        "source": "tmpfs",
-                        "target": path,
-                        "size": TMPFS_SIZE,
-                        "chown": True,
-                    }
-                    for path in TMPFS_PATHS
-                ],
-                "no_new_privileges": NO_NEW_PRIVILEGES,
-            }
-        return {
-            "nano_cpus": NANO_CPUS,
-            "tmpfs": {
-                path: f"rw,size={TMPFS_SIZE},mode=1777" for path in TMPFS_PATHS
-            },
-            "security_opt": ["no-new-privileges"] if NO_NEW_PRIVILEGES else [],
-        }
+        return sandbox_ops.engine_specific(backend)
 
     def _runtime_configs(self, sandbox_id: str, backend: str) -> dict:
-        """Everything the engine must apply. Server policy, start to
-        finish — no part of this comes from a caller."""
-        return {
-            "labels": {LABEL_MANAGED: "true", LABEL_ID: sandbox_id},
-            "mem_limit": MEM_LIMIT,
-            "pids_limit": PIDS_LIMIT,
-            **self._engine_specific(backend),
-        }
+        return sandbox_ops.runtime_configs(sandbox_id, backend)
 
     @staticmethod
     def _cpu_limited(host: dict) -> bool:
-        """Whether a CPU ceiling is genuinely in force.
-
-        Docker records it as NanoCpus; Podman as a quota over a period.
-        Either is proof, neither being present is not.
-        """
-        if host.get("NanoCpus") == NANO_CPUS:
-            return True
-        quota, period = host.get("CpuQuota"), host.get("CpuPeriod")
-        return bool(quota) and bool(period) and quota == CPU_QUOTA and period == CPU_PERIOD
+        return sandbox_ops.cpu_limited(host)
 
     @staticmethod
     def _assert_policy_applied(attrs: dict, sandbox_id: str) -> None:
-        """Confirm the engine actually applied what we asked for.
-
-        An engine that accepts a config and silently ignores half of it
-        hands back a container we would go on to DESCRIBE as limited.
-        That is the worst failure mode available to this project: the
-        agent is told it is sandboxed and it is not. So the limits are
-        read back off the real container and a mismatch is fatal.
-        """
-        host = attrs.get("HostConfig") or {}
-        config = attrs.get("Config") or {}
-        expected = {"Memory": MEM_LIMIT_BYTES, "PidsLimit": PIDS_LIMIT}
-        wrong = {
-            key: host.get(key)
-            for key, want in expected.items()
-            if host.get(key) != want
-        }
-        if not LLMSandboxRuntime._cpu_limited(host):
-            wrong["cpu"] = (
-                f"NanoCpus={host.get('NanoCpus')} "
-                f"CpuQuota={host.get('CpuQuota')} "
-                f"CpuPeriod={host.get('CpuPeriod')}"
-            )
-        labels = config.get("Labels") or {}
-        if labels.get(LABEL_ID) != sandbox_id:
-            wrong["Labels"] = labels.get(LABEL_ID)
-        if wrong:
-            raise SandboxRuntimeError(
-                "The container engine did not apply this server's resource "
-                f"policy for sandbox '{sandbox_id}'. Expected {expected}, a "
-                f"CPU ceiling of {CPUS} and label {sandbox_id}, but the "
-                f"container reports {wrong}. Refusing to hand back a sandbox "
-                "that is not actually limited."
-            )
+        sandbox_ops.assert_policy_applied(attrs, sandbox_id)
 
     def _container(self, handle: SandboxHandle):
         """Look up this sandbox's container.
@@ -305,57 +242,37 @@ class LLMSandboxRuntime:
 
     @staticmethod
     def _attached_networks(container) -> list[str]:
-        """Names of networks attached right now.
-
-        Docker and Podman both expose NetworkSettings.Networks, but the key
-        vanishes entirely once the last network is detached, so this must
-        tolerate its absence rather than KeyError.
-        """
-        settings = container.attrs.get("NetworkSettings") or {}
-        return list((settings.get("Networks") or {}).keys())
+        return sandbox_ops.attached_networks(container)
 
     def _seal(self, handle: SandboxHandle) -> None:
-        """Detach every network. Fails closed: if we cannot seal, the
-        caller must not be handed a sandbox we claim is sealed."""
-        def seal_once():
-            client = engine.client(handle.backend)
+        # The client is fetched inside each callable, not captured: a
+        # stale-connection retry rebuilds the cached clients, and a closure
+        # holding the old one would reconnect to the socket that just died.
+        def attached() -> list[str]:
             container = self._container(handle)
             container.reload()
-            for name in self._attached_networks(container):
-                client.networks.get(name).disconnect(container)
+            return sandbox_ops.attached_networks(container)
 
-        try:
-            engine.with_retry(seal_once, "network sealing")
-        except (EngineUnavailableError, ContainerGoneError):
-            raise
-        except Exception as exc:  # noqa: BLE001
-            raise SandboxRuntimeError(
-                f"Could not seal network for '{handle.sandbox_id}': "
-                f"{type(exc).__name__}: {exc}"
-            ) from exc
+        def disconnect(name: str) -> None:
+            engine.client(handle.backend).networks.get(name).disconnect(
+                self._container(handle)
+            )
+
+        sandbox_ops.seal(attached, disconnect, handle.sandbox_id)
 
     def _unseal(self, handle: SandboxHandle) -> None:
-        """Attach the backend's default network for a build phase.
+        def available() -> list[str]:
+            return [
+                getattr(n, "name", "")
+                for n in engine.client(handle.backend).networks.list()
+            ]
 
-        Docker calls it "bridge"; Podman calls it "podman". Hardcoding
-        either one breaks the other backend, so the name is chosen per
-        backend and verified against the engine before use.
-        """
-        client = engine.client(handle.backend)
-        container = self._container(handle)
-        preferred = _DEFAULT_NETWORK.get(handle.backend, "bridge")
-        try:
-            network = client.networks.get(preferred)
-        except Exception:  # noqa: BLE001 - fall back to whatever exists
-            available = [getattr(n, "name", "") for n in client.networks.list()]
-            usable = [n for n in available if n and n != "none"]
-            if not usable:
-                raise SandboxRuntimeError(
-                    f"No usable network on backend '{handle.backend}' for a "
-                    "dependency install."
-                ) from None
-            network = client.networks.get(usable[0])
-        network.connect(container)
+        def connect(name: str) -> None:
+            engine.client(handle.backend).networks.get(name).connect(
+                self._container(handle)
+            )
+
+        sandbox_ops.unseal(handle.backend, available, connect)
 
     def _session_for(self, handle: SandboxHandle):
         """Return a live session for `handle`, reattaching to its
@@ -386,6 +303,7 @@ class LLMSandboxRuntime:
                 backend=_BACKENDS[session_backend],
                 lang=_LANGUAGES[handle.language],
                 container_id=container_ref,
+                keep_template=True,  # see create(); never delete our image
                 **extra,
             )
             session.open()
@@ -420,6 +338,25 @@ class LLMSandboxRuntime:
         except BaseException:
             self._canary_verified.discard(sandbox_id)
             raise
+
+    def running_code_pids(self, handle: SandboxHandle) -> list[str]:
+        """PIDs inside the sandbox still running submitted code. See the
+        NativeRuntime docstring for why this is public."""
+        try:
+            return self._sandbox_processes(self._container(handle))
+        except Exception:  # noqa: BLE001 - a check, not an operation
+            return []
+
+    def supported_languages(self) -> tuple[str, ...]:
+        return tuple(sorted(_LANGUAGES))
+
+    def image_for(self, language: str, environment: str | None = None) -> str:
+        """The image a sandbox would start from, as this backend resolves
+        it. Read from llm-sandbox rather than hardcoded, so it cannot drift
+        from what actually gets pulled."""
+        if environment:
+            return policy.environments().get(environment, "")
+        return image_for(language)
 
     # --- Runtime protocol ---------------------------------------------
 
@@ -463,6 +400,15 @@ class LLMSandboxRuntime:
                 backend=_BACKENDS[session_backend],
                 lang=_LANGUAGES[language],
                 runtime_configs=self._runtime_configs(sandbox_id, backend),
+                # Without this the backend DELETES the language image when
+                # the session closes, whenever that session was the one
+                # that pulled it (_get_or_pull_image sets is_create_template
+                # on a pull, and close() then calls _cleanup_image if no
+                # container references the image any more). destroy() calls
+                # close() before removing the container, so the check
+                # passes. The result for one-sandbox-at-a-time use is a
+                # multi-gigabyte re-pull on every single create.
+                keep_template=True,
                 **extra,
             )
             session.open()
@@ -555,6 +501,37 @@ class LLMSandboxRuntime:
         libraries: list[str] | None = None,
         timeout: float | None = None,
     ) -> ExecResult:
+        """Run code, retrying once if the session's connection went stale.
+
+        The backend's session holds its OWN engine client, which never goes
+        through engine.with_retry — so the retry that protects every other
+        engine call does not protect this one. Windows closes idle named
+        pipes within seconds, and the symptom is a run failing with
+        "Remote end closed connection without response" on a perfectly
+        healthy engine, purely because another sandbox was being worked on
+        in the meantime.
+
+        Dropping the cached session forces a reattach on the next call,
+        which builds a fresh connection. Exactly one retry: an engine that
+        drops two fresh connections is not having a transient problem, and
+        retrying a real outage into a false success is the distinction the
+        registry's correctness rests on.
+        """
+        try:
+            return self._run_once(handle, code, libraries, timeout)
+        except Exception as exc:  # noqa: BLE001 - classified immediately
+            if not engine.is_stale_connection(exc):
+                raise
+            self._sessions.pop(handle.sandbox_id, None)
+            return self._run_once(handle, code, libraries, timeout)
+
+    def _run_once(
+        self,
+        handle: SandboxHandle,
+        code: str,
+        libraries: list[str] | None = None,
+        timeout: float | None = None,
+    ) -> ExecResult:
         session = self._session_for(handle)
 
         # Build phase: the ONLY time a network exists. Dependencies are
@@ -568,6 +545,17 @@ class LLMSandboxRuntime:
                     _NOOP.get(handle.language, "pass"),
                     libraries=libraries,
                     timeout=timeout,
+                )
+            except SandboxTimeoutError as exc:
+                # Before _BACKEND_EXCEPTIONS, which it subclasses. A hung
+                # install burns the same CPU a hung program does, and used
+                # to be reported as a generic failure while pip kept going.
+                return ExecResult(
+                    stdout="",
+                    stderr=f"Dependency install timed out: {exc}."
+                    + self._kill_runaway(handle),
+                    exit_code=-1,
+                    timed_out=True,
                 )
             except _BACKEND_EXCEPTIONS as exc:
                 return ExecResult(
@@ -593,7 +581,8 @@ class LLMSandboxRuntime:
             # the agent's next move differs accordingly.
             return ExecResult(
                 stdout="",
-                stderr=f"{type(exc).__name__}: {exc}",
+                stderr=f"{type(exc).__name__}: {exc}."
+                + self._kill_runaway(handle),
                 exit_code=-1,
                 timed_out=True,
             )
@@ -617,23 +606,155 @@ class LLMSandboxRuntime:
             exit_code=out.exit_code,
         )
 
-    def _explain_sigkill(self, handle: SandboxHandle) -> str:
-        """Turn a bare 137 into something actionable."""
+    @staticmethod
+    def _exec(container, argv: list[str]) -> tuple[int, str]:
+        """Run a command in the container, returning (exit_code, stdout).
+
+        Flattens two separate client disagreements, both of which produce
+        wrong answers rather than errors:
+
+        - docker-py returns an ExecResult; podman-py returns a plain
+          (exit_code, output) tuple.
+        - docker-py demultiplexes the exec stream; podman-py hands back the
+          raw framed bytes. Decoding those directly yields a string of
+          header bytes that reads as output. See engine.demux_frames.
+        """
+        result = container.exec_run(argv)
+        code, output = (
+            result if isinstance(result, tuple)
+            else (result.exit_code, result.output)
+        )
+        if output is None:
+            output = b""
+        elif not isinstance(output, (bytes, bytearray)):
+            # A streamed exec yields chunks. Join them rather than str()ing
+            # the iterator, which produces "<generator object ...>" and
+            # looks like output.
+            try:
+                output = b"".join(output)
+            except TypeError:
+                output = b""
+        stdout, _ = engine.demux_frames(bytes(output))
+        return (code or 0), stdout
+
+    def _sandbox_processes(self, container) -> list[str]:
+        """PIDs inside the container that are running submitted code.
+
+        Read from /proc with the interpreter that is already PID 1 in these
+        images, rather than with `ps` or `pkill`: procps is not installed in
+        the slim language images, and a kill that depends on a binary the
+        image may not have is a kill that silently does nothing.
+        """
+        code, out = self._exec(
+            container,
+            ["python3", "-c", _LIST_SANDBOX_PIDS],
+        )
+        if code != 0:
+            return []
+        return [line for line in out.split() if line.strip().isdigit()]
+
+    def _kill_runaway(self, handle: SandboxHandle) -> str:
+        """Stop code that outlived its timeout, and say what stopping cost.
+
+        The backend's timeout does not stop anything. Its TimeoutMixin is a
+        host-side thread.join, and the container-level cancellation its own
+        docstring promises is a no-op for a container the session created
+        and a bare detach for one it reattached to. So a `while True: pass`
+        keeps running at the full CPU ceiling until the sandbox is
+        destroyed, and a reattached session is left unusable afterwards.
+
+        Two levers, tried in order:
+
+        1. Kill the submitted code's processes directly, found by reading
+           /proc through the interpreter that is already PID 1. This leaves
+           the container up, so the filesystem — including /work — survives
+           and the network stays sealed exactly as it was.
+        2. Restart the container, if anything survived that. Blunt: it
+           empties the tmpfs mounts and needs the seal re-applied, so it is
+           the fallback rather than the plan. The restart is then VERIFIED
+           and started explicitly if the engine left it stopped, because a
+           sandbox that quietly fails to come back is worse than the runaway
+           it replaced.
+
+        Best effort throughout: a timeout is already being reported, and
+        failing to tidy up must not replace that with a less useful error.
+        The session is dropped either way, so the next run reattaches to
+        whatever state the container is really in.
+        """
+        self._sessions.pop(handle.sandbox_id, None)
+        self._canary_verified.discard(handle.sandbox_id)
         try:
             container = self._container(handle)
-            if container.attrs.get("State", {}).get("OOMKilled"):
-                return (
-                    f"Killed (SIGKILL): the sandbox exceeded its memory limit "
-                    f"of {MEM_LIMIT}. Reduce the working set, or process the "
-                    "data in chunks."
-                )
-        except Exception:  # noqa: BLE001 - explanation is best-effort
-            pass
-        return (
-            "Killed (SIGKILL): the process was terminated by the sandbox, "
-            f"most likely for exceeding the memory limit of {MEM_LIMIT} "
-            f"or the process limit of {PIDS_LIMIT}."
+        except Exception as exc:  # noqa: BLE001 - already reporting a timeout
+            return (
+                f" The sandbox could not be reached to stop it "
+                f"({type(exc).__name__}: {exc}), so that code may still be "
+                "running. Call destroy_sandbox to be certain."
+            )
+
+        try:
+            self._exec(container, ["python3", "-c", _KILL_SANDBOX_PIDS])
+            survivors = self._sandbox_processes(container)
+        except Exception:  # noqa: BLE001 - fall through to the restart
+            survivors = ["unknown"]
+        if not survivors:
+            return " The code was killed; the sandbox is still usable."
+
+        return self._restart_to_kill(handle, container)
+
+    def _restart_to_kill(self, handle: SandboxHandle, container) -> str:
+        """Last resort: take the whole container down and back up."""
+        try:
+            # An explicit, short stop grace. The default is ten seconds of
+            # SIGTERM politeness aimed at PID 1, but the runaway is an exec
+            # child, so nothing useful happens during that wait — a 5s
+            # timeout was measured returning after 19s.
+            container.restart(timeout=2)
+        except Exception as exc:  # noqa: BLE001
+            return (
+                f" The sandbox could not be restarted to stop it "
+                f"({type(exc).__name__}: {exc}), so that code may still be "
+                "running. Call destroy_sandbox to be certain."
+            )
+
+        # Verify rather than assume. A restart that reports success and
+        # leaves the container stopped was observed on Docker while an exec
+        # was in flight, and an unusable sandbox reported as recovered is
+        # exactly the confident-wrong-answer this project exists to avoid.
+        note = (
+            " The sandbox was restarted to stop the code, so scratch space "
+            f"({', '.join(TMPFS_PATHS)}) is now empty; the rest of its "
+            "filesystem, including installed packages, survives."
         )
+        for _ in range(RESTART_POLL_ATTEMPTS):
+            try:
+                container.reload()
+                if getattr(container, "status", "") == "running":
+                    break
+                container.start()
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(RESTART_POLL_SECONDS)
+        else:
+            return (
+                note
+                + " WARNING: it did not come back up. Call destroy_sandbox "
+                "and create a new one."
+            )
+
+        try:
+            self._seal(handle)
+        except Exception as exc:  # noqa: BLE001
+            return (
+                note
+                + " WARNING: its network could not be re-sealed after the "
+                f"restart ({type(exc).__name__}: {exc}). Destroy this "
+                "sandbox rather than running anything else in it."
+            )
+        return note
+
+    def _explain_sigkill(self, handle: SandboxHandle) -> str:
+        return sandbox_ops.explain_sigkill(lambda: self._container(handle))
 
     def alive(self, handle: SandboxHandle) -> bool:
         """Ask the engine, not our own bookkeeping.
@@ -685,66 +806,5 @@ class LLMSandboxRuntime:
 
     def gc(self, known_ids: set[str]) -> list[str]:
         """Remove our containers whose sandbox_id is unknown to the
-        registry. Matches on our labels only.
-
-        Best effort by design: an engine that is not installed or not
-        running is skipped rather than failing the sweep, because GC runs
-        at server startup and must never stop the server from serving.
-        """
-        reclaimed: list[str] = []
-        for backend in _BACKENDS:
-            try:
-                containers = engine.list_managed(
-                    backend, f"{LABEL_MANAGED}=true"
-                )
-            except (EngineUnavailableError, ContainerGoneError):
-                continue
-            for container in containers:
-                labels = getattr(container, "labels", None) or {}
-                sandbox_id = labels.get(LABEL_ID)
-                if not sandbox_id or sandbox_id in known_ids:
-                    continue
-                if self._too_young(container):
-                    # Another process may be creating this right now, in
-                    # the window before its registration lands.
-                    continue
-                try:
-                    container.remove(force=True)
-                    reclaimed.append(sandbox_id)
-                except Exception:  # noqa: BLE001 - best effort
-                    continue
-        return reclaimed
-
-    @staticmethod
-    def _too_young(container) -> bool:
-        """Whether a container is inside the creation grace period.
-
-        Unparseable or missing timestamps return False: an unknown age
-        must not make a container permanently unreclaimable.
-        """
-        created = (container.attrs or {}).get("Created")
-        if not isinstance(created, str) or not created:
-            return False
-        # Engines emit more fractional-second digits than fromisoformat
-        # accepts on 3.11, so the fraction is trimmed to microseconds
-        # while any timezone suffix is preserved.
-        stamp = created.strip().replace("Z", "+00:00")
-        match = re.match(
-            r"^(?P<head>[\dT:-]+)"
-            r"(?:\.(?P<frac>\d+))?"
-            r"(?P<tz>[+-]\d{2}:?\d{2})?$",
-            stamp,
-        )
-        if match:
-            frac = (match.group("frac") or "")[:6]
-            stamp = match.group("head")
-            if frac:
-                stamp += "." + frac.ljust(6, "0")
-            stamp += match.group("tz") or "+00:00"
-        try:
-            born = datetime.fromisoformat(stamp)
-        except ValueError:
-            return False
-        if born.tzinfo is None:
-            born = born.replace(tzinfo=timezone.utc)
-        return (time.time() - born.timestamp()) < GC_GRACE_SECONDS
+        registry. Matches on our labels only."""
+        return sandbox_ops.collect_orphans(known_ids, _BACKENDS)

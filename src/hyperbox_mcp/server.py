@@ -26,6 +26,7 @@ import asyncio
 import json
 import logging
 import logging.handlers
+import os
 import sys
 import threading
 import time
@@ -35,16 +36,16 @@ from pathlib import Path
 
 from fastmcp import Context, FastMCP
 
-from hyperbox_mcp import engine, policy, validate
+from hyperbox_mcp import engine, errors, policy, slots, validate
 from hyperbox_mcp.engine import EngineUnavailableError
-from hyperbox_mcp.llm_sandbox_runtime import (
-    LLMSandboxRuntime,
-    SandboxRuntimeError,
-    UnsupportedBackendError,
-    UnsupportedEnvironmentError,
-    UnsupportedLanguageError,
-    image_for,
+from hyperbox_mcp.errors import (
+    UnknownEnvironmentError as UnsupportedEnvironmentError,
 )
+from hyperbox_mcp.errors import (
+    UnsupportedBackendError,
+    UnsupportedLanguageError,
+)
+from hyperbox_mcp.sandbox_ops import SandboxRuntimeError
 from hyperbox_mcp.registry import Registry
 from hyperbox_mcp.runtime import Runtime, SandboxHandle
 from hyperbox_mcp.validate import InvalidInput
@@ -100,9 +101,48 @@ def _setup_logging() -> None:
 
 mcp = FastMCP("HyperBox")
 
-# The one place a concrete backend is chosen. Swap this line to change
-# execution engines; nothing below it knows or cares which Runtime it is.
-_runtime: Runtime = LLMSandboxRuntime()
+#: Which execution backend to use.
+#:
+#: `native` speaks the engine's REST API directly and takes no execution
+#: dependency at all. It is the default because it does more and does it
+#: better: five languages against one, packages installed before the
+#: sandbox is sealed rather than through a window re-opened per run, a
+#: timeout that kills a forked child, and images that are official and
+#: tagged rather than mutable `latest` from one personal namespace.
+#:
+#: `llm-sandbox` remains selectable for exactly one release, so anyone it
+#: works better for has a way back that is not a downgrade. It goes after
+#: that, and this switch goes with it.
+#:
+#: An environment variable rather than a config file, because the point of
+#: an overlap is that one machine can run either and compare.
+RUNTIME_CHOICES = ("native", "llm-sandbox")
+
+
+def select_runtime(choice: str | None = None) -> Runtime:
+    """Build the configured Runtime.
+
+    Imports are deliberately inside the branches: importing the
+    llm-sandbox runtime pulls in llm_sandbox itself, and a server running
+    natively should not load an execution backend it will never use.
+    """
+    name = (choice or os.environ.get("HYPERBOX_RUNTIME") or "native").strip().lower()
+    if name == "native":
+        from hyperbox_mcp.native_runtime import NativeRuntime
+
+        return NativeRuntime()
+    if name in ("llm-sandbox", "llm_sandbox", "llmsandbox"):
+        from hyperbox_mcp.llm_sandbox_runtime import LLMSandboxRuntime
+
+        return LLMSandboxRuntime()
+    raise ValueError(
+        f"Unknown HYPERBOX_RUNTIME '{name}'. Choose one of: "
+        f"{', '.join(RUNTIME_CHOICES)}."
+    )
+
+
+# The one place a concrete backend is chosen.
+_runtime: Runtime = select_runtime()
 
 # Sandbox ownership lives in a durable registry shared by every server
 # process, NOT in this process's memory. That is what lets a restarted
@@ -194,13 +234,14 @@ def _handle_for(rec) -> SandboxHandle:
 
 
 def _no_sandbox(sandbox_id: str) -> dict:
-    return {
-        "error": (
+    return errors.to_result(
+        errors.SandboxStaleError(
             f"No sandbox '{sandbox_id}'. It was never created, was already "
-            "destroyed, or was reclaimed after its inactivity timeout. Call "
-            "create_sandbox and use the sandbox_id it returns."
+            "destroyed, or was reclaimed after its inactivity timeout.",
+            fix="Call create_sandbox and use the sandbox_id it returns.",
+            context={"sandbox_id": sandbox_id},
         )
-    }
+    )
 
 
 def collect_garbage() -> list[str]:
@@ -272,7 +313,10 @@ def capabilities() -> str:
     by hitting them, which costs a failed run to find out."""
     return json.dumps(
         {
-            "languages": sorted(policy.LANGUAGES),
+            # What the running runtime can deliver, not a constant: the
+            # answer differs between backends and this resource is what an
+            # agent plans against.
+            "languages": sorted(_runtime.supported_languages()),
             # Resolved per request, so an environment the user built
             # after this server started is listed without a restart.
             "environments": sorted(policy.environments()),
@@ -290,10 +334,22 @@ def capabilities() -> str:
             },
             "network": {
                 "while_your_code_runs": "disabled",
-                "during_library_install": "enabled briefly, then re-sealed",
+                "when_it_is_ever_enabled": (
+                    "only while the sandbox is being created, to install the "
+                    "packages you declared, and before any of your code has "
+                    "run. It is then detached and verified unreachable — a "
+                    "TCP connection and a DNS lookup must both fail — and "
+                    "never re-attached."
+                ),
+                "declare_packages_with": "create_sandbox(packages=[...])",
                 "installable": (
                     "named packages from the default index only; flags, "
                     "URLs, paths and VCS references are refused"
+                ),
+                "deprecated": (
+                    "run(libraries=[...]) still works but re-opens the "
+                    "network mid-session; it will be refused in a future "
+                    "release"
                 ),
             },
             "filesystem": {
@@ -338,6 +394,7 @@ async def create_sandbox(
     language: str = "python",
     backend: str = "auto",
     environment: str | None = None,
+    packages: list[str] | None = None,
 ) -> dict:
     """Create a disposable container to run untrusted or unverified code in.
 
@@ -369,29 +426,37 @@ async def create_sandbox(
     lists the ones that exist. You cannot create an environment: only the
     user can, with `hyperbox build` at their terminal.
 
+    DECLARE EVERY PACKAGE YOU NEED IN `packages`. They are installed while
+    the sandbox is being built, and the network is then cut off for good —
+    so a package you did not ask for here cannot be installed later. This
+    is the only moment a sandbox can reach the internet, and it happens
+    before any of your code runs. Ask for what you need up front rather
+    than discovering it and retrying; a sandbox that turns out to be
+    missing something is cheaper to replace than to patch.
+
+    Not every language takes packages: `java` refuses them and says what to
+    do instead. `hyperbox://capabilities` lists which do.
+
     Read the `hyperbox://capabilities` resource for exact limits.
     """
     try:
-        language = validate.language(language)
+        language = validate.language(language, _runtime.supported_languages())
         requested = validate.backend(backend)
         environment = validate.environment(environment)
+        packages = validate.libraries(packages)
     except InvalidInput as exc:
-        return {"error": str(exc)}
+        return errors.to_result(exc)
 
     try:
         resolved = await asyncio.to_thread(engine.detect, requested)
-    except EngineUnavailableError as exc:
-        return {"error": str(exc)}
-    except UnsupportedBackendError as exc:
-        return {"error": str(exc)}
+    except (EngineUnavailableError, UnsupportedBackendError) as exc:
+        return errors.to_result(exc)
 
     # Say what the slow part is going to be, so a first run reads as a
     # download rather than a hang.
     try:
         wanted_image = (
-            policy.environments()[environment]
-            if environment
-            else image_for(language)
+            _runtime.image_for(language, environment)
         )
         cold = not await asyncio.to_thread(
             engine.image_present, resolved, wanted_image
@@ -417,13 +482,25 @@ async def create_sandbox(
         async with _heartbeat(ctx, what):
             # Offloaded: container creation blocks for seconds to minutes,
             # and must not stall the server's event loop.
-            handle = await asyncio.to_thread(
-                _runtime.create,
+            create_kwargs = dict(
                 language=language,
                 backend=resolved,
                 sandbox_id=sandbox_id,
                 environment=environment,
             )
+            # Only the native runtime provisions at create time. Passing
+            # `packages` to one that cannot honour it would silently drop
+            # them, so it is offered only where it means something.
+            if packages:
+                create_kwargs["packages"] = packages
+            def create_under_slot():
+                # Bounded across processes: several servers commonly share
+                # one engine, and simultaneous image pulls are what
+                # saturates it.
+                with slots.engine_slot(f"creating {language} sandbox"):
+                    return _runtime.create(**create_kwargs)
+
+            handle = await asyncio.to_thread(create_under_slot)
     except (
         UnsupportedLanguageError,
         UnsupportedEnvironmentError,
@@ -431,18 +508,13 @@ async def create_sandbox(
         InvalidInput,
     ) as exc:
         _registry.remove(sandbox_id)
-        return {"error": str(exc)}
-    except EngineUnavailableError as exc:
+        return errors.to_result(exc)
+    except (EngineUnavailableError, SandboxRuntimeError) as exc:
         _registry.remove(sandbox_id)
-        return {"error": str(exc)}
-    except SandboxRuntimeError as exc:
-        _registry.remove(sandbox_id)
-        return {"error": f"Failed to create sandbox: {exc}"}
+        return errors.to_result(exc)
     except Exception as exc:  # noqa: BLE001 — see run() for the rationale
         _registry.remove(sandbox_id)
-        return {
-            "error": f"Failed to create sandbox: {type(exc).__name__}: {exc}"
-        }
+        return errors.to_result(exc)
 
     _registry.finalize(sandbox_id, handle.meta.get("container_ref", ""))
     logger.info("sandbox %s ready", sandbox_id)
@@ -452,6 +524,8 @@ async def create_sandbox(
         "language": handle.language,
         "backend": handle.backend,
         "environment": environment,
+        "packages": packages or [],
+        "network": "sealed — this sandbox cannot reach the internet",
         "next": (
             f"Call run(sandbox_id='{handle.sandbox_id}', code=...) to execute. "
             "Call destroy_sandbox when done."
@@ -472,7 +546,8 @@ async def create_sandbox(
         "openWorldHint": True,
     }
 )
-def run(
+async def run(
+    ctx: Context,
     sandbox_id: str,
     code: str,
     libraries: list[str] | None = None,
@@ -491,11 +566,21 @@ def run(
     Write working files to /work: it is scratch space, size-limited, and
     discarded with the sandbox.
 
-    Your code runs with NO network access. Passing `libraries` installs
-    them in a brief, separate network-enabled step first, then re-seals
-    before your code executes; only plain package names are accepted.
+    Your code runs with NO network access.
+
+    `libraries` is DEPRECATED: declare what you need in
+    `create_sandbox(packages=[...])` instead, which installs before the
+    sandbox is sealed and keeps it sealed for its whole life. Passing it
+    here still works for now — it briefly re-opens the network, installs,
+    and re-seals — but that window is exactly what create-time
+    provisioning removes, and it will be refused in a future release.
     `timeout` is capped by the server, must be a positive number, and may
     not be null. Output is truncated past a limit, and marked when it is.
+
+    On timeout the code is actually killed, not just abandoned — a timed-out
+    run leaves nothing burning CPU in the sandbox, and the sandbox stays
+    usable. If the code cannot be killed the sandbox is restarted instead,
+    which empties scratch space; the result says which happened.
     """
     try:
         sandbox_id = validate.sandbox_id(sandbox_id)
@@ -503,40 +588,57 @@ def run(
         libraries = validate.libraries(libraries)
         timeout = validate.timeout(timeout)
     except InvalidInput as exc:
-        return {"error": str(exc)}
+        return errors.to_result(exc)
 
-    try:
-        # Held for the whole call so two processes cannot drive the same
-        # container's session concurrently, and re-read inside the lock so
-        # a destroy that landed first is seen.
+    def execute():
+        # The lock is held for the whole call so two processes cannot drive
+        # one container concurrently, and the record is re-read inside it
+        # so a destroy that landed first is seen.
         with _registry.lock(sandbox_id):
             rec = _registry.get_ready(sandbox_id)
             if rec is None:
-                return _no_sandbox(sandbox_id)
-            result = _runtime.run(
+                return None
+            outcome = _runtime.run(
                 _handle_for(rec), code=code, libraries=libraries, timeout=timeout
             )
             _registry.touch(sandbox_id)
-            logger.info(
-                "run in %s finished (exit_code=%s, timed_out=%s)",
-                sandbox_id, result.exit_code, result.timed_out,
-            )
-    except EngineUnavailableError as exc:
-        return {"error": str(exc)}
-    except SandboxRuntimeError as exc:
-        return {"error": str(exc)}
+            return outcome
+
+    try:
+        # Offloaded and reported on. A run can legitimately take the full
+        # timeout, and before this the tool went silent for all of it --
+        # silence a client resolves by killing the request, which loses the
+        # result of work that had already finished.
+        async with _heartbeat(ctx, "running your code"):
+            result = await asyncio.to_thread(execute)
+        if result is None:
+            return _no_sandbox(sandbox_id)
+        logger.info(
+            "run in %s finished (exit_code=%s, timed_out=%s)",
+            sandbox_id, result.exit_code, result.timed_out,
+        )
+    except (EngineUnavailableError, SandboxRuntimeError) as exc:
+        return errors.to_result(exc)
     except Exception as exc:  # noqa: BLE001
         # Results are ALWAYS structured. An unexpected backend exception
         # must reach the agent as something it can reason about, not as a
         # crashed tool call.
-        return {"error": f"{type(exc).__name__}: {exc}"}
-    return {
+        return errors.to_result(exc)
+    payload = {
         "stdout": _cap_output(result.stdout),
         "stderr": _cap_output(result.stderr),
         "exit_code": result.exit_code,
         "success": result.success,
         "timed_out": result.timed_out,
     }
+    if libraries:
+        payload["deprecation"] = (
+            "run(libraries=...) is deprecated and will be refused in a "
+            "future release: it re-opens the network mid-session. Declare "
+            "packages in create_sandbox(packages=[...]) instead, which "
+            "installs before the sandbox is sealed."
+        )
+    return payload
 
 
 @mcp.tool(
@@ -550,7 +652,7 @@ def run(
         "openWorldHint": False,
     }
 )
-def destroy_sandbox(sandbox_id: str) -> dict:
+async def destroy_sandbox(ctx: Context, sandbox_id: str) -> dict:
     """Tear down a sandbox and free its resources.
 
     Idempotent — destroying one that is already gone is a success, not an
@@ -565,9 +667,10 @@ def destroy_sandbox(sandbox_id: str) -> dict:
     try:
         sandbox_id = validate.sandbox_id(sandbox_id)
     except InvalidInput as exc:
-        return {"error": str(exc)}
+        return errors.to_result(exc)
 
-    try:
+    def teardown() -> dict | None:
+        """Returns a result to send back, or None when it plainly worked."""
         with _registry.lock(sandbox_id):
             rec = _registry.get(sandbox_id)
             if rec is None:
@@ -581,27 +684,38 @@ def destroy_sandbox(sandbox_id: str) -> dict:
             # record in place — see the runtime's destroy() contract.
             _runtime.destroy(handle)
             if _runtime.alive(handle):
-                return {
-                    "error": (
+                return errors.to_result(
+                    SandboxRuntimeError(
                         f"Sandbox '{sandbox_id}' container is still running "
                         "after destroy was attempted. The sandbox is still "
-                        "on file; try again."
+                        "on file.",
+                        fix="Call destroy_sandbox again.",
+                        context={"sandbox_id": sandbox_id},
                     )
-                }
+                )
             _registry.remove(sandbox_id)
             logger.info("destroyed sandbox %s", sandbox_id)
+            return None
+
+    try:
+        # Reported on, because this waits for another process's lock when
+        # two clients touch one sandbox, and a silent wait is what a client
+        # kills.
+        async with _heartbeat(ctx, "destroying the sandbox"):
+            early = await asyncio.to_thread(teardown)
+        if early is not None:
+            return early
     except EngineUnavailableError as exc:
-        return {
-            "error": (
-                f"{exc} The sandbox is still on file and was NOT removed, "
-                "because a container that cannot be reached has not been "
-                "proven gone."
-            )
-        }
+        # The record is deliberately KEPT: a container that cannot be
+        # reached has not been proven gone, and forgetting it here is how
+        # orphans accumulate.
+        exc.context.setdefault("sandbox_id", sandbox_id)
+        exc.context["registry_row"] = "kept — removal could not be verified"
+        return errors.to_result(exc)
     except SandboxRuntimeError as exc:
-        return {"error": str(exc)}
+        return errors.to_result(exc)
     except Exception as exc:  # noqa: BLE001 — see run() for the rationale
-        return {"error": f"{type(exc).__name__}: {exc}"}
+        return errors.to_result(exc)
     return {"sandbox_id": sandbox_id, "status": "destroyed"}
 
 
@@ -633,16 +747,22 @@ def run_safely(code: str, language: str = "python") -> str:
 def _background_gc_loop() -> None:
     """Sweep for expired sandboxes for as long as the server is up.
 
-    Without this, the inactivity TTL is enforced only by restarting the
-    process: serve() swept once and then blocked in mcp.run(). A server
-    running inside an editor stays up for days, so every expired sandbox
-    stayed on the machine until the editor was closed.
+    Sweeps immediately, then on the interval. The first sweep used to run
+    synchronously in serve(), before mcp.run() — so the server did not
+    start listening until every engine had been probed, and probing a
+    stopped Podman costs a CLI subprocess with a multi-second timeout.
+    Several clients launching at once then all looked like servers that had
+    failed to start. Nothing about reclaiming an old container needs to
+    happen before the first tool call can be answered.
 
-    No new race: collect_garbage() takes the per-sandbox registry lock,
-    and so does every tool that touches one.
+    Without the loop, the inactivity TTL would be enforced only by
+    restarting the process, and a server running inside an editor stays up
+    for days.
+
+    No new race: collect_garbage() takes the per-sandbox registry lock, and
+    so does every tool that touches one.
     """
     while True:
-        time.sleep(policy.GC_INTERVAL_SECONDS)
         try:
             reclaimed = collect_garbage()
         except Exception:  # noqa: BLE001 - a failed sweep is not fatal
@@ -654,6 +774,7 @@ def _background_gc_loop() -> None:
                 logger.info(
                     "background GC reclaimed %d container(s)", len(reclaimed)
                 )
+        time.sleep(policy.GC_INTERVAL_SECONDS)
 
 
 def serve() -> None:
@@ -661,10 +782,12 @@ def serve() -> None:
     _setup_logging()
     logger.info("HyperBox server starting")
 
-    # Reclaim anything left behind by a previous process before serving.
-    collect_garbage()
-
-    # Daemon: it must never hold the process open at shutdown.
+    # Reclaiming what a previous process left behind happens on the GC
+    # thread's first pass, NOT here. Doing it here delayed the server's
+    # first response by however long it took to probe both engines, which
+    # on a machine with a stopped Podman is a CLI subprocess with a
+    # multi-second timeout. Daemon, so it never holds the process open at
+    # shutdown.
     threading.Thread(
         target=_background_gc_loop, daemon=True, name="hyperbox-gc"
     ).start()

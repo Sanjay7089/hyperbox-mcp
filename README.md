@@ -48,12 +48,21 @@ Requires Python 3.11+ and either Docker or Podman.
 
 | Tool | What it does |
 |---|---|
-| `create_sandbox(language, backend, environment)` | A persistent, disposable container. Returns a `sandbox_id`. |
+| `create_sandbox(language, backend, environment, packages)` | A persistent, disposable container, with any declared packages installed before it is sealed. Returns a `sandbox_id`. |
 | `run(sandbox_id, code, libraries, timeout)` | Executes code. Returns `{stdout, stderr, exit_code, success, timed_out}` — never a bare "it failed". |
 | `destroy_sandbox(sandbox_id)` | Tears it down. Idempotent, and confirmed against the engine before it claims success. |
 
 Plus a `hyperbox://capabilities` resource publishing the exact limits, so
 an agent can read them instead of discovering them by failing.
+
+**Five languages** — `python`, `javascript`, `bash`, `go` and `java` — each
+on an official tagged image.
+
+**Declare dependencies at creation.** `packages=["requests"]` installs while
+the sandbox is still allowed to reach the network, and the network is then
+cut off for good. `run(libraries=[...])` still works and returns a
+`deprecation` field, but it has to reopen the network on a sandbox that was
+already sealed, so prefer `packages`.
 
 Within one sandbox, the filesystem and installed packages persist between
 runs; variables do not, because each run is a fresh process. Write what
@@ -105,7 +114,8 @@ Start sandboxes from a heavier image so you do not pay a package install
 every time:
 
 ```bash
-hyperbox build data-science --custom ./Dockerfile
+hyperbox build data-science --dockerfile ./Dockerfile   # or a directory
+hyperbox build torch --image pytorch/pytorch:latest     # or pull one
 hyperbox envs
 ```
 
@@ -138,7 +148,9 @@ or microVM sandbox, not a local container.
 - **[Setup](docs/setup.md)** — install, client configuration, environments, CLI reference
 - **[Security model](docs/security.md)** — what is enforced, how it is proven, what it does not cover
 - **[Troubleshooting](docs/troubleshooting.md)** — when something does not work
+- **[System map](docs/diagrams/hyperbox-system.png)** — the layers, the protocol seams and the sweep across them, on one page
 - **[Changelog](CHANGELOG.md)**
+- **[Security policy](SECURITY.md)** — reporting a vulnerability
 - **[Contributing](CONTRIBUTING.md)**
 
 ## Testing

@@ -55,6 +55,22 @@ def transport(extra_env: dict | None = None) -> StdioTransport:
         "HOME": os.path.expanduser("~"),
         "PYTHONPATH": os.path.abspath("src"),
     }
+    # Carried through deliberately. A server subprocess that does not
+    # inherit these runs a DIFFERENT configuration from the test driving
+    # it -- with the runtime unset it takes the default, so a container
+    # created by one runtime gets reattached by another and fails in a way
+    # that looks like a product bug.
+    #
+    # extra_env still wins: the outage case sets DOCKER_HOST and
+    # CONTAINER_HOST deliberately, and must be able to override an
+    # inherited one.
+    env.update({
+        name: os.environ[name]
+        for name in ("HYPERBOX_RUNTIME", "HYPERBOX_STATE_DIR",
+                     "HYPERBOX_ENV_DIR", "HYPERBOX_TTL_SECONDS",
+                     "DOCKER_HOST", "CONTAINER_HOST")
+        if name in os.environ
+    })
     env.update(extra_env or {})
     return StdioTransport(
         command=sys.executable, args=["-m", "hyperbox_mcp.server"], env=env
@@ -262,7 +278,11 @@ async def main() -> int:
             "the error names the fix rather than just failing",
             "error" in d
             and any(
-                hint in d["error"].lower()
+                hint in (
+                    d.get("error_message", "")
+                    + " "
+                    + (d.get("error") or {}).get("fix", "")
+                ).lower()
                 for hint in ("docker info", "systemctl", "docker desktop", "podman")
             ),
             str(d.get("error", ""))[:120],

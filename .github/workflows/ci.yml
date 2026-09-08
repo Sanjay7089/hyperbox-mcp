@@ -2,7 +2,10 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # The v0.3 work happens on its own branch and is not merged until it
+    # has passed on Windows and in a real MCP client, so the branch needs
+    # the same three-OS host checks main gets.
+    branches: [main, v0.3-engine]
   pull_request:
 
 jobs:
@@ -25,9 +28,9 @@ jobs:
         python: ["3.11", "3.13"]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
 
@@ -40,6 +43,17 @@ jobs:
           HYPERBOX_SKIP_ENGINE_CHECKS: ${{ matrix.os == 'ubuntu-latest' && '0' || '1' }}
         run: python tests/verify_platform.py
 
+      - name: Named-pipe transport (Windows only, needs no engine)
+        # The pipe transport is hand-written ctypes and is the least
+        # covered code in the project: no CI runner has a container
+        # engine, and an ordinary EC2 Windows instance cannot have one
+        # either -- WSL2 needs nested virtualisation, which AWS offers
+        # only on bare metal. A stub pipe server exercises every shape
+        # the real engine produces, so the one platform where this code
+        # is bespoke stops being the one platform nothing tests it on.
+        if: matrix.os == 'windows-latest'
+        run: python tests/verify_named_pipe.py
+
       - name: The CLI runs without a container engine
         run: |
           hyperbox --version
@@ -48,8 +62,8 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
       - name: Build wheel and sdist

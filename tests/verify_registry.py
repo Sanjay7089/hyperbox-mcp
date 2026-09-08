@@ -56,6 +56,18 @@ def transport() -> StdioTransport:
             "PATH": os.environ.get("PATH", ""),
             "HOME": os.path.expanduser("~"),
             "PYTHONPATH": os.path.abspath("src"),
+            # Carried through deliberately. A server subprocess that does
+            # not inherit these runs a DIFFERENT configuration from the
+            # test driving it: with the runtime unset it takes the default,
+            # so a container created by one runtime gets reattached by
+            # another and fails in a way that looks like a product bug.
+            **{
+                name: os.environ[name]
+                for name in ("HYPERBOX_RUNTIME", "HYPERBOX_STATE_DIR",
+                             "HYPERBOX_ENV_DIR", "HYPERBOX_TTL_SECONDS",
+                             "DOCKER_HOST", "CONTAINER_HOST")
+                if name in os.environ
+            },
         },
     )
 
@@ -152,12 +164,28 @@ async def main() -> int:
 
     run_result: dict = {}
 
+    class _Ctx:
+        """What a real client injects. run() reports progress on it so a
+        long call is not silence; nothing is listening here."""
+
+        async def report_progress(self, *a, **k):
+            return None
+
     def slow_run() -> None:
+        # run() is a coroutine function: it offloads to a worker thread and
+        # reports progress while it waits. Calling it without awaiting
+        # returns a coroutine that never executes, so the registry lock is
+        # never taken -- which is precisely the protection this case
+        # exists to verify.
+        run_fn = getattr(srv.run, "fn", srv.run)
         run_result.update(
-            srv.run(
-                sandbox_id=sid,
-                code="import time; time.sleep(4); print('still here')",
-                timeout=30,
+            asyncio.run(
+                run_fn(
+                    _Ctx(),
+                    sandbox_id=sid,
+                    code="import time; time.sleep(4); print('still here')",
+                    timeout=30,
+                )
             )
         )
 
@@ -321,13 +349,17 @@ async def main() -> int:
     # point — so this orphan is aged past it before the sweep.
     import hyperbox_mcp.policy as pol
 
+    # Patch policy itself, not a copy of it. Reaching into whichever
+    # module happens to implement the sweep made this test depend on where
+    # the code lives: it broke the moment that function moved, and it
+    # broke by SILENTLY doing nothing -- the orphan simply stayed inside
+    # its grace period and GC was blamed for not collecting it.
     original_grace = pol.GC_GRACE_SECONDS
-    srv_runtime_module = sys.modules["hyperbox_mcp.llm_sandbox_runtime"]
-    srv_runtime_module.GC_GRACE_SECONDS = 0.0
+    pol.GC_GRACE_SECONDS = 0.0
     try:
         reclaimed = srv.collect_garbage()
     finally:
-        srv_runtime_module.GC_GRACE_SECONDS = original_grace
+        pol.GC_GRACE_SECONDS = original_grace
 
     check("GC reclaimed the orphan", oid in reclaimed, f"reclaimed={reclaimed}")
     check(

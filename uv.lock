@@ -641,17 +641,19 @@ wheels = [
 
 [[package]]
 name = "hyperbox-mcp"
-version = "0.2.1"
+version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastmcp" },
     { name = "llm-sandbox", extra = ["docker", "podman"] },
+    { name = "rich" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "fastmcp", specifier = ">=4.0.2,<5" },
     { name = "llm-sandbox", extras = ["docker", "podman"], specifier = ">=0.3.44,<0.4" },
+    { name = "rich", specifier = ">=13" },
 ]
 
 [[package]]

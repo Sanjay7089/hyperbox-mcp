@@ -12,7 +12,9 @@ import the other to learn what a sandbox is allowed to do.
 
 from __future__ import annotations
 
+import json
 import os
+import time
 from pathlib import Path
 
 # --- what we promise we can deliver -------------------------------------
@@ -49,41 +51,106 @@ _BUILTIN_ENVIRONMENTS: dict[str, str] = {
     "python": "ghcr.io/vndee/sandbox-python-311-bullseye:latest",
 }
 
-_ENV_DIR = Path.home() / ".hyperbox" / "environments"
+def env_dir() -> Path:
+    """Where locally built environments live.
+
+    Resolved per call and overridable with HYPERBOX_ENV_DIR, mirroring
+    HYPERBOX_STATE_DIR. Two acceptance runs against different runtimes
+    otherwise share this directory and each sees environments the other
+    built, which reads as a failure in whichever ran second.
+    """
+    override = os.environ.get("HYPERBOX_ENV_DIR")
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".hyperbox" / "environments"
+
+
 _env_cache: dict[str, str] | None = None
 _env_mtime: float = 0.0
+_env_root: Path | None = None
+
+#: How long a directory's mtime stays untrusted after the moment it records.
+#:
+#: The cache is invalidated by the mtime changing, which assumes the
+#: filesystem records a different mtime for two writes a moment apart. On
+#: Windows a directory's timestamp is coarse enough that it does not: a
+#: `hyperbox build` finishing within one tick of the server's last resolution
+#: leaves the mtime identical, so the stale map is served and the new
+#: environment stays invisible until something else touches the directory —
+#: which is the one promise call-time resolution exists to keep.
+#:
+#: So an mtime is trusted only once it is old enough that no later write could
+#: still share its tick. Inside the window every call re-scans, which is
+#: exactly the moment a re-scan is wanted; a server that has been up for hours
+#: sees an old mtime and still pays one stat(). Reading st_mtime_ns instead
+#: would not help — the value the filesystem records is the problem, not the
+#: precision we read it at.
+_MTIME_SETTLE_SECONDS = 2.0
+
+
+def _image_from_manifest(directory: Path) -> str | None:
+    """The image an environment's manifest names, if it has one.
+
+    A pulled image has no Dockerfile and no predictable tag, so the
+    directory alone stopped being able to say what to run. An unreadable
+    manifest returns None rather than raising: one corrupt environment must
+    not make every other one unresolvable.
+    """
+    manifest = directory / "env.json"
+    if not manifest.is_file():
+        return None
+    try:
+        return json.loads(manifest.read_text(encoding="utf-8")).get("image") or None
+    except (OSError, json.JSONDecodeError):
+        return None
 
 
 def environments() -> dict[str, str]:
     """Resolve the environment map, cached on the environment directory's mtime.
 
     Built-ins are always present. A custom environment appears as soon as
-    its directory holds a Dockerfile — no server restart needed.
+    its directory holds a Dockerfile — no server restart needed. A mtime
+    younger than _MTIME_SETTLE_SECONDS is re-scanned rather than trusted;
+    see the constant for why an unchanged mtime is not proof of no change.
 
     Always returns a fresh dict: callers must never be handed the cache
     itself, or a caller that mutates the result corrupts every later one.
     """
-    global _env_cache, _env_mtime
+    global _env_cache, _env_mtime, _env_root
 
-    if not _ENV_DIR.exists():
+    directory = env_dir()
+    if directory != _env_root:
+        # The location moved (a test isolating itself, an override set
+        # after import). A cache keyed only on mtime would happily serve
+        # the previous directory's contents.
+        _env_cache, _env_mtime, _env_root = None, 0.0, directory
+
+    if not directory.exists():
         return dict(_BUILTIN_ENVIRONMENTS)
 
     try:
-        current_mtime = _ENV_DIR.stat().st_mtime
+        current_mtime = directory.stat().st_mtime
     except OSError:
         # An unreadable environment directory is not a reason to fail a
         # sandbox that asked for a built-in.
         return dict(_BUILTIN_ENVIRONMENTS)
 
-    if _env_cache is not None and current_mtime == _env_mtime:
+    settled = time.time() - current_mtime > _MTIME_SETTLE_SECONDS
+    if _env_cache is not None and current_mtime == _env_mtime and settled:
         return dict(_env_cache)
 
     result = dict(_BUILTIN_ENVIRONMENTS)
-    for item in sorted(_ENV_DIR.iterdir()):
-        if item.is_dir() and (item / "Dockerfile").exists():
+    for item in sorted(directory.iterdir()):
+        if not item.is_dir() or item.name in result:
             # A built-in name is never shadowed by a local directory.
-            if item.name not in result:
-                result[item.name] = f"hyperbox-local/{item.name}:latest"
+            continue
+        image = _image_from_manifest(item)
+        if image is None and (item / "Dockerfile").exists():
+            # v0.2 directories have no manifest. The tag it would have
+            # produced is still the right answer, so they keep working.
+            image = f"hyperbox-local/{item.name}:latest"
+        if image:
+            result[item.name] = image
     _env_cache = result
     _env_mtime = current_mtime
     return dict(result)
@@ -136,6 +203,18 @@ CPU_QUOTA = int(CPU_PERIOD * CPUS)
 #: what the tools point callers at.
 TMPFS_SIZE = "64m"
 TMPFS_PATHS = ("/work",)
+
+#: Where submitted code is written. Deliberately NOT under TMPFS_PATHS.
+#:
+#: The engine's archive API cannot write through a tmpfs mount on Docker:
+#: it writes into the image layer underneath, where the mount shadows it,
+#: and returns 200 having done nothing observable. Podman writes through,
+#: so this is invisible on one engine and fatal on the other -- a silent
+#: no-op of exactly the kind the read-back checks exist to catch.
+#:
+#: /work stays the caller's scratch space. Code running inside the sandbox
+#: writes there normally; only the archive API cannot.
+CODE_DIR = "/sandbox"
 
 #: Blocks setuid/setgid escalation inside the container. Safe on every
 #: image; unlike cap_drop it does not interfere with the workdir chown

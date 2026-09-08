@@ -31,6 +31,7 @@ import uuid
 
 sys.path.insert(0, "src")
 
+from hyperbox_mcp import engine, errors  # noqa: E402
 from hyperbox_mcp import llm_sandbox_runtime as lsr  # noqa: E402
 from hyperbox_mcp import server  # noqa: E402
 from hyperbox_mcp.runtime import Runtime  # noqa: E402
@@ -67,6 +68,27 @@ SNIPPETS: dict[str, dict] = {
         "broken": "raise 'deliberately broken'",
         "spin": "loop do end",
     },
+    "bash": {
+        "hello": f"echo '{MARKER}'",
+        "write": f"echo 42 > {STATE_FILE}",
+        "read": f"cat {STATE_FILE}",
+        "broken": "echo 'deliberately broken' >&2; exit 1",
+        "spin": "while true; do :; done",
+    },
+    "java": {
+        "hello": 'public class Main { public static void main(String[] a) '
+                 '{ System.out.println("' + MARKER + '"); } }',
+        "write": 'import java.nio.file.*;\npublic class Main { public static '
+                 'void main(String[] a) throws Exception { Files.write('
+                 'Paths.get("' + STATE_FILE + '"), "42".getBytes()); } }',
+        "read": 'import java.nio.file.*;\npublic class Main { public static '
+                'void main(String[] a) throws Exception { System.out.println('
+                'new String(Files.readAllBytes(Paths.get("' + STATE_FILE + '")))); } }',
+        "broken": 'public class Main { public static void main(String[] a) '
+                  '{ throw new RuntimeException("deliberately broken"); } }',
+        "spin": 'public class Main { public static void main(String[] a) '
+                '{ while (true) {} } }',
+    },
     "go": {
         "hello": 'package main\nimport "fmt"\nfunc main() { fmt.Println("'
         + MARKER
@@ -83,6 +105,12 @@ SNIPPETS: dict[str, dict] = {
 }
 
 results: list[tuple[str, bool, str]] = []
+
+
+def skip(name: str, reason: str) -> None:
+    """A case that cannot run here. Never counted as a pass."""
+    print(f"SKIP  {name}", flush=True)
+    print(f"        {reason}")
 
 
 def check(name: str, condition: bool, detail: str = "") -> None:
@@ -109,13 +137,17 @@ def main() -> int:
     snip = SNIPPETS[language]
     print(f"--- {language} on {backend} ---")
 
-    rt: Runtime = lsr.LLMSandboxRuntime()
+    # Whichever runtime is configured, so one suite covers both. The
+    # point of the overlap release is that the SAME acceptance bar is
+    # applied to each; a suite hardcoded to one of them cannot do that.
+    rt: Runtime = server.select_runtime()
+    print(f"--- runtime: {type(rt).__name__} ---", flush=True)
 
     # 0. Invalid inputs fail fast, before any container is created.
     try:
         rt.create(language="cobol", backend=backend, sandbox_id=new_id())
         check("invalid language raises before container creation", False)
-    except lsr.UnsupportedLanguageError:
+    except errors.UnsupportedLanguageError:
         check("invalid language raises before container creation", True)
 
     # 1. Create a persistent sandbox.
@@ -169,13 +201,109 @@ def main() -> int:
         str(broken),
     )
 
+    # 4b. Every failure is structured, and still readable by a v0.2 client.
+    #
+    #     The caller is usually a model that will read the error and
+    #     retry, so a code it can branch on and a fix it can act on are
+    #     worth more than prose. `error_message` carries the old bare
+    #     string for one release, because every client parsing that shape
+    #     would otherwise break on the day this changed.
+    # FastMCP may hand back the plain function or a wrapper; take
+    # whichever is callable rather than assuming.
+    run_fn = getattr(server.run, "fn", server.run)
+
+    class _Ctx:
+        """The Context a real client injects. run() reports progress on it
+        so a long call is not silence; here nothing is listening."""
+
+        async def report_progress(self, *a, **k):
+            return None
+
+    def call_run(**kwargs):
+        return asyncio.run(run_fn(_Ctx(), **kwargs))
+
+    bad = call_run(sandbox_id="../etc/passwd", code="x")
+    payload = bad.get("error")
+    check(
+        "errors carry a machine-readable code and a compat string",
+        isinstance(payload, dict)
+        and payload.get("code") == "INVALID_INPUT"
+        and bad.get("error_message") == payload.get("message"),
+        f"code={payload.get('code') if isinstance(payload, dict) else payload!r}",
+    )
+    gone = call_run(sandbox_id="000000000000", code="print(1)")
+    gone_payload = gone.get("error", {})
+    check(
+        "an unusable sandbox says so with a code and a next step",
+        gone_payload.get("code") == "SANDBOX_STALE" and bool(gone_payload.get("fix")),
+        f"code={gone_payload.get('code')} fix={gone_payload.get('fix', '')[:48]!r}",
+    )
+
     # 5. Timeout — a structured failure, not a crash and not a silent
     #    success. timed_out must actually be set, or the field is a lie.
     timed = rt.run(handle, snip["spin"], timeout=5)
+    # The property, not one runtime's phrasing. This asserted the literal
+    # word "Timeout", which happened to appear in llm-sandbox's exception
+    # name and not in the native runtime's plainer "Timed out after 5s" --
+    # so a correct implementation failed a test that was measuring
+    # vocabulary.
     check(
         "timeout: not success + timed_out set + reason in stderr",
-        (not timed.success) and timed.timed_out and "Timeout" in timed.stderr,
+        (not timed.success)
+        and timed.timed_out
+        and ("timed out" in timed.stderr.lower() or "timeout" in timed.stderr.lower()),
         str(timed),
+    )
+
+    # 5a. And the timeout has to actually STOP it.
+    #
+    #     Returning a timeout while the code keeps running is the failure
+    #     this replaced: the backend's own timeout is a host-side
+    #     thread.join, and the container-level cancellation its docstring
+    #     promises is a no-op. `while True: pass` went on consuming the
+    #     sandbox's whole CPU ceiling until the sandbox was destroyed, and
+    #     nothing in this suite noticed, because asserting that the CALL
+    #     returned says nothing about whether the WORK stopped.
+    #
+    #     Read from /proc with the interpreter that is PID 1 in these
+    #     images: `ps` lives in procps, which the slim images do not ship,
+    #     so a check that shells out to it would pass by finding nothing
+    #     for the wrong reason.
+    survivors = ""
+    try:
+        survivors = " ".join(rt.running_code_pids(handle))
+    except Exception as exc:  # noqa: BLE001
+        survivors = f"could not ask the container: {exc}"
+    check(
+        "timeout: the code is actually dead, not merely abandoned",
+        survivors == "",
+        f"submitted-code PIDs still running: {survivors or 'none'}",
+    )
+
+    # 5a-ii. Killing it must not have unsealed it. The fallback path
+    #        restarts the container, and a restart that silently restored
+    #        the default network would hand back a sandbox described as
+    #        sealed and connected to the internet.
+    # Asked of the engine, not of either runtime's bookkeeping, so the
+    # answer means the same thing whichever one is under test.
+    container = engine.get_container(handle.backend, handle.meta["container_ref"])
+    container.reload()
+    attached = list(
+        ((container.attrs.get("NetworkSettings") or {}).get("Networks") or {})
+    )
+    check(
+        "timeout: the sandbox is still sealed afterwards",
+        attached == [],
+        f"networks attached after the timeout: {attached or 'none'}",
+    )
+
+    # 5a-iii. And still usable — a timeout must cost the run, not the
+    #         sandbox.
+    after = rt.run(handle, snip["hello"], timeout=30)
+    check(
+        "timeout: the sandbox still works afterwards",
+        after.success and MARKER in after.stdout,
+        str(after),
     )
 
     # 5b. The startup output check runs ONCE per sandbox and does not
@@ -183,7 +311,7 @@ def main() -> int:
     #     session, which is what triggers the check — so a guard that is
     #     set after the call instead of before it recurses until the
     #     stack gives out. That was a real failure; this is its test.
-    probe = lsr.LLMSandboxRuntime()
+    probe = lsr.LLMSandboxRuntime()  # this case inspects llm-sandbox internals
     calls = {"n": 0}
     original = probe._assert_results_round_trip
 
@@ -194,17 +322,21 @@ def main() -> int:
     probe._assert_results_round_trip = counted
     probe_handle = None
     try:
+        # Always python: this case is about the output check not
+        # recursing, which is a property of the guard rather than of any
+        # language, and llm-sandbox supports only python anyway.
         probe_handle = probe.create(
-            language=language, backend=backend, sandbox_id=new_id()
+            language="python", backend=backend, sandbox_id=new_id()
         )
         check(
             "creating a sandbox does not pay for the output check",
             calls["n"] == 0,
             f"round-trip checks during create: {calls['n']}",
         )
-        first = probe.run(probe_handle, snip["hello"])
+        probe_code = SNIPPETS["python"]["hello"]
+        first = probe.run(probe_handle, probe_code)
         after_first = calls["n"]
-        probe.run(probe_handle, snip["hello"])
+        probe.run(probe_handle, probe_code)
         check(
             "the output check runs exactly once, on first use, without recursing",
             after_first == 1 and calls["n"] == 1 and first.success,
@@ -241,6 +373,43 @@ def main() -> int:
         f"dropped={eng.is_stale_connection(dropped)} "
         f"down={eng.is_stale_connection(down)}",
     )
+
+    # 5d. The seal proof must be able to FAIL.
+    #
+    #     A guard that has never been seen to reject anything is a
+    #     hypothesis. Stub the seal to a no-op and creation must refuse:
+    #     a sandbox described as isolated while it can reach the internet
+    #     is the worst outcome available here, so it is destroyed rather
+    #     than returned with a warning.
+    if hasattr(rt, "_assert_network_sealed"):
+        unsealed = type(rt)()
+        unsealed._seal = lambda handle: None
+        leaked_handle = None
+        try:
+            leaked_handle = unsealed.create(
+                language="python", backend=backend, sandbox_id=new_id()
+            )
+            refused = False
+        except errors.NetworkLeakError:
+            refused = True
+        except Exception:  # noqa: BLE001 - any other failure is not the point
+            refused = False
+        finally:
+            if leaked_handle is not None:
+                try:
+                    unsealed.destroy(leaked_handle)
+                except Exception:  # noqa: BLE001
+                    pass
+        check(
+            "an unsealed sandbox is refused, not handed back",
+            refused,
+            "NETWORK_LEAK when the seal is stubbed out",
+        )
+    else:
+        skip(
+            "an unsealed sandbox is refused, not handed back",
+            "this runtime has no create-time seal proof.",
+        )
 
     # 6. Destroy, then destroy again — idempotent.
     rt.destroy(handle)
@@ -388,7 +557,8 @@ async def _check_tool_layer(language: str, backend: str) -> None:
         ).data
         check(
             "unknown sandbox_id returns a readable error",
-            "error" in unknown and "No sandbox" in unknown["error"],
+            "error" in unknown
+            and "No sandbox" in unknown.get("error_message", ""),
             str(unknown)[:90],
         )
 
