@@ -243,7 +243,8 @@ class EngineClient:
         status alone truncates it.
         """
         reader = FrameReader()
-        idle = 0.0
+        started = time.monotonic()
+        finished_at: float | None = None
         while True:
             waiting = peek()
             if waiting:
@@ -256,16 +257,29 @@ class EngineClient:
                             on_chunk(STDOUT, text)
                         for text in reader.stderr[before[1]:]:
                             on_chunk(STDERR, text)
-                    idle = 0.0
+                    # More may follow, and the exec is plainly not done
+                    # settling, so the trailing window starts over.
+                    finished_at = None
                     continue
             if is_finished():
-                # Give late bytes a moment to land before calling it done.
-                if idle >= TRAILING_READ_SECONDS:
+                # The trailing window is measured from the moment the exec
+                # FINISHED, not from however long the reader has been idle.
+                #
+                # Measured: a program that sleeps for four seconds and then
+                # prints had accumulated four seconds of idle time, so the
+                # instant it exited the window was already spent and the
+                # loop broke before reading the output that had just
+                # arrived — an empty result with exit code 0, which is the
+                # exact failure the output canary exists to catch.
+                if finished_at is None:
+                    finished_at = time.monotonic()
+                elif time.monotonic() - finished_at >= TRAILING_READ_SECONDS:
                     break
-            elif idle >= self.timeout:
-                break
+            else:
+                finished_at = None
+                if time.monotonic() - started >= self.timeout:
+                    break
             time.sleep(POLL_SECONDS)
-            idle += POLL_SECONDS
         return reader.result()
 
     def stream_frames(
