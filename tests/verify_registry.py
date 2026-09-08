@@ -152,12 +152,28 @@ async def main() -> int:
 
     run_result: dict = {}
 
+    class _Ctx:
+        """What a real client injects. run() reports progress on it so a
+        long call is not silence; nothing is listening here."""
+
+        async def report_progress(self, *a, **k):
+            return None
+
     def slow_run() -> None:
+        # run() is a coroutine function: it offloads to a worker thread and
+        # reports progress while it waits. Calling it without awaiting
+        # returns a coroutine that never executes, so the registry lock is
+        # never taken -- which is precisely the protection this case
+        # exists to verify.
+        run_fn = getattr(srv.run, "fn", srv.run)
         run_result.update(
-            srv.run(
-                sandbox_id=sid,
-                code="import time; time.sleep(4); print('still here')",
-                timeout=30,
+            asyncio.run(
+                run_fn(
+                    _Ctx(),
+                    sandbox_id=sid,
+                    code="import time; time.sleep(4); print('still here')",
+                    timeout=30,
+                )
             )
         )
 
