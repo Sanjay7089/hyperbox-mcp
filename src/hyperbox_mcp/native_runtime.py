@@ -132,6 +132,23 @@ class NativeRuntime:
             lambda name: api.connect_network(client, name, cid),
         )
 
+    def running_code_pids(self, handle: SandboxHandle) -> list[str]:
+        """PIDs inside the sandbox still running submitted code.
+
+        Part of the Runtime surface rather than a private helper, because
+        it is what proves a timeout actually stopped something — and a
+        check that cannot be asked of both runtimes cannot compare them.
+        """
+        return self._running_code(self._client(handle.backend), self._ref(handle))
+
+    def image_for(self, language: str, environment: str | None = None) -> str:
+        """The image a sandbox would start from. Used to warn about a pull
+        before one begins, so a cold start reads as a download rather than
+        a hang."""
+        if environment:
+            return policy.environments().get(environment, "")
+        return self._spec(language)["image"]
+
     # --- Runtime protocol ---------------------------------------------
 
     def create(

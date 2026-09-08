@@ -26,6 +26,7 @@ import asyncio
 import json
 import logging
 import logging.handlers
+import os
 import sys
 import threading
 import time
@@ -37,14 +38,14 @@ from fastmcp import Context, FastMCP
 
 from hyperbox_mcp import engine, errors, policy, validate
 from hyperbox_mcp.engine import EngineUnavailableError
-from hyperbox_mcp.llm_sandbox_runtime import (
-    LLMSandboxRuntime,
-    SandboxRuntimeError,
-    UnsupportedBackendError,
-    UnsupportedEnvironmentError,
-    UnsupportedLanguageError,
-    image_for,
+from hyperbox_mcp.errors import (
+    UnknownEnvironmentError as UnsupportedEnvironmentError,
 )
+from hyperbox_mcp.errors import (
+    UnsupportedBackendError,
+    UnsupportedLanguageError,
+)
+from hyperbox_mcp.sandbox_ops import SandboxRuntimeError
 from hyperbox_mcp.registry import Registry
 from hyperbox_mcp.runtime import Runtime, SandboxHandle
 from hyperbox_mcp.validate import InvalidInput
@@ -100,9 +101,41 @@ def _setup_logging() -> None:
 
 mcp = FastMCP("HyperBox")
 
-# The one place a concrete backend is chosen. Swap this line to change
-# execution engines; nothing below it knows or cares which Runtime it is.
-_runtime: Runtime = LLMSandboxRuntime()
+#: Which execution backend to use. `llm-sandbox` is the default through
+#: the overlap release; `native` speaks the engine's REST API directly and
+#: takes no execution dependency at all.
+#:
+#: An environment variable rather than a config file, because the point of
+#: the overlap is that one machine can run either and compare. It becomes
+#: the default in a later release, and this switch goes when llm-sandbox
+#: does.
+RUNTIME_CHOICES = ("llm-sandbox", "native")
+
+
+def select_runtime(choice: str | None = None) -> Runtime:
+    """Build the configured Runtime.
+
+    Imports are deliberately inside the branches: importing the
+    llm-sandbox runtime pulls in llm_sandbox itself, and a server running
+    natively should not load an execution backend it will never use.
+    """
+    name = (choice or os.environ.get("HYPERBOX_RUNTIME") or "llm-sandbox").strip().lower()
+    if name == "native":
+        from hyperbox_mcp.native_runtime import NativeRuntime
+
+        return NativeRuntime()
+    if name in ("llm-sandbox", "llm_sandbox", "llmsandbox"):
+        from hyperbox_mcp.llm_sandbox_runtime import LLMSandboxRuntime
+
+        return LLMSandboxRuntime()
+    raise ValueError(
+        f"Unknown HYPERBOX_RUNTIME '{name}'. Choose one of: "
+        f"{', '.join(RUNTIME_CHOICES)}."
+    )
+
+
+# The one place a concrete backend is chosen.
+_runtime: Runtime = select_runtime()
 
 # Sandbox ownership lives in a durable registry shared by every server
 # process, NOT in this process's memory. That is what lets a restarted
@@ -388,9 +421,7 @@ async def create_sandbox(
     # download rather than a hang.
     try:
         wanted_image = (
-            policy.environments()[environment]
-            if environment
-            else image_for(language)
+            _runtime.image_for(language, environment)
         )
         cold = not await asyncio.to_thread(
             engine.image_present, resolved, wanted_image

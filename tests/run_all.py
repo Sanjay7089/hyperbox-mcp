@@ -73,7 +73,12 @@ def managed_containers(backend: str) -> list[str]:
 
 def main() -> int:
     backend = sys.argv[1] if len(sys.argv) > 1 else "docker"
-    print(f"=== HyperBox acceptance suites on {backend} ===\n", flush=True)
+    runtime = os.environ.get("HYPERBOX_RUNTIME", "llm-sandbox")
+    print(
+        f"=== HyperBox acceptance suites on {backend} "
+        f"(runtime: {runtime}) ===\n",
+        flush=True,
+    )
 
     others = other_servers()
     if others:

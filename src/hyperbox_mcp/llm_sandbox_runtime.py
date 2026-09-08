@@ -355,6 +355,22 @@ class LLMSandboxRuntime:
             self._canary_verified.discard(sandbox_id)
             raise
 
+    def running_code_pids(self, handle: SandboxHandle) -> list[str]:
+        """PIDs inside the sandbox still running submitted code. See the
+        NativeRuntime docstring for why this is public."""
+        try:
+            return self._sandbox_processes(self._container(handle))
+        except Exception:  # noqa: BLE001 - a check, not an operation
+            return []
+
+    def image_for(self, language: str, environment: str | None = None) -> str:
+        """The image a sandbox would start from, as this backend resolves
+        it. Read from llm-sandbox rather than hardcoded, so it cannot drift
+        from what actually gets pulled."""
+        if environment:
+            return policy.environments().get(environment, "")
+        return image_for(language)
+
     # --- Runtime protocol ---------------------------------------------
 
     def create(

@@ -31,7 +31,7 @@ import uuid
 
 sys.path.insert(0, "src")
 
-from hyperbox_mcp import engine  # noqa: E402
+from hyperbox_mcp import engine, errors  # noqa: E402
 from hyperbox_mcp import llm_sandbox_runtime as lsr  # noqa: E402
 from hyperbox_mcp import server  # noqa: E402
 from hyperbox_mcp.runtime import Runtime  # noqa: E402
@@ -110,13 +110,17 @@ def main() -> int:
     snip = SNIPPETS[language]
     print(f"--- {language} on {backend} ---")
 
-    rt: Runtime = lsr.LLMSandboxRuntime()
+    # Whichever runtime is configured, so one suite covers both. The
+    # point of the overlap release is that the SAME acceptance bar is
+    # applied to each; a suite hardcoded to one of them cannot do that.
+    rt: Runtime = server.select_runtime()
+    print(f"--- runtime: {type(rt).__name__} ---", flush=True)
 
     # 0. Invalid inputs fail fast, before any container is created.
     try:
         rt.create(language="cobol", backend=backend, sandbox_id=new_id())
         check("invalid language raises before container creation", False)
-    except lsr.UnsupportedLanguageError:
+    except errors.UnsupportedLanguageError:
         check("invalid language raises before container creation", True)
 
     # 1. Create a persistent sandbox.
@@ -200,9 +204,16 @@ def main() -> int:
     # 5. Timeout — a structured failure, not a crash and not a silent
     #    success. timed_out must actually be set, or the field is a lie.
     timed = rt.run(handle, snip["spin"], timeout=5)
+    # The property, not one runtime's phrasing. This asserted the literal
+    # word "Timeout", which happened to appear in llm-sandbox's exception
+    # name and not in the native runtime's plainer "Timed out after 5s" --
+    # so a correct implementation failed a test that was measuring
+    # vocabulary.
     check(
         "timeout: not success + timed_out set + reason in stderr",
-        (not timed.success) and timed.timed_out and "Timeout" in timed.stderr,
+        (not timed.success)
+        and timed.timed_out
+        and ("timed out" in timed.stderr.lower() or "timeout" in timed.stderr.lower()),
         str(timed),
     )
 
@@ -220,18 +231,9 @@ def main() -> int:
     #     images: `ps` lives in procps, which the slim images do not ship,
     #     so a check that shells out to it would pass by finding nothing
     #     for the wrong reason.
-    container = engine.get_container(handle.backend, handle.meta["container_ref"])
     survivors = ""
     try:
-        result = container.exec_run(
-            ["python3", "-c", lsr._LIST_SANDBOX_PIDS]
-        )
-        raw = result[1] if isinstance(result, tuple) else result.output
-        # Demux: podman-py returns the raw framed stream where docker-py
-        # returns plain bytes. Decoding podman's directly gives a string of
-        # 8-byte headers that contains no digits, so this check would report
-        # "nothing running" without ever having read the container.
-        survivors = engine.demux_frames(bytes(raw or b""))[0].strip()
+        survivors = " ".join(rt.running_code_pids(handle))
     except Exception as exc:  # noqa: BLE001
         survivors = f"could not ask the container: {exc}"
     check(
@@ -244,6 +246,9 @@ def main() -> int:
     #        restarts the container, and a restart that silently restored
     #        the default network would hand back a sandbox described as
     #        sealed and connected to the internet.
+    # Asked of the engine, not of either runtime's bookkeeping, so the
+    # answer means the same thing whichever one is under test.
+    container = engine.get_container(handle.backend, handle.meta["container_ref"])
     container.reload()
     attached = list(
         ((container.attrs.get("NetworkSettings") or {}).get("Networks") or {})
@@ -268,7 +273,7 @@ def main() -> int:
     #     session, which is what triggers the check — so a guard that is
     #     set after the call instead of before it recurses until the
     #     stack gives out. That was a real failure; this is its test.
-    probe = lsr.LLMSandboxRuntime()
+    probe = lsr.LLMSandboxRuntime()  # this case inspects llm-sandbox internals
     calls = {"n": 0}
     original = probe._assert_results_round_trip
 
