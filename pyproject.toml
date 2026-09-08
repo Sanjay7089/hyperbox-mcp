@@ -37,6 +37,11 @@ classifiers = [
 dependencies = [
     "fastmcp>=4.0.2,<5",
     "llm-sandbox[docker,podman]>=0.3.44,<0.4",
+    # Progress rendering imports this lazily and falls back to plain
+    # print if it is missing, so an undeclared rich degrades invisibly
+    # rather than failing. It arrived only as someone else's transitive
+    # dependency until now.
+    "rich>=13",
 ]
 
 [project.urls]
