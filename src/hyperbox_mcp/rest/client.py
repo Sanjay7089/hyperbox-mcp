@@ -30,6 +30,7 @@ depends on it.
 from __future__ import annotations
 
 import json
+import time
 from typing import Any, Callable, Iterator
 
 from hyperbox_mcp import errors
@@ -37,6 +38,12 @@ from hyperbox_mcp.rest.transport import connection_for
 
 #: What we would like to speak. Clamped into whatever the engine supports.
 PREFERRED_API = "1.44"
+
+#: How long to keep reading after the engine says an exec has finished.
+#: Output written just before exit is still in flight when the status
+#: flips, and stopping the moment it does truncates it.
+TRAILING_READ_SECONDS = 0.4
+POLL_SECONDS = 0.02
 
 #: Docker's exec framing: [stream, 0, 0, 0, size:uint32be] then payload.
 FRAME_HEADER = 8
@@ -227,11 +234,46 @@ class EngineClient:
         finally:
             conn.close()
 
+    def _read_until_done(self, response, peek, is_finished, on_chunk):
+        """Drain a hijacked stream that will never signal EOF.
+
+        Ends when the engine reports the exec finished AND nothing further
+        arrives. The second half matters: output written just before exit
+        is still in flight when the status flips, and stopping on the
+        status alone truncates it.
+        """
+        reader = FrameReader()
+        idle = 0.0
+        while True:
+            waiting = peek()
+            if waiting:
+                chunk = response.read(min(waiting, 65536))
+                if chunk:
+                    before = (len(reader.stdout), len(reader.stderr))
+                    reader.feed(chunk)
+                    if on_chunk:
+                        for text in reader.stdout[before[0]:]:
+                            on_chunk(STDOUT, text)
+                        for text in reader.stderr[before[1]:]:
+                            on_chunk(STDERR, text)
+                    idle = 0.0
+                    continue
+            if is_finished():
+                # Give late bytes a moment to land before calling it done.
+                if idle >= TRAILING_READ_SECONDS:
+                    break
+            elif idle >= self.timeout:
+                break
+            time.sleep(POLL_SECONDS)
+            idle += POLL_SECONDS
+        return reader.result()
+
     def stream_frames(
         self,
         path: str,
         body: dict,
         on_chunk: Callable[[int, str], None] | None = None,
+        is_finished: Callable[[], bool] | None = None,
     ) -> tuple[str, str]:
         """POST and demultiplex a hijacked exec stream into (stdout, stderr).
 
@@ -260,6 +302,15 @@ class EngineClient:
                     context={"endpoint": self.target},
                 )
             reader = FrameReader()
+            # Podman on Windows does not hang up when a hijacked exec ends,
+            # so reading to EOF never returns. Where the transport can say
+            # whether bytes are waiting, use that plus the engine's own
+            # "is it still running?" instead of waiting for a close that is
+            # not coming. On a socket this is unused and the plain read-to-
+            # EOF path applies.
+            peek = getattr(conn.sock, "available", None)
+            if peek is not None and is_finished is not None:
+                return self._read_until_done(response, peek, is_finished, on_chunk)
             while True:
                 chunk = response.read(8192)
                 if not chunk:

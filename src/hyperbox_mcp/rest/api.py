@@ -153,10 +153,22 @@ def exec_create(client: EngineClient, cid: str, argv: list[str]) -> str:
     return client.request("POST", f"/containers/{cid}/exec", body)["Id"]
 
 
+def exec_running(client: EngineClient, exec_id: str) -> bool:
+    try:
+        return bool(client.request("GET", f"/exec/{exec_id}/json").get("Running"))
+    except Exception:  # noqa: BLE001 - unknown means "stop waiting"
+        return False
+
+
 def exec_start(client: EngineClient, exec_id: str) -> tuple[str, str]:
-    """Run it and return demultiplexed (stdout, stderr)."""
+    """Run it and return demultiplexed (stdout, stderr).
+
+    The completion check is passed in because some transports never see the
+    connection close — see EngineClient._read_until_done.
+    """
     return client.stream_frames(
-        f"/exec/{exec_id}/start", {"Detach": False, "Tty": False}
+        f"/exec/{exec_id}/start", {"Detach": False, "Tty": False},
+        is_finished=lambda: not exec_running(client, exec_id),
     )
 
 

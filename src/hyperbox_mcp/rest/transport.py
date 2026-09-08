@@ -106,6 +106,12 @@ if WINDOWS:
     _k32.WriteFile.restype = wintypes.BOOL
     _k32.CloseHandle.argtypes = [wintypes.HANDLE]
     _k32.CloseHandle.restype = wintypes.BOOL
+    _k32.PeekNamedPipe.argtypes = [
+        wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(wintypes.DWORD),
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    _k32.PeekNamedPipe.restype = wintypes.BOOL
     _k32.SetNamedPipeHandleState.argtypes = [
         wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD),
         ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(wintypes.DWORD),
@@ -235,6 +241,29 @@ if WINDOWS:
             # thread, which is survivable because every engine call is
             # already offloaded, but it is a real difference from POSIX.
             return None
+
+        def available(self) -> int:
+            """Bytes readable right now, without blocking.
+
+            The reason this exists: Podman on Windows does NOT close the
+            connection when a hijacked exec finishes. A socket signals the
+            end of such a stream by hanging up, so reading to EOF is the
+            normal way to consume one — and against this pipe that blocks
+            for ever. Measured: the exec completes, its output arrives, and
+            the read never returns.
+
+            So the caller needs to distinguish "no data yet" from "no more
+            data", which a blocking read cannot express. PeekNamedPipe can.
+            """
+            if self._handle is None:
+                return 0
+            avail = wintypes.DWORD(0)
+            ok = _k32.PeekNamedPipe(
+                self._handle, None, 0, None, ctypes.byref(avail), None
+            )
+            if not ok:
+                return 0
+            return avail.value
 
         def close(self) -> None:
             """Close, unless a file object is still reading from it."""
