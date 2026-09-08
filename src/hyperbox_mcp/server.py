@@ -327,10 +327,22 @@ def capabilities() -> str:
             },
             "network": {
                 "while_your_code_runs": "disabled",
-                "during_library_install": "enabled briefly, then re-sealed",
+                "when_it_is_ever_enabled": (
+                    "only while the sandbox is being created, to install the "
+                    "packages you declared, and before any of your code has "
+                    "run. It is then detached and verified unreachable — a "
+                    "TCP connection and a DNS lookup must both fail — and "
+                    "never re-attached."
+                ),
+                "declare_packages_with": "create_sandbox(packages=[...])",
                 "installable": (
                     "named packages from the default index only; flags, "
                     "URLs, paths and VCS references are refused"
+                ),
+                "deprecated": (
+                    "run(libraries=[...]) still works but re-opens the "
+                    "network mid-session; it will be refused in a future "
+                    "release"
                 ),
             },
             "filesystem": {
@@ -375,6 +387,7 @@ async def create_sandbox(
     language: str = "python",
     backend: str = "auto",
     environment: str | None = None,
+    packages: list[str] | None = None,
 ) -> dict:
     """Create a disposable container to run untrusted or unverified code in.
 
@@ -406,12 +419,24 @@ async def create_sandbox(
     lists the ones that exist. You cannot create an environment: only the
     user can, with `hyperbox build` at their terminal.
 
+    DECLARE EVERY PACKAGE YOU NEED IN `packages`. They are installed while
+    the sandbox is being built, and the network is then cut off for good —
+    so a package you did not ask for here cannot be installed later. This
+    is the only moment a sandbox can reach the internet, and it happens
+    before any of your code runs. Ask for what you need up front rather
+    than discovering it and retrying; a sandbox that turns out to be
+    missing something is cheaper to replace than to patch.
+
+    Not every language takes packages: `java` refuses them and says what to
+    do instead. `hyperbox://capabilities` lists which do.
+
     Read the `hyperbox://capabilities` resource for exact limits.
     """
     try:
         language = validate.language(language, _runtime.supported_languages())
         requested = validate.backend(backend)
         environment = validate.environment(environment)
+        packages = validate.libraries(packages)
     except InvalidInput as exc:
         return errors.to_result(exc)
 
@@ -450,13 +475,18 @@ async def create_sandbox(
         async with _heartbeat(ctx, what):
             # Offloaded: container creation blocks for seconds to minutes,
             # and must not stall the server's event loop.
-            handle = await asyncio.to_thread(
-                _runtime.create,
+            create_kwargs = dict(
                 language=language,
                 backend=resolved,
                 sandbox_id=sandbox_id,
                 environment=environment,
             )
+            # Only the native runtime provisions at create time. Passing
+            # `packages` to one that cannot honour it would silently drop
+            # them, so it is offered only where it means something.
+            if packages:
+                create_kwargs["packages"] = packages
+            handle = await asyncio.to_thread(_runtime.create, **create_kwargs)
     except (
         UnsupportedLanguageError,
         UnsupportedEnvironmentError,
@@ -480,6 +510,8 @@ async def create_sandbox(
         "language": handle.language,
         "backend": handle.backend,
         "environment": environment,
+        "packages": packages or [],
+        "network": "sealed — this sandbox cannot reach the internet",
         "next": (
             f"Call run(sandbox_id='{handle.sandbox_id}', code=...) to execute. "
             "Call destroy_sandbox when done."
@@ -519,9 +551,14 @@ def run(
     Write working files to /work: it is scratch space, size-limited, and
     discarded with the sandbox.
 
-    Your code runs with NO network access. Passing `libraries` installs
-    them in a brief, separate network-enabled step first, then re-seals
-    before your code executes; only plain package names are accepted.
+    Your code runs with NO network access.
+
+    `libraries` is DEPRECATED: declare what you need in
+    `create_sandbox(packages=[...])` instead, which installs before the
+    sandbox is sealed and keeps it sealed for its whole life. Passing it
+    here still works for now — it briefly re-opens the network, installs,
+    and re-seals — but that window is exactly what create-time
+    provisioning removes, and it will be refused in a future release.
     `timeout` is capped by the server, must be a positive number, and may
     not be null. Output is truncated past a limit, and marked when it is.
 
@@ -561,13 +598,21 @@ def run(
         # must reach the agent as something it can reason about, not as a
         # crashed tool call.
         return errors.to_result(exc)
-    return {
+    payload = {
         "stdout": _cap_output(result.stdout),
         "stderr": _cap_output(result.stderr),
         "exit_code": result.exit_code,
         "success": result.success,
         "timed_out": result.timed_out,
     }
+    if libraries:
+        payload["deprecation"] = (
+            "run(libraries=...) is deprecated and will be refused in a "
+            "future release: it re-opens the network mid-session. Declare "
+            "packages in create_sandbox(packages=[...]) instead, which "
+            "installs before the sandbox is sealed."
+        )
+    return payload
 
 
 @mcp.tool(

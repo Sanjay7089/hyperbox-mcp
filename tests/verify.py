@@ -107,6 +107,12 @@ SNIPPETS: dict[str, dict] = {
 results: list[tuple[str, bool, str]] = []
 
 
+def skip(name: str, reason: str) -> None:
+    """A case that cannot run here. Never counted as a pass."""
+    print(f"SKIP  {name}", flush=True)
+    print(f"        {reason}")
+
+
 def check(name: str, condition: bool, detail: str = "") -> None:
     results.append((name, bool(condition), detail))
     print(f"{'PASS' if condition else 'FAIL'}  {name}  {detail}", flush=True)
@@ -356,6 +362,45 @@ def main() -> int:
         f"dropped={eng.is_stale_connection(dropped)} "
         f"down={eng.is_stale_connection(down)}",
     )
+
+    # 5d. The seal proof must be able to FAIL.
+    #
+    #     A guard that has never been seen to reject anything is a
+    #     hypothesis. Stub the seal to a no-op and creation must refuse:
+    #     a sandbox described as isolated while it can reach the internet
+    #     is the worst outcome available here, so it is destroyed rather
+    #     than returned with a warning.
+    if hasattr(rt, "_assert_network_sealed"):
+        import copy as _copy  # noqa: PLC0415
+
+        unsealed = type(rt)()
+        unsealed._seal = lambda handle: None
+        leaked_handle = None
+        try:
+            leaked_handle = unsealed.create(
+                language="python", backend=backend, sandbox_id=new_id()
+            )
+            refused = False
+        except errors.NetworkLeakError:
+            refused = True
+        except Exception:  # noqa: BLE001 - any other failure is not the point
+            refused = False
+        finally:
+            if leaked_handle is not None:
+                try:
+                    unsealed.destroy(leaked_handle)
+                except Exception:  # noqa: BLE001
+                    pass
+        check(
+            "an unsealed sandbox is refused, not handed back",
+            refused,
+            "NETWORK_LEAK when the seal is stubbed out",
+        )
+    else:
+        skip(
+            "an unsealed sandbox is refused, not handed back",
+            "this runtime has no create-time seal proof.",
+        )
 
     # 6. Destroy, then destroy again — idempotent.
     rt.destroy(handle)
