@@ -21,7 +21,6 @@ from dataclasses import dataclass, field
 
 from hyperbox_mcp import engine, policy
 from hyperbox_mcp.errors import EngineError, EngineUnavailableError
-from hyperbox_mcp.llm_sandbox_runtime import LLMSandboxRuntime
 from hyperbox_mcp.registry import Registry, state_dir
 
 OK = "ok"
@@ -411,8 +410,6 @@ def check_round_trip(report: Report, backend: str) -> None:
 
 
 def run_doctor(pull: bool = False, live: bool = True) -> int:
-    import os
-
     report = Report()
     runtime = os.environ.get("HYPERBOX_RUNTIME", "native")
     print(f"HyperBox doctor  (runtime: {runtime})\n")

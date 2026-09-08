@@ -33,9 +33,7 @@ in docs/security.md.
 
 from __future__ import annotations
 
-import re
 import time
-from datetime import datetime, timezone
 
 from llm_sandbox import (
     ContainerError,
@@ -50,22 +48,8 @@ from llm_sandbox import (
 from llm_sandbox.exceptions import SandboxTimeoutError
 
 from hyperbox_mcp import engine, errors, policy, sandbox_ops
-from hyperbox_mcp.engine import ContainerGoneError, EngineUnavailableError
-from hyperbox_mcp.policy import (
-    CPU_PERIOD,
-    CPU_QUOTA,
-    GC_GRACE_SECONDS,
-    LABEL_ID,
-    LABEL_MANAGED,
-    MEM_LIMIT,
-    CPUS,
-    MEM_LIMIT_BYTES,
-    NANO_CPUS,
-    NO_NEW_PRIVILEGES,
-    PIDS_LIMIT,
-    TMPFS_PATHS,
-    TMPFS_SIZE,
-)
+from hyperbox_mcp.engine import ContainerGoneError
+from hyperbox_mcp.policy import TMPFS_PATHS
 from hyperbox_mcp.runtime import ExecResult, SandboxHandle
 
 _LANGUAGES = {

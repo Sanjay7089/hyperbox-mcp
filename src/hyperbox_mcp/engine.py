@@ -673,7 +673,7 @@ def _build_client(backend: str, cli_timeout: float = PODMAN_CLI_TIMEOUT) -> Any:
 
     if backend == "docker":
         try:
-            import docker
+            import docker  # noqa: F401 - the import IS the probe: we want its ImportError
         except ImportError as exc:  # pragma: no cover - packaging failure
             raise EngineUnavailableError(
                 "The docker client library is not installed.",
@@ -1182,7 +1182,6 @@ def resolve(preferred: str = "auto") -> Resolution:
     the behaviour `hyperbox build` was lacking when it failed outright on a
     machine with a perfectly good Podman.
     """
-    from hyperbox_mcp.rest import api
     from hyperbox_mcp.rest.client import EngineClient
 
     if preferred != "auto" and preferred not in BACKENDS:

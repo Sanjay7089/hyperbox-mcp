@@ -382,8 +382,6 @@ def main() -> int:
     #     is the worst outcome available here, so it is destroyed rather
     #     than returned with a warning.
     if hasattr(rt, "_assert_network_sealed"):
-        import copy as _copy  # noqa: PLC0415
-
         unsealed = type(rt)()
         unsealed._seal = lambda handle: None
         leaked_handle = None

@@ -15,7 +15,7 @@ is a crash on Windows rather than a degradation, so they get a test.
 from __future__ import annotations
 
 import json
-import logging.handlers
+import logging.handlers  # noqa: F401 - submodule needed for RotatingFileHandler below
 import os
 import platform
 import subprocess
