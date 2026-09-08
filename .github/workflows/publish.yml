@@ -32,9 +32,9 @@ jobs:
     name: Build distributions
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
@@ -48,7 +48,7 @@ jobs:
           python -m pip install --upgrade twine
           twine check dist/*
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: python-package-distributions
           path: dist/
@@ -63,7 +63,7 @@ jobs:
     permissions:
       id-token: write        # mandatory for trusted publishing
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: python-package-distributions
           path: dist/
@@ -88,7 +88,7 @@ jobs:
     permissions:
       id-token: write        # mandatory for trusted publishing
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: python-package-distributions
           path: dist/
@@ -103,7 +103,7 @@ jobs:
     permissions:
       contents: write        # to create a release and upload assets
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: python-package-distributions
           path: dist/
