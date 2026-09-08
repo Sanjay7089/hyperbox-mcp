@@ -644,11 +644,14 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as td:
         fake_env_dir = Path(td) / "environments"
         fake_env_dir.mkdir()
-        real_dir, real_cache, real_mtime = (
-            policy._ENV_DIR, policy._env_cache, policy._env_mtime
-        )
+        # Point the resolver at a scratch directory the supported way,
+        # rather than by rebinding a private module attribute. That
+        # attribute is gone, and reaching for it was how this case broke
+        # when the directory became configurable.
+        real_override = os.environ.get("HYPERBOX_ENV_DIR")
+        real_cache, real_mtime = policy._env_cache, policy._env_mtime
         try:
-            policy._ENV_DIR = fake_env_dir
+            os.environ["HYPERBOX_ENV_DIR"] = str(fake_env_dir)
             policy._env_cache, policy._env_mtime = None, 0.0
 
             before = policy.environments()
@@ -717,7 +720,10 @@ def main() -> int:
                 "the error names the CLI command",
             )
         finally:
-            policy._ENV_DIR = real_dir
+            if real_override is None:
+                os.environ.pop("HYPERBOX_ENV_DIR", None)
+            else:
+                os.environ["HYPERBOX_ENV_DIR"] = real_override
             policy._env_cache, policy._env_mtime = real_cache, real_mtime
 
     # --- 6f. the log rotates instead of growing without bound --------
