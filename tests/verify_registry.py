@@ -56,6 +56,18 @@ def transport() -> StdioTransport:
             "PATH": os.environ.get("PATH", ""),
             "HOME": os.path.expanduser("~"),
             "PYTHONPATH": os.path.abspath("src"),
+            # Carried through deliberately. A server subprocess that does
+            # not inherit these runs a DIFFERENT configuration from the
+            # test driving it: with the runtime unset it takes the default,
+            # so a container created by one runtime gets reattached by
+            # another and fails in a way that looks like a product bug.
+            **{
+                name: os.environ[name]
+                for name in ("HYPERBOX_RUNTIME", "HYPERBOX_STATE_DIR",
+                             "HYPERBOX_ENV_DIR", "HYPERBOX_TTL_SECONDS",
+                             "DOCKER_HOST", "CONTAINER_HOST")
+                if name in os.environ
+            },
         },
     )
 
