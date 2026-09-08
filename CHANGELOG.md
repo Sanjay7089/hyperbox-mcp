@@ -40,6 +40,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   depending on the moment. Both are gone; large outputs round-trip intact.
 - Asking for an engine that is not the one answering now reports what did
   answer, instead of claiming no engine is reachable.
+- **An environment built while the server was running could stay
+  invisible on Windows.** The environment map is cached and invalidated
+  by the environment directory's mtime changing; Windows records that
+  timestamp coarsely enough that a build finishing within one tick of
+  the previous resolution left it identical, so the stale map was
+  served. A just-written mtime is no longer taken as proof that nothing
+  changed.
+- **`hyperbox doctor` printed a traceback when no engine was
+  reachable** — the one command whose job is to explain an unhealthy
+  machine was the one that crashed on it. Every subcommand now reports
+  a deliberate failure as its message and its fix, and exits non-zero.
 
 
 ### Changed — breaking, with a migration window
@@ -70,6 +81,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   behaviour rather than a description of it.
 
 ## [0.2.2] — 2026-09-08
+
+Never tagged or published on its own; its contents ship in 0.3.0.
 
 Three defects found in production use across multiple client windows. All
 three were the same shape: the server reported success while doing nothing.

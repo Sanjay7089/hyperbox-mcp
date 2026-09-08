@@ -151,19 +151,18 @@ where no interactive user can see it, while the uninstall registry happily
 reported it installed. Pass `ALLUSERS=1 MSIINSTALLPERUSER=0` to msiexec and
 confirm the binary is where you expect.
 
-### A cloud Windows box cannot run the container suites
+### A Windows box with no container engine
 
-Worth knowing before renting one. Podman on Windows runs its Linux VM under
-WSL2, WSL2 needs nested virtualisation, and AWS provides that only on
-bare-metal instance types. On an ordinary instance WSL reports
-*"virtualisation is not enabled on this machine"* even with every feature
-enabled and `SecondLevelAddressTranslationExtensions` reporting true.
+Still worth having, and quick to set up. It proves the host-portability
+suite, the named-pipe transport (`tests/verify_named_pipe.py`, which drives a
+stub server and needs no engine), client-config generation, and the packaging
+and privilege questions above.
 
-What such a box **can** prove: the host-portability suite, the named-pipe
-transport (`tests/verify_named_pipe.py`, which uses a stub server and needs
-no engine), client-config generation, and the packaging and privilege
-questions above. Anything touching a real container needs a bare-metal
-instance or a physical machine.
+The container suites need Podman, which needs WSL2. An ordinary cloud
+instance runs it — see [Standing up a Windows test box on
+EC2](#standing-up-a-windows-test-box-on-ec2). If WSL says *"virtualisation is
+not enabled on this machine"*, that is the missing second reboot far more
+often than it is the instance type.
 
 ### The client checks the suites cannot do
 
