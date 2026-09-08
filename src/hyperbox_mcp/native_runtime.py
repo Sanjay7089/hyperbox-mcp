@@ -46,13 +46,60 @@ from hyperbox_mcp.runtime import ExecResult, SandboxHandle
 #: the sandbox's lifetime a property of whichever image was selected.
 KEEPALIVE = ["sleep", "infinity"]
 
-#: How a language is run and where its code lands.
+#: How each language is run, and how packages reach it.
+#:
+#: Official images, tagged explicitly. llm-sandbox's defaults were seven
+#: untagged images from one individual's GHCR namespace — mutable `latest`
+#: for a tool whose whole claim is containment. `install` of None means the
+#: language takes no packages, and asking for some is refused at create
+#: time rather than failing halfway through provisioning.
+#:
+#: An entry here is a promise the tool can deliver that language, so
+#: nothing joins policy.LANGUAGES until the suite passes for it against a
+#: real container.
 LANGUAGES: dict[str, dict[str, Any]] = {
     "python": {
-        "image": "ghcr.io/vndee/sandbox-python-311-bullseye:latest",
+        "image": "python:3.12-slim",
         "extension": "py",
         "argv": ["python3"],
-        "canary": "print('{marker}')",
+        "canary": "print('MARKER')",
+        "install": ["python3", "-m", "pip", "install", "--no-input"],
+    },
+    "javascript": {
+        "image": "node:22-slim",
+        "extension": "js",
+        "argv": ["node"],
+        "canary": "console.log('MARKER');",
+        "install": ["npm", "install", "--global", "--no-fund", "--no-audit"],
+    },
+    "bash": {
+        "image": "debian:bookworm-slim",
+        "extension": "sh",
+        "argv": ["bash"],
+        "canary": "echo 'MARKER'",
+        # apt needs its index refreshed first; see _install.
+        "install": ["apt-get", "install", "-y", "--no-install-recommends"],
+        "install_prelude": ["apt-get", "update", "-qq"],
+    },
+    "go": {
+        "image": "golang:1.23-bookworm",
+        "extension": "go",
+        "argv": ["go", "run"],
+        "canary": 'package main\nimport "fmt"\nfunc main() { fmt.Println("MARKER") }',
+        "install": ["go", "get"],
+        "setup": [["go", "mod", "init", "sandbox"]],
+    },
+    "java": {
+        "image": "eclipse-temurin:21-jdk",
+        "extension": "java",
+        "argv": ["java"],
+        "canary": 'public class Main { public static void main(String[] a)'
+                  ' { System.out.println("MARKER"); } }',
+        "filename": "Main",
+        # Single-file source execution. Dependency management is Maven or
+        # Gradle, which is a build system rather than a package install,
+        # so it is refused rather than half-supported.
+        "install": None,
     },
 }
 
@@ -141,6 +188,9 @@ class NativeRuntime:
         """
         return self._running_code(self._client(handle.backend), self._ref(handle))
 
+    def supported_languages(self) -> tuple[str, ...]:
+        return tuple(sorted(LANGUAGES))
+
     def image_for(self, language: str, environment: str | None = None) -> str:
         """The image a sandbox would start from. Used to warn about a pull
         before one begins, so a cold start reads as a download rather than
@@ -154,9 +204,27 @@ class NativeRuntime:
     def create(
         self, language: str, backend: str, sandbox_id: str,
         environment: str | None = None,
+        packages: list[str] | None = None,
     ) -> SandboxHandle:
+        """Create a sandbox, provision it, then sever its network for good.
+
+        The order is the whole design. Packages are installed while the
+        network is attached and BEFORE the caller has run anything, so the
+        one moment a sandbox can reach the internet is a moment it is
+        executing nothing the caller wrote. After that the network is
+        detached and PROVEN detached; from then on there is no window at
+        all.
+        """
         spec = self._spec(language)
         client = self._client(backend)
+        if packages and not spec.get("install"):
+            raise errors.InvalidInput(
+                f"{language} sandboxes cannot install packages.",
+                fix="Build an environment with the dependencies baked in: "
+                    "hyperbox build <name> --dockerfile <path>, then pass "
+                    "environment=<name>.",
+                context={"language": language},
+            )
 
         image = spec["image"]
         if environment:
@@ -168,6 +236,28 @@ class NativeRuntime:
                         "one with: hyperbox build <name> --dockerfile <path>",
                 )
             image = available[environment]
+
+        if not api.image_present(client, image):
+            # Pull rather than fail. The engine's own progress events are
+            # consumed and discarded here — the caller is an agent waiting
+            # on a tool call, and the server reports liveness separately;
+            # the CLI renders these properly.
+            last = {}
+            for event in api.pull_image(client, image):
+                if "error" in event:
+                    raise errors.ProvisionError(
+                        f"Could not pull {image}: {event['error']}",
+                        fix="Check the image name and network access to its "
+                            "registry.",
+                        context={"image": image},
+                    )
+                last = event
+            if not api.image_present(client, image):
+                raise errors.ProvisionError(
+                    f"Pulled {image} but the engine does not have it "
+                    f"({last.get('status', 'no final status')}).",
+                    context={"image": image},
+                )
 
         cid = api.create_container(client, image, sandbox_id, KEEPALIVE)
         handle = SandboxHandle(
@@ -182,7 +272,12 @@ class NativeRuntime:
                 api.inspect_container(client, cid), sandbox_id
             )
             api.run_exec(client, cid, ["mkdir", "-p", policy.CODE_DIR])
+            for step in spec.get("setup", []):
+                api.run_exec(client, cid, step)
+            if packages:
+                self._provision(handle, client, cid, spec, packages)
             self._seal(handle)
+            self._assert_network_sealed(handle, client, cid)
         except BaseException:
             try:
                 api.remove_container(client, cid)
@@ -190,6 +285,110 @@ class NativeRuntime:
                 pass
             raise
         return handle
+
+    def _provision(self, handle, client, cid, spec, packages) -> None:
+        """Install declared packages while the network is still attached."""
+        for prelude in ([spec["install_prelude"]] if spec.get("install_prelude") else []):
+            api.run_exec(client, cid, prelude)
+        code, out, err = api.run_exec(client, cid, [*spec["install"], *packages])
+        if code != 0:
+            raise errors.ProvisionError(
+                f"Could not install {', '.join(packages)}: "
+                f"{(err or out).strip()[:400]}",
+                fix="Check the package names, or build an environment with "
+                    "them baked in.",
+                context={"sandbox_id": handle.sandbox_id, "packages": packages},
+            )
+
+    #: Probes that must FAIL once a sandbox is sealed.
+    #:
+    #: Two of them, because detaching a network does not necessarily remove
+    #: the resolver the container inherited from it: /etc/resolv.conf
+    #: survives, so name resolution can keep working — or keep hanging —
+    #: after every route is gone. A TCP check alone would call that sealed.
+    _SEAL_PROBES = (
+        ("a TCP connection",
+         "import socket,sys\n"
+         "try:\n"
+         "    socket.setdefaulttimeout(3)\n"
+         "    socket.create_connection(('1.1.1.1', 443), 3).close()\n"
+         "    print('REACHED')\n"
+         "except Exception:\n"
+         "    print('blocked')\n"),
+        ("a DNS lookup",
+         "import socket\n"
+         "try:\n"
+         "    socket.setdefaulttimeout(3)\n"
+         "    socket.getaddrinfo('example.com', 80)\n"
+         "    print('REACHED')\n"
+         "except Exception:\n"
+         "    print('blocked')\n"),
+    )
+
+    #: The same two checks in shell, for images with no Python.
+    #:
+    #: /dev/tcp is a bash builtin, so it needs no binaries at all; getent
+    #: comes from libc and is present wherever a resolver is. debian-slim
+    #: ships neither python3 nor curl, so an interpreter-only probe would
+    #: fail to run and — read carelessly — look like a pass.
+    _SHELL_PROBES = (
+        ("a TCP connection",
+         ["bash", "-c",
+          "timeout 3 bash -c 'cat < /dev/tcp/1.1.1.1/443' >/dev/null 2>&1 "
+          "&& echo REACHED || echo blocked"]),
+        ("a DNS lookup",
+         ["bash", "-c",
+          "timeout 3 getent hosts example.com >/dev/null 2>&1 "
+          "&& echo REACHED || echo blocked"]),
+    )
+
+    def _seal_probes(self, client, cid) -> tuple:
+        """Whichever probe pair this image can actually run.
+
+        Chosen by asking the container, not by assuming from the language:
+        a custom environment may be built on anything.
+        """
+        try:
+            code, _, _ = api.run_exec(client, cid, ["python3", "-c", "pass"])
+        except Exception:  # noqa: BLE001
+            code = 1
+        if code == 0:
+            return tuple(
+                (what, ["python3", "-c", body]) for what, body in self._SEAL_PROBES
+            )
+        return self._SHELL_PROBES
+
+    def _assert_network_sealed(self, handle, client, cid) -> None:
+        """Prove the seal, from inside, before handing the sandbox back.
+
+        Sealing that reports success and leaves a route open is the worst
+        failure available here: the agent is told it is isolated and it is
+        not. So the claim is tested rather than asserted, and a sandbox
+        that fails is destroyed rather than returned with a warning.
+
+        Needs a Python interpreter, which every base image here has. A
+        language whose image lacks one must supply its own probe before it
+        can be promoted.
+        """
+        for what, probe in self._seal_probes(client, cid):
+            try:
+                code, out, _ = api.run_exec(client, cid, probe)
+            except Exception:  # noqa: BLE001 - cannot verify is not sealed
+                raise errors.NetworkLeakError(
+                    f"Could not verify the network seal on "
+                    f"'{handle.sandbox_id}' ({what}).",
+                    fix="Destroy this sandbox; it cannot be shown to be "
+                        "isolated.",
+                    context={"sandbox_id": handle.sandbox_id},
+                ) from None
+            if "REACHED" in out:
+                raise errors.NetworkLeakError(
+                    f"Sandbox '{handle.sandbox_id}' still reaches the network "
+                    f"after sealing: {what} succeeded.",
+                    fix="This is a bug in HyperBox, not your setup. Please "
+                        "report it with the engine and version.",
+                    context={"sandbox_id": handle.sandbox_id, "probe": what},
+                )
 
     def run(
         self, handle: SandboxHandle, code: str,
@@ -235,7 +434,12 @@ class NativeRuntime:
         """Run the code, and stop it for real if it outlives its timeout."""
         spec = self._spec(handle.language)
         run_id = uuid.uuid4().hex
-        path = f"{policy.CODE_DIR}/{run_id}.{spec['extension']}"
+        # Java's single-file mode requires the filename to match the public
+        # class, so it gets a fixed name rather than a unique one. Every
+        # run overwrites it, which is fine: runs are serialised per sandbox
+        # by the registry lock.
+        stem = spec.get("filename") or run_id
+        path = f"{policy.CODE_DIR}/{stem}.{spec['extension']}"
         pid_file = f"{policy.CODE_DIR}/{run_id}.pid"
         api.put_file(client, cid, path, code.encode())
 
@@ -344,7 +548,10 @@ class NativeRuntime:
         self._verified.add(handle.sandbox_id)
         try:
             spec = self._spec(handle.language)
-            probe = spec["canary"].format(marker=CANARY_MARKER)
+            # A literal token, replaced -- not str.format. Most languages
+            # use braces, so formatting their source as a template fails
+            # on the code rather than on the marker.
+            probe = spec["canary"].replace("MARKER", CANARY_MARKER)
             out = self.run(handle, probe, timeout=30)
             if CANARY_MARKER not in out.stdout:
                 raise errors.SandboxStaleError(

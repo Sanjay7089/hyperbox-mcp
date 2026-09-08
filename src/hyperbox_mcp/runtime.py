@@ -65,6 +65,17 @@ class Runtime(Protocol):
     through this interface — no llm-sandbox types, no docker-py objects.
     """
 
+    def supported_languages(self) -> tuple[str, ...]:
+        """Languages this runtime can actually deliver.
+
+        Asked of the runtime rather than read from a constant, because the
+        answer differs between implementations and an entry in it is a
+        promise made to a caller. A fixed list would either understate what
+        the native runtime can do or promise, on the llm-sandbox one,
+        languages it cannot run.
+        """
+        ...
+
     def create(
         self, language: str, backend: str, sandbox_id: str,
         environment: str | None = None,

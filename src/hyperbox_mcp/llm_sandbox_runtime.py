@@ -363,6 +363,9 @@ class LLMSandboxRuntime:
         except Exception:  # noqa: BLE001 - a check, not an operation
             return []
 
+    def supported_languages(self) -> tuple[str, ...]:
+        return tuple(sorted(_LANGUAGES))
+
     def image_for(self, language: str, environment: str | None = None) -> str:
         """The image a sandbox would start from, as this backend resolves
         it. Read from llm-sandbox rather than hardcoded, so it cannot drift

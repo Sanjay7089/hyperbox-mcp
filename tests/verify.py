@@ -68,6 +68,27 @@ SNIPPETS: dict[str, dict] = {
         "broken": "raise 'deliberately broken'",
         "spin": "loop do end",
     },
+    "bash": {
+        "hello": f"echo '{MARKER}'",
+        "write": f"echo 42 > {STATE_FILE}",
+        "read": f"cat {STATE_FILE}",
+        "broken": "echo 'deliberately broken' >&2; exit 1",
+        "spin": "while true; do :; done",
+    },
+    "java": {
+        "hello": 'public class Main { public static void main(String[] a) '
+                 '{ System.out.println("' + MARKER + '"); } }',
+        "write": 'import java.nio.file.*;\npublic class Main { public static '
+                 'void main(String[] a) throws Exception { Files.write('
+                 'Paths.get("' + STATE_FILE + '"), "42".getBytes()); } }',
+        "read": 'import java.nio.file.*;\npublic class Main { public static '
+                'void main(String[] a) throws Exception { System.out.println('
+                'new String(Files.readAllBytes(Paths.get("' + STATE_FILE + '")))); } }',
+        "broken": 'public class Main { public static void main(String[] a) '
+                  '{ throw new RuntimeException("deliberately broken"); } }',
+        "spin": 'public class Main { public static void main(String[] a) '
+                '{ while (true) {} } }',
+    },
     "go": {
         "hello": 'package main\nimport "fmt"\nfunc main() { fmt.Println("'
         + MARKER
@@ -284,17 +305,21 @@ def main() -> int:
     probe._assert_results_round_trip = counted
     probe_handle = None
     try:
+        # Always python: this case is about the output check not
+        # recursing, which is a property of the guard rather than of any
+        # language, and llm-sandbox supports only python anyway.
         probe_handle = probe.create(
-            language=language, backend=backend, sandbox_id=new_id()
+            language="python", backend=backend, sandbox_id=new_id()
         )
         check(
             "creating a sandbox does not pay for the output check",
             calls["n"] == 0,
             f"round-trip checks during create: {calls['n']}",
         )
-        first = probe.run(probe_handle, snip["hello"])
+        probe_code = SNIPPETS["python"]["hello"]
+        first = probe.run(probe_handle, probe_code)
         after_first = calls["n"]
-        probe.run(probe_handle, snip["hello"])
+        probe.run(probe_handle, probe_code)
         check(
             "the output check runs exactly once, on first use, without recursing",
             after_first == 1 and calls["n"] == 1 and first.success,

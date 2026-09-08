@@ -306,7 +306,10 @@ def capabilities() -> str:
     by hitting them, which costs a failed run to find out."""
     return json.dumps(
         {
-            "languages": sorted(policy.LANGUAGES),
+            # What the running runtime can deliver, not a constant: the
+            # answer differs between backends and this resource is what an
+            # agent plans against.
+            "languages": sorted(_runtime.supported_languages()),
             # Resolved per request, so an environment the user built
             # after this server started is listed without a restart.
             "environments": sorted(policy.environments()),
@@ -406,7 +409,7 @@ async def create_sandbox(
     Read the `hyperbox://capabilities` resource for exact limits.
     """
     try:
-        language = validate.language(language)
+        language = validate.language(language, _runtime.supported_languages())
         requested = validate.backend(backend)
         environment = validate.environment(environment)
     except InvalidInput as exc:

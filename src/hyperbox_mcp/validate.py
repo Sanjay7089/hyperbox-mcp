@@ -70,11 +70,18 @@ def sandbox_id(value: object) -> str:
     return candidate
 
 
-def language(value: object) -> str:
-    if not isinstance(value, str) or value.strip().lower() not in LANGUAGES:
+def language(value: object, supported: tuple[str, ...] | None = None) -> str:
+    """Validate a language against what the ACTIVE runtime can deliver.
+
+    The supported set is passed in rather than read from policy, because
+    the two runtimes differ and an entry in that set is a promise to the
+    caller. Defaults to policy.LANGUAGES so existing callers are unchanged.
+    """
+    allowed = supported if supported is not None else LANGUAGES
+    if not isinstance(value, str) or value.strip().lower() not in allowed:
         raise InvalidInput(
             f"Unsupported language '{value}'. Supported: "
-            f"{', '.join(LANGUAGES)}."
+            f"{', '.join(sorted(allowed))}."
         )
     return value.strip().lower()
 
