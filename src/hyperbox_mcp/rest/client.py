@@ -294,6 +294,13 @@ class EngineClient:
                 "POST", f"{self.api}{path}", body=payload,
                 headers={"Content-Type": "application/json"},
             )
+            # Captured BEFORE getresponse(): a hijacked reply has no
+            # length, so http.client marks it will_close and sets
+            # conn.sock to None as it hands the connection to the
+            # response. Reading it afterwards silently yields None, which
+            # is how the peek path below came to be skipped entirely and
+            # the read fell back to waiting for an EOF that never arrives.
+            sock = conn.sock
             response = conn.getresponse()
             if response.status not in (200, 101):
                 raise errors.EngineUnavailableError(
@@ -308,7 +315,7 @@ class EngineClient:
             # "is it still running?" instead of waiting for a close that is
             # not coming. On a socket this is unused and the plain read-to-
             # EOF path applies.
-            peek = getattr(conn.sock, "available", None)
+            peek = getattr(sock, "available", None)
             if peek is not None and is_finished is not None:
                 return self._read_until_done(response, peek, is_finished, on_chunk)
             while True:
