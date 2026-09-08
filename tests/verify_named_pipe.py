@@ -201,17 +201,17 @@ def main() -> int:
         finally:
             conn.close()
         out, err = demux(raw)
+        expected_out = "hyperbox_pipe_ok" + BULK + "\n"
         check(
             "a hijacked stream is read to the end, not lost at the hangup",
-            "hyperbox_pipe_ok" in out and "to-stderr" in err
-            and out.count("x") == len(BULK),
-            f"{len(raw)} bytes -> {len(out)} stdout, {len(err)} stderr "
-            f"(bulk {out.count('x')}/{len(BULK)})",
+            out == expected_out,
+            f"{len(raw)} bytes -> {len(out)}/{len(expected_out)} stdout bytes "
+            f"recovered",
         )
         check(
             "its frames demultiplex into separate streams",
-            out.strip() == "hyperbox_pipe_ok" and err.strip() == "to-stderr",
-            "stdout and stderr did not bleed into each other",
+            err.strip() == "to-stderr" and "to-stderr" not in out,
+            f"stderr={err.strip()!r}, and it did not bleed into stdout",
         )
 
         try:
