@@ -237,6 +237,25 @@ class NativeRuntime:
                 )
             image = available[environment]
 
+        if not api.image_present(client, image) and image.startswith(
+            policy.LOCAL_IMAGE_PREFIX
+        ):
+            # A locally built environment. `hyperbox build` tags both
+            # --dockerfile and --image results under this prefix, so no
+            # registry has ever heard of it and pulling can only fail --
+            # with "pull access denied ... may require 'docker login'",
+            # which sends the user looking for a credentials problem that
+            # does not exist. Say what actually happened instead.
+            raise errors.ProvisionError(
+                f"Environment '{environment}' is registered but its image "
+                f"({image}) is not on this engine. It was built locally, so "
+                "there is nowhere to pull it from.",
+                fix="Rebuild it at your terminal: hyperbox build "
+                    f"{environment} --image <ref>   (or --dockerfile <path>). "
+                    "`hyperbox envs` lists what is registered.",
+                context={"environment": environment, "image": image},
+            )
+
         if not api.image_present(client, image):
             # Pull rather than fail. The engine's own progress events are
             # consumed and discarded here — the caller is an agent waiting

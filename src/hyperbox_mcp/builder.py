@@ -126,7 +126,7 @@ def run_build(
         say(str(exc), icon="fail")
         return 1
 
-    target = f"hyperbox-local/{name}"
+    target = f"{policy.LOCAL_IMAGE_PREFIX}{name}"
     try:
         if image:
             return _pull(client, resolution, image, target, name)

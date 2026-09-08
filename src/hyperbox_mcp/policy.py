@@ -47,6 +47,12 @@ LANGUAGES = ("python",)
 # its Dockerfile does; rebuilding is `hyperbox build`, and that replaces
 # the image in place.
 
+#: Tag prefix `hyperbox build` gives everything it registers, whether
+#: built from a Dockerfile or pulled and re-tagged. An image under this
+#: prefix exists on this machine or nowhere: no registry has it, so a
+#: pull can only produce a misleading "access denied".
+LOCAL_IMAGE_PREFIX = "hyperbox-local/"
+
 _BUILTIN_ENVIRONMENTS: dict[str, str] = {
     "python": "ghcr.io/vndee/sandbox-python-311-bullseye:latest",
 }
@@ -148,7 +154,7 @@ def environments() -> dict[str, str]:
         if image is None and (item / "Dockerfile").exists():
             # v0.2 directories have no manifest. The tag it would have
             # produced is still the right answer, so they keep working.
-            image = f"hyperbox-local/{item.name}:latest"
+            image = f"{LOCAL_IMAGE_PREFIX}{item.name}:latest"
         if image:
             result[item.name] = image
     _env_cache = result

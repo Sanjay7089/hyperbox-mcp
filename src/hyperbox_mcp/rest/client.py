@@ -177,15 +177,22 @@ class EngineClient:
             payload = json.dumps(body).encode()
             headers["Content-Type"] = "application/json"
         status, raw = self._raw(method, f"{self.api}{path}", payload, headers)
-        if status == 404:
+        if status == 404 and "/containers/" in path:
+            # Only a container path. A 404 for an image is a missing
+            # image, and reporting that as CONTAINER_GONE would tell
+            # destroy_sandbox a container it never asked about is gone.
             raise errors.ContainerGoneError(
                 _message(raw) or f"{path} does not exist on this engine.",
                 context={"endpoint": self.target, "path": path},
             )
         if status not in expect:
-            raise errors.EngineUnavailableError(
+            # The engine ANSWERED. That is not an outage, and calling it
+            # one hands the caller a fix ("start the engine") that cannot
+            # work on an engine already running.
+            raise errors.EngineRefusedError(
                 f"{method} {path} returned {status}: {_message(raw)}",
-                context={"endpoint": self.target, "status": status},
+                context={"endpoint": self.target, "status": status,
+                         "path": path},
             )
         if not raw:
             return None
@@ -208,10 +215,12 @@ class EngineClient:
                          headers=headers or {})
             response = conn.getresponse()
             if response.status not in (200, 201):
-                raise errors.EngineUnavailableError(
+                # Same rule as request(): a status is an answer.
+                raise errors.EngineRefusedError(
                     f"{method} {path} returned {response.status}: "
                     f"{_message(response.read())}",
-                    context={"endpoint": self.target},
+                    context={"endpoint": self.target,
+                             "status": response.status, "path": path},
                 )
             pending = b""
             while True:
@@ -317,10 +326,12 @@ class EngineClient:
             sock = conn.sock
             response = conn.getresponse()
             if response.status not in (200, 101):
-                raise errors.EngineUnavailableError(
+                # An answer, not an outage. Same rule as request().
+                raise errors.EngineRefusedError(
                     f"POST {path} returned {response.status}: "
                     f"{_message(response.read())}",
-                    context={"endpoint": self.target},
+                    context={"endpoint": self.target,
+                             "status": response.status, "path": path},
                 )
             reader = FrameReader()
             # Podman on Windows does not hang up when a hijacked exec ends,

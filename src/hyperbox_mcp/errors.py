@@ -92,6 +92,19 @@ class NoEngineError(EngineError):
     code = "NO_ENGINE_INSTALLED"
 
 
+class EngineRefusedError(EngineError):
+    """The engine answered, and the answer was an error.
+
+    Distinct from EngineUnavailableError, and the distinction is the same
+    one ContainerGoneError draws: a reply is an answer. An engine that
+    says "no such repository" or "denied" is healthy and reachable, and
+    telling the caller ENGINE_NOT_RUNNING sends them to restart something
+    that is already running -- the one action that cannot help.
+    """
+
+    code = "ENGINE_REFUSED"
+
+
 class SocketBusyError(EngineError):
     """Too many HyperBox processes are driving the engine at once.
 

@@ -191,11 +191,20 @@ def run_exec(client: EngineClient, cid: str, argv: list[str]) -> tuple[int, str,
 
 
 def image_present(client: EngineClient, image: str) -> bool:
+    """Whether the engine already has this image.
+
+    A 404 is the answer to the question, not a failure. Anything else the
+    engine refused -- a bad reference, a permissions problem -- is a real
+    error and must stay loud rather than be reported as "absent", which
+    would send the caller into a pull that fails for the same reason.
+    """
     try:
         client.request("GET", f"/images/{image}/json")
         return True
-    except errors.ContainerGoneError:
-        return False
+    except errors.EngineRefusedError as exc:
+        if exc.context.get("status") == 404:
+            return False
+        raise
 
 
 def pull_image(client: EngineClient, image: str) -> Iterator[dict]:
