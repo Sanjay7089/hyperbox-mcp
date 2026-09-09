@@ -558,6 +558,88 @@ def client_dialect(backend: str) -> str:
 
 
 
+class _Container:
+    """A container, as the REST API describes it.
+
+    The SDKs are gone, but `.attrs`, `.status`, `.labels` and `.remove()`
+    are the shape every caller here already reads, so the shape is kept
+    and only the source changed. Attributes are fetched once and cached:
+    a caller that wants a fresh view asks for a fresh container.
+    """
+
+    def __init__(self, client: Any, cid: str) -> None:
+        self._client = client
+        self.id = cid
+        from hyperbox_mcp.rest import api
+
+        self.attrs = api.inspect_container(client, cid)
+
+    def reload(self) -> None:
+        """Re-read the container's attributes from the engine.
+
+        The SDK method callers already use to see state change after an
+        operation. Without it a cached view silently reports the state
+        the container had a moment ago, which for a status check is the
+        wrong answer rather than a stale one.
+        """
+        from hyperbox_mcp.rest import api
+
+        self.attrs = api.inspect_container(self._client, self.id)
+
+    @property
+    def status(self) -> str:
+        return ((self.attrs.get("State") or {}).get("Status") or "").lower()
+
+    @property
+    def name(self) -> str:
+        return (self.attrs.get("Name") or "").lstrip("/")
+
+    @property
+    def labels(self) -> dict:
+        return (self.attrs.get("Config") or {}).get("Labels") or {}
+
+    def remove(self, force: bool = True) -> None:
+        from hyperbox_mcp.rest import api
+
+        api.remove_container(self._client, self.id, force=force)
+
+    def restart(self, timeout: int = 5) -> None:
+        from hyperbox_mcp.rest import api
+
+        api.restart_container(self._client, self.id, timeout=timeout)
+
+
+class _Containers:
+    """`client.containers` — enough of it for what this project reads."""
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+
+    def list(self, all: bool = False, filters: dict | None = None) -> list:
+        from hyperbox_mcp.rest import api
+
+        rows = api.list_containers(self._client, all=all, filters=filters)
+        return [_Container(self._client, row["Id"]) for row in rows]
+
+    def get(self, cid: str) -> _Container:
+        return _Container(self._client, cid)
+
+
+class _RestEngine:
+    """What `client(backend)` returns now: a REST client wearing the
+    small part of the SDK surface this project actually used."""
+
+    def __init__(self, endpoint: str) -> None:
+        from hyperbox_mcp.rest.client import EngineClient
+
+        self._client = EngineClient(endpoint)
+        self.containers = _Containers(self._client)
+
+    @property
+    def raw(self) -> Any:
+        return self._client
+
+
 def _docker_client(base_url: str | None = None) -> Any:
     """A pinged docker-py client, optionally against an explicit URL."""
     import docker
@@ -878,23 +960,13 @@ def with_retry(operation, what: str = ""):
 
 
 def client(backend: str, cli_timeout: float = PODMAN_CLI_TIMEOUT) -> Any:
-    """A live, verified client for `backend`.
+    """An engine handle exposing the small SDK-shaped surface we use.
 
-    Cached after the first successful ping so routine operations do not
-    pay a round trip each.
-
-    `cli_timeout` bounds the podman CLI call that resolution may fall back
-    to. Background callers pass PODMAN_CLI_TIMEOUT_FAST: garbage collection
-    runs on a timer and must not stall for the full interactive budget just
-    because an engine is stopped. It only matters on the failing path — a
-    reachable engine never reaches the CLI at all.
+    REST underneath since 0.4: the docker-py and podman-py dependencies
+    are gone, and `_RestEngine` provides `.containers.list/get` because
+    that is all this project ever called.
     """
-    existing = _clients.get(backend)
-    if existing is not None:
-        return existing
-    built = _build_client(backend, cli_timeout=cli_timeout)
-    _clients[backend] = built
-    return built
+    return _RestEngine(resolve(backend).endpoint)
 
 
 def reset_clients() -> None:

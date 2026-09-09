@@ -19,7 +19,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 
-from hyperbox_mcp import engine, policy
+from hyperbox_mcp import engine, errors, policy
 from hyperbox_mcp.errors import EngineError, EngineUnavailableError
 from hyperbox_mcp.registry import Registry, state_dir
 
@@ -33,9 +33,15 @@ _MARK = {OK: "PASS", WARN: "WARN", FAIL: "FAIL"}
 #: llm-sandbox rather than hardcoded, so it cannot drift from what the
 #: runtime will actually pull.
 def python_image() -> str:
-    from llm_sandbox.const import DefaultImage
+    """The image a default python sandbox starts from.
 
-    return DefaultImage.PYTHON
+    Read from the runtime rather than a constant: it is the runtime that
+    decides, and doctor pulling a different image from the one create
+    would use is a check that proves nothing.
+    """
+    from hyperbox_mcp.server import select_runtime
+
+    return select_runtime().image_for("python")
 
 
 @dataclass
@@ -196,19 +202,29 @@ def check_selection(report: Report, statuses: dict) -> str:
     return chosen
 
 
+def _rest(backend: str):
+    """A REST client for `backend`. The SDKs are gone; this is the path."""
+    from hyperbox_mcp.rest.client import EngineClient
+
+    return EngineClient(engine.resolve(backend).endpoint)
+
+
 def check_image(report: Report, backend: str, pull: bool) -> None:
     if not backend:
         return
     image = python_image()
+    from hyperbox_mcp.rest import api
+
     try:
-        client = engine.client(backend)
+        client = _rest(backend)
     except EngineError as exc:
         report.add(
             Check(name="python sandbox image", status=FAIL, detail=str(exc))
         )
         return
     try:
-        client.images.get(image)
+        if not api.image_present(client, image):
+            raise errors.ProvisionError(f"{image} is not present locally.")
         report.add(
             Check(
                 name="python sandbox image",
@@ -282,7 +298,9 @@ def check_registry(report: Report) -> None:
             notes.append(f"{rec.sandbox_id}: still being created")
             continue
         try:
-            engine.get_container(rec.backend, rec.container_ref)
+            from hyperbox_mcp.rest import api
+
+            api.inspect_container(_rest(rec.backend), rec.container_ref)
             notes.append(f"{rec.sandbox_id}: live on {rec.backend}")
         except EngineUnavailableError:
             notes.append(f"{rec.sandbox_id}: {rec.backend} unreachable, unknown")
@@ -361,15 +379,15 @@ def check_round_trip(report: Report, backend: str) -> None:
             )
             return
 
-        container = engine.get_container(backend, handle.meta["container_ref"])
-        host = container.attrs.get("HostConfig") or {}
-        networks = (
-            (container.attrs.get("NetworkSettings") or {}).get("Networks") or {}
-        )
+        from hyperbox_mcp.rest import api
+
+        attrs = api.inspect_container(_rest(backend), handle.meta["container_ref"])
+        host = attrs.get("HostConfig") or {}
+        networks = (attrs.get("NetworkSettings") or {}).get("Networks") or {}
         observed = (
             f"memory={host.get('Memory')} nano_cpus={host.get('NanoCpus')} "
             f"pids={host.get('PidsLimit')} networks={len(networks)} "
-            f"mounts={len(container.attrs.get('Mounts') or [])}"
+            f"mounts={len(attrs.get('Mounts') or [])}"
         )
         runtime.destroy(handle)
         gone = not runtime.alive(handle)

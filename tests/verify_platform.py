@@ -671,9 +671,13 @@ def main() -> int:
             policy._env_cache, policy._env_mtime = None, 0.0
 
             before = policy.environments()
+            # Empty, and that is the point since 0.4: the only built-in
+            # was an unpinned image in someone else's namespace. Languages
+            # carry their own images; an environment here is something a
+            # human built.
             check(
-                "an empty environment directory still offers the built-in",
-                set(before) == {"python"},
+                "an empty environment directory offers no environments",
+                before == {},
                 f"got {sorted(before)}",
             )
 

@@ -1,5 +1,5 @@
 """Acceptance test for the sandbox lifecycle. No mocking — this drives
-the real LLMSandboxRuntime, which starts a real Docker (or Podman)
+the real NativeRuntime, which starts a real Docker (or Podman)
 container. Requires a container engine actually installed and running.
 
     python tests/verify.py [docker|podman] [language]
@@ -32,7 +32,6 @@ import uuid
 sys.path.insert(0, "src")
 
 from hyperbox_mcp import engine, errors  # noqa: E402
-from hyperbox_mcp import llm_sandbox_runtime as lsr  # noqa: E402
 from hyperbox_mcp import server  # noqa: E402
 from hyperbox_mcp.runtime import Runtime  # noqa: E402
 
@@ -306,51 +305,10 @@ def main() -> int:
         str(after),
     )
 
-    # 5b. The startup output check runs ONCE per sandbox and does not
-    #     recurse. It verifies output by calling run(), which opens a
-    #     session, which is what triggers the check — so a guard that is
-    #     set after the call instead of before it recurses until the
-    #     stack gives out. That was a real failure; this is its test.
-    probe = lsr.LLMSandboxRuntime()  # this case inspects llm-sandbox internals
-    calls = {"n": 0}
-    original = probe._assert_results_round_trip
-
-    def counted(h):
-        calls["n"] += 1
-        return original(h)
-
-    probe._assert_results_round_trip = counted
-    probe_handle = None
-    try:
-        # Always python: this case is about the output check not
-        # recursing, which is a property of the guard rather than of any
-        # language, and llm-sandbox supports only python anyway.
-        probe_handle = probe.create(
-            language="python", backend=backend, sandbox_id=new_id()
-        )
-        check(
-            "creating a sandbox does not pay for the output check",
-            calls["n"] == 0,
-            f"round-trip checks during create: {calls['n']}",
-        )
-        probe_code = SNIPPETS["python"]["hello"]
-        first = probe.run(probe_handle, probe_code)
-        after_first = calls["n"]
-        probe.run(probe_handle, probe_code)
-        check(
-            "the output check runs exactly once, on first use, without recursing",
-            after_first == 1 and calls["n"] == 1 and first.success,
-            f"checks after first run={after_first}, after second={calls['n']}",
-        )
-    except RecursionError as exc:
-        check(
-            "the output check runs exactly once, on first use, without recursing",
-            False,
-            f"RecursionError: {exc}",
-        )
-    finally:
-        if probe_handle is not None:
-            probe.destroy(probe_handle)
+    # 5b was the llm-sandbox output-check recursion guard, and it went
+    # with that runtime in 0.4.0. The property it protected is still
+    # covered: the native runtime's canary runs on first use, and 5a
+    # above proves a sandbox works after a timeout.
 
     # 5c. A dropped connection is not an outage. Engines close idle
     #     sockets — Docker Desktop on Windows does it within seconds —
@@ -479,14 +437,21 @@ async def _check_tool_layer(language: str, backend: str) -> None:
         env_names = [
             e.get("name") for e in envs if isinstance(e, dict)
         ] if isinstance(envs, list) else []
+        # No built-in environments since 0.4: the only one was an
+        # unpinned image in someone else's namespace. Every entry here is
+        # something a human built, so the assertion is about SHAPE -- an
+        # agent must be able to read it -- not about a name being present.
         check(
-            "capabilities lists the environments an agent may pick",
-            "python" in env_names,
-            str(envs)[:150],
+            "capabilities lists environments as objects an agent can read",
+            isinstance(envs, list) and all(isinstance(e, dict) for e in envs),
+            f"{len(env_names)} environment(s): {env_names[:4]}",
         )
         check(
             "each environment names its image, so a choice is not a guess",
-            bool(envs) and all(
+            # Vacuously true when there are none, which is the normal
+            # state now: run_all isolates HYPERBOX_ENV_DIR, and there are
+            # no built-ins. The property is about the SHAPE of an entry.
+            isinstance(envs, list) and all(
                 isinstance(e, dict) and e.get("name") and e.get("image")
                 for e in envs
             ),
@@ -494,7 +459,7 @@ async def _check_tool_layer(language: str, backend: str) -> None:
         )
         check(
             "capabilities names the running runtime",
-            caps.get("runtime") in ("NativeRuntime", "LLMSandboxRuntime"),
+            caps.get("runtime") == "NativeRuntime",
             str(caps.get("runtime")),
         )
         # An agent that needs an environment must be able to learn the

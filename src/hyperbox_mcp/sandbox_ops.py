@@ -285,14 +285,35 @@ def explain_sigkill(get_container: GetContainer) -> str:
 # --- reclamation ------------------------------------------------------
 
 
+def _created_at(container):
+    """The creation stamp, whichever shape the engine reported it in.
+
+    An SDK object carries `.attrs`; a row from `GET /containers/json` is
+    a plain dict. Both are accepted so the same age check works from the
+    container list and from inspect.
+    """
+    if isinstance(container, dict):
+        return container.get("Created")
+    return (getattr(container, "attrs", None) or {}).get("Created")
+
+
 def too_young(container) -> bool:
     """Whether a container is inside the creation grace period.
 
     Unparseable or missing timestamps return False: an unknown age
     must not make a container permanently unreclaimable.
     """
-    created = (container.attrs or {}).get("Created")
-    if not isinstance(created, str) or not created:
+    created = _created_at(container)
+    if created is None:
+        return False
+    if isinstance(created, (int, float)):
+        # `GET /containers/json` reports Created as Unix epoch seconds,
+        # while inspect reports an ISO string. Only the string shape was
+        # handled, so reading the list would have made EVERY container
+        # look old enough to reclaim -- silently deleting the grace
+        # period that stops GC eating a container mid-create.
+        return (time.time() - float(created)) < policy.GC_GRACE_SECONDS
+    if not created:
         return False
     # Engines emit more fractional-second digits than fromisoformat
     # accepts on 3.11, so the fraction is trimmed to microseconds
@@ -335,31 +356,30 @@ def collect_orphans(known_ids: set[str], backends) -> list[str]:
     running is skipped rather than failing the sweep, because GC runs
     at server startup and must never stop the server from serving.
     """
+    from hyperbox_mcp.rest import api
+    from hyperbox_mcp.rest.client import EngineClient
+
     reclaimed: list[str] = []
     for backend in backends:
         try:
-            containers = engine.list_managed(
-                backend,
-                f"{LABEL_MANAGED}=true",
-                # A stopped engine must not stall a timed sweep for the
-                # full interactive budget. GC probes BOTH backends every
-                # time, so on a machine with only one of them installed
-                # this is paid on every pass.
-                cli_timeout=engine.PODMAN_CLI_TIMEOUT_FAST,
-            )
-        except (EngineUnavailableError, ContainerGoneError):
+            resolution = engine.resolve(backend)
+            client = EngineClient(resolution.endpoint)
+            rows = api.list_managed(client)
+        except errors.HyperBoxError:
+            # A stopped or absent engine is skipped, not fatal: GC runs
+            # on a timer and must never take the server down with it.
             continue
-        for container in containers:
-            labels = getattr(container, "labels", None) or {}
+        for row in rows:
+            labels = row.get("Labels") or {}
             sandbox_id = labels.get(LABEL_ID)
             if not sandbox_id or sandbox_id in known_ids:
                 continue
-            if too_young(container):
+            if too_young(row):
                 # Another process may be creating this right now, in
                 # the window before its registration lands.
                 continue
             try:
-                container.remove(force=True)
+                api.remove_container(client, row["Id"])
                 reclaimed.append(sandbox_id)
             except Exception:  # noqa: BLE001 - best effort
                 continue

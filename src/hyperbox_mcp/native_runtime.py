@@ -15,8 +15,8 @@ because the first could not be fixed from outside. Two defects drove it:
 
 What it does NOT re-derive is everything in sandbox_ops: the policy
 read-back, sealing, the OOM explanation, orphan collection. Those are
-shared with the llm-sandbox runtime rather than written twice, so both
-implementations are covered by one suite.
+in sandbox_ops rather than inline, so a future backend inherits the
+behaviour rather than a description of it.
 
 Execution here is deliberately explicit at three points where the backend
 was implicit:

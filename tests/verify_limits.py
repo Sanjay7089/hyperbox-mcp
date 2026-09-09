@@ -30,8 +30,7 @@ sys.path.insert(0, "src")
 from fastmcp import Client  # noqa: E402
 from fastmcp.client.transports import StdioTransport  # noqa: E402
 
-from hyperbox_mcp import engine, policy  # noqa: E402
-from hyperbox_mcp.llm_sandbox_runtime import LLMSandboxRuntime  # noqa: E402
+from hyperbox_mcp import engine, policy, sandbox_ops  # noqa: E402
 from hyperbox_mcp.registry import Registry  # noqa: E402
 
 BACKEND = sys.argv[1] if len(sys.argv) > 1 else "docker"
@@ -121,7 +120,7 @@ async def main() -> int:
         )
         check(
             "CPU limit applied",
-            LLMSandboxRuntime._cpu_limited(host),
+            sandbox_ops.cpu_limited(host),
             f"NanoCpus={host.get('NanoCpus')} CpuQuota={host.get('CpuQuota')} "
             f"CpuPeriod={host.get('CpuPeriod')}",
         )

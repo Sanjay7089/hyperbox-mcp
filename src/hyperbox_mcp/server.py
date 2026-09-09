@@ -3,7 +3,7 @@
 Run with: uv run python -m hyperbox_mcp.server
 
 The tools below talk ONLY to a Runtime (see runtime.py). They must never
-import llm-sandbox directly — that is what keeps the execution backend
+import a backend directly — that is what keeps the execution backend
 replaceable.
 
 A note on why this file is mostly descriptions and annotations: an MCP
@@ -113,35 +113,31 @@ mcp = FastMCP("HyperBox")
 #: timeout that kills a forked child, and images that are official and
 #: tagged rather than mutable `latest` from one personal namespace.
 #:
-#: `llm-sandbox` remains selectable for exactly one release, so anyone it
-#: works better for has a way back that is not a downgrade. It goes after
-#: that, and this switch goes with it.
-#:
-#: An environment variable rather than a config file, because the point of
-#: an overlap is that one machine can run either and compare.
-RUNTIME_CHOICES = ("native", "llm-sandbox")
+#: llm-sandbox was removed in 0.4.0. HYPERBOX_RUNTIME is still read so a
+#: config that names it is REFUSED with an explanation rather than
+#: silently ignored -- a setting that no longer does what it says should
+#: say so, not shrug.
+RUNTIME_CHOICES = ("native",)
 
 
 def select_runtime(choice: str | None = None) -> Runtime:
-    """Build the configured Runtime.
+    """The execution backend.
 
-    Imports are deliberately inside the branches: importing the
-    llm-sandbox runtime pulls in llm_sandbox itself, and a server running
-    natively should not load an execution backend it will never use.
+    One implementation since 0.4. `choice` is kept so callers and tests
+    read unchanged, and any value other than "native" is refused rather
+    than silently ignored -- a configuration that no longer does what it
+    says should say so.
     """
     name = (choice or os.environ.get("HYPERBOX_RUNTIME") or "native").strip().lower()
-    if name == "native":
-        from hyperbox_mcp.native_runtime import NativeRuntime
+    if name != "native":
+        raise ValueError(
+            f"HYPERBOX_RUNTIME={name!r} is no longer supported. The "
+            "llm-sandbox backend was removed in 0.4.0; unset the variable "
+            "to use the native runtime."
+        )
+    from hyperbox_mcp.native_runtime import NativeRuntime
 
-        return NativeRuntime()
-    if name in ("llm-sandbox", "llm_sandbox", "llmsandbox"):
-        from hyperbox_mcp.llm_sandbox_runtime import LLMSandboxRuntime
-
-        return LLMSandboxRuntime()
-    raise ValueError(
-        f"Unknown HYPERBOX_RUNTIME '{name}'. Choose one of: "
-        f"{', '.join(RUNTIME_CHOICES)}."
-    )
+    return NativeRuntime()
 
 
 def _create_parameters() -> frozenset[str]:

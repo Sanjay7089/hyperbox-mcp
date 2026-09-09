@@ -53,9 +53,14 @@ LANGUAGES = ("python",)
 #: pull can only produce a misleading "access denied".
 LOCAL_IMAGE_PREFIX = "hyperbox-local/"
 
-_BUILTIN_ENVIRONMENTS: dict[str, str] = {
-    "python": "ghcr.io/vndee/sandbox-python-311-bullseye:latest",
-}
+#: Empty on purpose. Until 0.4 this carried
+#: ghcr.io/vndee/sandbox-python-311-bullseye:latest -- an unpinned tag in
+#: the llm-sandbox author's personal namespace, reachable as
+#: create_sandbox(environment="python"). That is the supply-chain
+#: position llm-sandbox itself was rejected for, and it outlived the
+#: rewrite. Languages carry their own digest-pinned images now; anything
+#: here is a promise this project has to be able to keep.
+_BUILTIN_ENVIRONMENTS: dict[str, str] = {}
 
 #: Where the server writes its log. Here rather than in server.py so a
 #: CLI subcommand can find it without importing the MCP server, which

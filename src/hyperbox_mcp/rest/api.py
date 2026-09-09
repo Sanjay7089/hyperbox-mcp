@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import io
 import json
+from urllib.parse import quote
 import tarfile
 from typing import Any, Iterator
 
@@ -132,10 +133,38 @@ def restart_container(client: EngineClient, cid: str, timeout: int = 2) -> None:
     )
 
 
+def list_containers(
+    client: EngineClient, all: bool = False, filters: dict | None = None
+) -> list[dict]:
+    """Containers, optionally filtered. Filters are percent-encoded."""
+    query = f"all={'true' if all else 'false'}"
+    if filters:
+        # The API wants every filter value as a LIST; the SDK accepted a
+        # bare string. Normalising here means callers written against the
+        # old shape keep working instead of silently filtering nothing.
+        shaped = {
+            key: value if isinstance(value, list) else [value]
+            for key, value in filters.items()
+        }
+        encoded = json.dumps(shaped, separators=(",", ":"))
+        query += f"&filters={quote(encoded)}"
+    return client.request("GET", f"/containers/json?{query}") or []
+
+
 def list_managed(client: EngineClient) -> list[dict]:
-    """Every container carrying our label, running or not."""
-    filters = json.dumps({"label": [f"{LABEL_MANAGED}=true"]})
-    return client.request("GET", f"/containers/json?all=true&filters={filters}") or []
+    """Every container carrying our label, running or not.
+
+    The filter is a JSON document in a query string, so it has to be
+    percent-encoded: unencoded, the space in `{"label": [...]}` makes
+    http.client reject the URL outright as containing control
+    characters. Compact separators keep it short as well as legal.
+    """
+    filters = json.dumps(
+        {"label": [f"{LABEL_MANAGED}=true"]}, separators=(",", ":")
+    )
+    return client.request(
+        "GET", f"/containers/json?all=true&filters={quote(filters)}"
+    ) or []
 
 
 # --- exec -------------------------------------------------------------

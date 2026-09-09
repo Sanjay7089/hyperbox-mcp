@@ -24,8 +24,7 @@ sys.path.insert(0, "src")
 
 from fastmcp import Client  # noqa: E402
 
-from hyperbox_mcp import engine, policy, server  # noqa: E402
-from hyperbox_mcp.llm_sandbox_runtime import LLMSandboxRuntime  # noqa: E402
+from hyperbox_mcp import engine, policy, sandbox_ops, server  # noqa: E402
 
 results: list[tuple[str, bool, str]] = []
 
@@ -77,7 +76,7 @@ async def main() -> int:
             # container that has no CPU limit whatsoever.
             check(
                 "a CPU ceiling is genuinely in force",
-                LLMSandboxRuntime._cpu_limited(host),
+                sandbox_ops.cpu_limited(host),
                 f"NanoCpus={host.get('NanoCpus')} "
                 f"CpuQuota={host.get('CpuQuota')} "
                 f"CpuPeriod={host.get('CpuPeriod')} "

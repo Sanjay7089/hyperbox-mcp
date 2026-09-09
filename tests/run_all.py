@@ -66,14 +66,16 @@ SUITES = (
 
 def managed_containers(backend: str) -> list[str]:
     """Containers still carrying our label. A clean run leaves none."""
+    from hyperbox_mcp.rest import api
+    from hyperbox_mcp.rest.client import EngineClient
+
     try:
-        found = engine.list_managed(backend, f"{policy.LABEL_MANAGED}=true")
+        client = EngineClient(engine.resolve(backend).endpoint)
+        found = api.list_managed(client)
     except Exception as exc:  # noqa: BLE001
         print(f"  (could not list containers on {backend}: {exc})")
         return []
-    return [
-        (getattr(c, "labels", None) or {}).get(policy.LABEL_ID, "?") for c in found
-    ]
+    return [(row.get("Labels") or {}).get(policy.LABEL_ID, "?") for row in found]
 
 
 def main() -> int:
