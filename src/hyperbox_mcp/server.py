@@ -32,7 +32,6 @@ import threading
 import time
 import uuid
 from contextlib import asynccontextmanager, suppress
-from pathlib import Path
 
 from fastmcp import Context, FastMCP
 
