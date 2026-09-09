@@ -468,11 +468,35 @@ async def _check_tool_layer(language: str, backend: str) -> None:
         caps = json.loads(
             (await client.read_resource("hyperbox://capabilities"))[0].text
         )
+        envs = caps.get("environments")
+        env_names = [
+            e.get("name") for e in envs if isinstance(e, dict)
+        ] if isinstance(envs, list) else []
         check(
             "capabilities lists the environments an agent may pick",
-            isinstance(caps.get("environments"), list)
-            and "python" in caps["environments"],
-            str(caps.get("environments")),
+            "python" in env_names,
+            str(envs)[:150],
+        )
+        check(
+            "each environment names its image, so a choice is not a guess",
+            bool(envs) and all(
+                isinstance(e, dict) and e.get("name") and e.get("image")
+                for e in envs
+            ),
+            str(envs)[:150],
+        )
+        check(
+            "capabilities names the running runtime",
+            caps.get("runtime") in ("NativeRuntime", "LLMSandboxRuntime"),
+            str(caps.get("runtime")),
+        )
+        # An agent that needs an environment must be able to learn the
+        # command a HUMAN runs to make one, without failing first.
+        actions = caps.get("host_actions") or {}
+        check(
+            "capabilities names the host commands an agent must ask for",
+            "hyperbox build" in (actions.get("create_environment") or ""),
+            str(actions.get("create_environment")),
         )
 
         by_name = {t.name: t for t in await client.list_tools()}

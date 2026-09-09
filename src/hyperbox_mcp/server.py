@@ -319,9 +319,39 @@ def capabilities() -> str:
             # answer differs between backends and this resource is what an
             # agent plans against.
             "languages": sorted(_runtime.supported_languages()),
+            # Named, because it changes what a sandbox can deliver and was
+            # otherwise inferable only by counting the languages above.
+            "runtime": type(_runtime).__name__,
             # Resolved per request, so an environment the user built
             # after this server started is listed without a restart.
-            "environments": sorted(policy.environments()),
+            #
+            # Objects rather than names: an agent choosing between
+            # "data-science" and "live-test" from names alone is guessing,
+            # and the image is what tells it which one has what it needs.
+            "environments": [
+                {"name": name, "image": image}
+                for name, image in sorted(policy.environments().items())
+            ],
+            # What this server CANNOT do, and the command a human runs to
+            # do it. Building an environment is deliberately not a tool
+            # (see create_sandbox), so without this an agent discovers the
+            # boundary by failing -- which is the thing this resource
+            # exists to prevent.
+            "host_actions": {
+                "note": (
+                    "These run on the user's machine, not in a sandbox. "
+                    "You cannot run them. Ask the user to, then retry."
+                ),
+                "create_environment": (
+                    "hyperbox build <name> --image <ref>   "
+                    "(or --dockerfile <path> to build one)"
+                ),
+                "list_environments": "hyperbox envs",
+                "check_setup": "hyperbox doctor",
+                "start_an_engine": (
+                    "open Docker Desktop, or `podman machine start`"
+                ),
+            },
             "backends": sorted(policy.BACKEND_CHOICES),
             "experimental_backends": sorted(policy.EXPERIMENTAL_BACKENDS),
             "limits": {
@@ -438,6 +468,14 @@ async def create_sandbox(
 
     Not every language takes packages: `java` refuses them and says what to
     do instead. `hyperbox://capabilities` lists which do.
+
+    WHICH TO USE. A handful of pure-Python packages: `packages`. A heavy
+    or native stack — torch, pandas, a JDK toolchain — or one you will
+    want again on the next task: ask the user for an environment instead.
+    Installing those on every create costs minutes each time, and the
+    install happens inside the one window where the sandbox has network.
+    `hyperbox://capabilities` carries a `host_actions` block with the exact
+    command to give them.
 
     Read the `hyperbox://capabilities` resource for exact limits.
     """
