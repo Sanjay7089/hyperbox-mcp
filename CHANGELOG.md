@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.4.0] — unreleased
 
+### Added
+
+- **`create_sandbox(sync_in_dir=...)`** copies a directory from your
+  machine into the sandbox, so an agent can run your real code and real
+  test data instead of a snippet it retyped.
+
+  Off unless you turn it on: `hyperbox init`, once, in a directory you
+  are willing to share. It refuses to run without a terminal — the value
+  of the gate is that a *person* chose the directory, and agents have
+  shell access in the clients HyperBox targets.
+
+  Nothing is dropped silently. `.env`, `.aws/`, `id_rsa` and friends are
+  never copied, `.hyperboxignore` is honoured, symlinks are not followed,
+  and every exclusion is named with its reason in a `sync` manifest on
+  the result. Deliberately not `.dockerignore`, which describes what to
+  keep out of a production *image* — a project that excludes `tests/` or
+  `*.sql` from its image needs exactly those synced.
+
+- **`run(background=True)`** starts something that keeps running — a
+  server, a worker — and returns a `process_id` instead of output.
+  **`get_process_logs`** reads what it has printed. Loopback works inside
+  a sealed sandbox, so a foreground `run` can talk to a background server
+  on `127.0.0.1`. Reading logs counts as use, so polling holds off the
+  inactivity timeout.
+
+- **Environments can keep their network**:
+  `hyperbox build <name> --image <ref> --allow-network`. There is no tool
+  parameter for this — network posture is server policy — so an agent can
+  select such an environment and never create one. A sandbox from one
+  says `OPEN — this sandbox CAN reach the internet` rather than "sealed",
+  and `capabilities` marks each environment, so an agent chooses instead
+  of failing.
+
+- **`hyperbox ps`, `rm`, `pull` and `init`.** Everything about a
+  sandbox's life used to require an MCP client; now you can see what is
+  running, clean up after a client that went away, and copy files out.
+
+- **`hyperbox://capabilities` tells an agent what it cannot do**, and the
+  command to ask a human for. A `host_actions` block names
+  `hyperbox build`, `envs`, `doctor` and how to start an engine.
+  Environments are objects carrying their image and network posture
+  rather than bare names, and the running runtime is named.
+
 ### Fixed
 
 Found by driving 0.3.0 through a full acceptance run in a real MCP
@@ -45,6 +88,13 @@ wrong answer.
   an image that was never remote. It now says the image is missing and
   names the command that rebuilds it.
 
+- **`hyperbox --version` took 0.87s and started a server to do it.** The
+  entry point imported the MCP server, so every subcommand built a
+  FastMCP instance, instantiated a runtime and opened the registry's
+  SQLite database before looking at its arguments. Printing a version
+  string created directories. Now 0.09s, with no MCP stack imported at
+  all.
+
 - **A `SyntaxWarning` printed on every command**, including
   `hyperbox --version`: an invalid `\p` escape in a docstring. The suite
   now compiles every module with warnings as errors.
@@ -53,16 +103,19 @@ wrong answer.
   in a string an agent relays to a user verbatim. It now names `--image`
   first, which needs no Dockerfile.
 
-### Added
+### Internal
 
 - The server logs its runtime and version at startup. The runtime is
   chosen at import from `HYPERBOX_RUNTIME`, and the client launches the
   server with its own environment, so `hyperbox doctor` in a terminal
   cannot answer what the running server used.
+- A seventh acceptance suite, `tests/verify_cli.py`, drives the `hyperbox`
+  command as a subprocess. Every other suite imports the package; nothing
+  ran the program a person actually installs.
 
 ### Verified
 
-Docker 29.1.3, both runtimes: 6/6 suites, no containers left behind.
+Podman 6.1.1, native runtime: 7/7 suites, no containers left behind.
 
 ## [0.3.0] — 2026-09-09
 

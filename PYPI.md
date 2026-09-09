@@ -20,12 +20,14 @@ project.
 
 ## What your agent gets
 
-Three tools, and nothing else:
+Four tools, and nothing else:
 
 | Tool | What it does |
 |---|---|
 | `create_sandbox(language, backend, environment, packages)` | A persistent, disposable container, with any declared packages installed before it is sealed. Returns a `sandbox_id`. |
 | `run(sandbox_id, code, libraries, timeout)` | Executes code. Returns `{stdout, stderr, exit_code, success, timed_out}`. |
+| `run(sandbox_id, code, background=True)` | Starts something that keeps running — a server, a worker — and returns a `process_id` instead of output. |
+| `get_process_logs(sandbox_id, process_id)` | Reads what a background run has printed. |
 | `destroy_sandbox(sandbox_id)` | Tears it down. Idempotent, and confirmed against the engine before claiming success. |
 
 Plus a `hyperbox://capabilities` resource publishing the exact limits, so

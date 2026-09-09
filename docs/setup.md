@@ -121,6 +121,41 @@ none of the limits that apply to a sandbox. There is no MCP tool that
 builds an environment, so an agent can use what you made and cannot make
 one. See [security.md](security.md).
 
+## Giving a sandbox your files
+
+By default a sandbox sees nothing of your machine. To let an agent work
+on your actual code, allow a directory once:
+
+```bash
+cd ~/projects/my-app
+hyperbox init
+```
+
+It shows you the path and asks. It also refuses to run without a
+terminal — the point of the gate is that a *person* chose the directory,
+and agents can run shell commands in the clients HyperBox targets.
+
+After that an agent can ask for `create_sandbox(sync_in_dir="...")` for
+any path under an allowed directory, and the files land at `/sandbox`.
+The result lists what arrived and what did not.
+
+**What is never copied**, whatever you allow: `.env`, `.envrc`,
+`.aws/`, `.ssh/`, `id_rsa`, `.netrc`, `.npmrc`, and similar. Add a
+`.hyperboxignore` (same syntax as `.gitignore`) for anything else — it is
+read instead of `.dockerignore`, deliberately, because a `.dockerignore`
+excludes what should not go into a production image and that is usually
+the opposite of what a test run needs.
+
+Allowed directories live in `~/.hyperbox/sync-roots`, one per line. A
+running server picks up changes without a restart. Delete a line to
+withdraw it.
+
+To get files back out, use the CLI rather than the agent:
+
+```bash
+hyperbox pull <sandbox-id> /sandbox/results.csv ./out
+```
+
 ## Where things live
 
 | Directory | Holds |
@@ -138,6 +173,7 @@ one. See [security.md](security.md).
 | `HYPERBOX_TTL_SECONDS` | How long an idle sandbox survives (default 1800) |
 | `HYPERBOX_ENGINE_SLOTS` | Cap concurrent heavy engine work — pulls, builds, creates — across every HyperBox process on the machine |
 | `HYPERBOX_RUNTIME` | `native` (default) or `llm-sandbox` |
+| `HYPERBOX_SYNC_ROOTS` | Override the allowed sync directories, `:`-separated. For CI; `hyperbox init` is the normal way |
 
 **About `HYPERBOX_RUNTIME`.** HyperBox speaks the engine's REST API
 directly, over a unix socket or a Windows named pipe. That is the `native`
@@ -155,12 +191,18 @@ hyperbox doctor          Check this machine can run sandboxes
 hyperbox config          Print a ready-to-paste MCP client config
   --format json|cursor|antigravity|yaml
   --local                Pin this checkout's executable, not PATH
+hyperbox ps              List sandboxes on file
+hyperbox rm <id>         Destroy one sandbox
+hyperbox pull <id> <path> <dest>
+                         Copy files out of a sandbox
+hyperbox init [dir]      Allow sandboxes to read files from a directory
 hyperbox envs            List environments create_sandbox can use
 hyperbox build <name>    Create an environment agents can select
   --dockerfile <path>    Build it, from a file or a directory
   --image <ref>          Pull an existing image and register it
   --engine docker|podman Override which engine to use
   --no-cache             Build without reusing cached layers
+  --allow-network        Sandboxes from it keep internet access
 hyperbox logs            Show the server log
   --follow               Keep printing as new lines arrive
 hyperbox --version       Print the installed version

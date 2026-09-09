@@ -48,8 +48,10 @@ Requires Python 3.11+ and either Docker or Podman.
 
 | Tool | What it does |
 |---|---|
-| `create_sandbox(language, backend, environment, packages)` | A persistent, disposable container, with any declared packages installed before it is sealed. Returns a `sandbox_id`. |
+| `create_sandbox(language, backend, environment, packages, sync_in_dir)` | A persistent, disposable container, with any declared packages installed before it is sealed, and optionally a directory of yours copied in. Returns a `sandbox_id`. |
 | `run(sandbox_id, code, libraries, timeout)` | Executes code. Returns `{stdout, stderr, exit_code, success, timed_out}` — never a bare "it failed". |
+| `run(sandbox_id, code, background=True)` | Starts something that keeps running — a server, a worker — and returns a `process_id` instead of output. |
+| `get_process_logs(sandbox_id, process_id)` | Reads what a background run has printed so far. |
 | `destroy_sandbox(sandbox_id)` | Tears it down. Idempotent, and confirmed against the engine before it claims success. |
 
 Plus a `hyperbox://capabilities` resource publishing the exact limits, so
@@ -146,6 +148,8 @@ or microVM sandbox, not a local container.
 ## Documentation
 
 - **[Setup](docs/setup.md)** — install, client configuration, environments, CLI reference
+- **[How it works](docs/architecture.md)** — the layers, the ordering, and why each boundary sits where it does
+- **[Agent teams](docs/agent-teams.md)** — several agents or subagents at once, and what holds under them
 - **[Security model](docs/security.md)** — what is enforced, how it is proven, what it does not cover
 - **[Troubleshooting](docs/troubleshooting.md)** — when something does not work
 - **[System map](docs/diagrams/hyperbox-system.png)** — the layers, the protocol seams and the sweep across them, on one page
