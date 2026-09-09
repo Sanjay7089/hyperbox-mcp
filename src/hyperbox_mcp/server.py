@@ -780,7 +780,17 @@ def _background_gc_loop() -> None:
 def serve() -> None:
     # Before the sweep, so the first collection is on the record.
     _setup_logging()
-    logger.info("HyperBox server starting")
+    # Name the runtime. It is chosen once at import from HYPERBOX_RUNTIME,
+    # and the client launches this process with its own environment -- so
+    # `hyperbox doctor` in a terminal reports what IT would use, which is
+    # not necessarily what the running server used. Until this line, the
+    # only way to tell was to count the languages in capabilities.
+    from hyperbox_mcp.cli import _version
+
+    logger.info(
+        "HyperBox server starting (runtime: %s, version: %s)",
+        type(_runtime).__name__, _version(),
+    )
 
     # Reclaiming what a previous process left behind happens on the GC
     # thread's first pass, NOT here. Doing it here delayed the server's
