@@ -52,6 +52,10 @@ SUITES = (
     # First: the host side. If this fails, nothing below can pass, and
     # the reason is the platform rather than the sandbox.
     ("platform portability", "tests/verify_platform.py"),
+    # The CLI is how a person installs and diagnoses this, and it was the
+    # least covered surface: every other suite imports the package rather
+    # than running the command.
+    ("command line surface", "tests/verify_cli.py"),
     ("lifecycle + MCP surface", "tests/verify.py"),
     ("ownership across processes", "tests/verify_registry.py"),
     ("enforced resource policy", "tests/verify_limits.py"),
