@@ -71,6 +71,32 @@ def sandbox_id(value: object) -> str:
     return candidate
 
 
+def process_id(value: object) -> str:
+    """A background run's id, in the form run(background=True) returns.
+
+    Its own shape, not sandbox_id's: a sandbox id is 12 hex characters
+    and this is a full uuid4 hex. Sharing the validator would reject
+    every real process id.
+
+    It becomes a filename inside the sandbox, so the shape is enforced
+    rather than trusted -- an id carrying a slash or a `..` would name a
+    path instead of a log.
+    """
+    if not isinstance(value, str):
+        raise InvalidInput(
+            f"process_id must be a string, got {type(value).__name__}. "
+            "Pass the process_id returned by run(background=True)."
+        )
+    candidate = value.strip()
+    if not re.fullmatch(r"[0-9a-f]{32}", candidate):
+        raise InvalidInput(
+            f"'{str(value)[:64]}' is not a valid process_id. Expected 32 "
+            "lowercase hex characters, exactly as returned by "
+            "run(background=True)."
+        )
+    return candidate
+
+
 def language(value: object, supported: tuple[str, ...] | None = None) -> str:
     """Validate a language against what the ACTIVE runtime can deliver.
 

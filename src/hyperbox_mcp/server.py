@@ -644,6 +644,7 @@ async def run(
     code: str,
     libraries: list[str] | None = None,
     timeout: float | None = policy.DEFAULT_TIMEOUT_SECONDS,
+    background: bool = False,
 ) -> dict:
     """Execute code in a sandbox and return exactly what happened.
 
@@ -669,6 +670,18 @@ async def run(
     `timeout` is capped by the server, must be a positive number, and may
     not be null. Output is truncated past a limit, and marked when it is.
 
+    `background=True` starts the code and returns immediately with a
+    `process_id` instead of output. Use it for something that is meant to
+    keep running — a web server, a worker — and then `run` a normal
+    foreground call in the SAME sandbox to talk to it on 127.0.0.1.
+    Loopback works even though the sandbox has no route to the internet.
+
+    Read its output with `get_process_logs`. `timeout` does not apply to
+    a background run: nothing stops it but `destroy_sandbox`, or the
+    sandbox expiring — and reading its logs counts as use, which holds
+    that off. Its log is capped, and a process that writes past the cap
+    is stopped there rather than allowed to fill the disk.
+
     On timeout the code is actually killed, not just abandoned — a timed-out
     run leaves nothing burning CPU in the sandbox, and the sandbox stays
     usable. If the code cannot be killed the sandbox is restarted instead,
@@ -681,6 +694,23 @@ async def run(
         timeout = validate.timeout(timeout)
     except InvalidInput as exc:
         return errors.to_result(exc)
+
+    if background and not hasattr(_runtime, "start_background"):
+        return errors.to_result(InvalidInput(
+            f"The active runtime ({type(_runtime).__name__}) cannot run "
+            "code in the background.",
+            fix="Unset HYPERBOX_RUNTIME to use the default native runtime.",
+        ))
+
+    def launch():
+        """Start it and let go. Returns the id its logs are filed under."""
+        with _registry.lock(sandbox_id):
+            rec = _registry.get_ready(sandbox_id)
+            if rec is None:
+                return None
+            process_id = _runtime.start_background(_handle_for(rec), code)
+            _registry.touch(sandbox_id)
+            return process_id
 
     def execute():
         # The lock is held for the whole call so two processes cannot drive
@@ -695,6 +725,36 @@ async def run(
             )
             _registry.touch(sandbox_id)
             return outcome
+
+    if background:
+        try:
+            process_id = await asyncio.to_thread(launch)
+        except (EngineUnavailableError, SandboxRuntimeError) as exc:
+            return errors.to_result(exc)
+        except Exception as exc:  # noqa: BLE001 - always structured
+            return errors.to_result(exc)
+        if process_id is None:
+            return errors.to_result(errors.SandboxStaleError(
+                f"No sandbox '{sandbox_id}' is ready.",
+                fix="Call create_sandbox first.",
+                context={"sandbox_id": sandbox_id},
+            ))
+        logger.info("background run %s started in %s", process_id, sandbox_id)
+        return {
+            "sandbox_id": sandbox_id,
+            "process_id": process_id,
+            "status": "running",
+            "logs_with": (
+                f"get_process_logs(sandbox_id='{sandbox_id}', "
+                f"process_id='{process_id}')"
+            ),
+            "note": (
+                "Started and left running. `timeout` does not apply to a "
+                "background run and was ignored. Nothing stops it except "
+                "destroy_sandbox, or the sandbox expiring — reading its "
+                "logs counts as use and holds that off."
+            ),
+        }
 
     try:
         # Offloaded and reported on. A run can legitimately take the full
@@ -731,6 +791,80 @@ async def run(
             "installs before the sandbox is sealed."
         )
     return payload
+
+
+@mcp.tool(
+    annotations={
+        "title": "Read a background run's output",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    }
+)
+async def get_process_logs(
+    ctx: Context, sandbox_id: str, process_id: str
+) -> dict:
+    """Read what a background run has printed so far.
+
+    Use this after `run(background=True)`. Both stdout and stderr, merged,
+    from the start of the process — a background run has no single moment
+    to hand output back, so it accumulates in a file you read whenever you
+    like.
+
+    Reading counts as using the sandbox, so polling a long-running server
+    keeps it from expiring. A sandbox nobody touches is reclaimed after
+    its inactivity timeout, and a daemon nothing reads does not count as
+    activity by itself.
+
+    The log is capped. A process that writes more than the cap is stopped
+    at that point rather than being allowed to fill the disk.
+
+    Nothing here stops a background process. `destroy_sandbox` is how one
+    ends; there is no separate stop.
+    """
+    try:
+        sandbox_id = validate.sandbox_id(sandbox_id)
+        process_id = validate.process_id(process_id)
+    except InvalidInput as exc:
+        return errors.to_result(exc)
+
+    if not hasattr(_runtime, "background_logs"):
+        return errors.to_result(InvalidInput(
+            f"The active runtime ({type(_runtime).__name__}) has no "
+            "background runs.",
+            fix="Unset HYPERBOX_RUNTIME to use the default native runtime.",
+        ))
+
+    def read():
+        with _registry.lock(sandbox_id):
+            rec = _registry.get_ready(sandbox_id)
+            if rec is None:
+                return None
+            out = _runtime.background_logs(_handle_for(rec), process_id)
+            # Reading is using. Without this a polled daemon is reclaimed
+            # out from under the caller that is watching it.
+            _registry.touch(sandbox_id)
+            return out
+
+    try:
+        out = await asyncio.to_thread(read)
+    except (EngineUnavailableError, SandboxRuntimeError) as exc:
+        return errors.to_result(exc)
+    except Exception as exc:  # noqa: BLE001 - always structured
+        return errors.to_result(exc)
+
+    if out is None:
+        return errors.to_result(errors.SandboxStaleError(
+            f"No sandbox '{sandbox_id}' is ready.",
+            fix="Call create_sandbox first.",
+            context={"sandbox_id": sandbox_id},
+        ))
+    return {
+        "sandbox_id": sandbox_id,
+        "process_id": process_id,
+        "output": _cap_output(out),
+    }
 
 
 @mcp.tool(

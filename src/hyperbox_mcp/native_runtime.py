@@ -478,6 +478,81 @@ class NativeRuntime:
             )
         return None
 
+    def start_background(self, handle: SandboxHandle, code: str) -> str:
+        """Launch code that outlives the call, and return its process id.
+
+        For a server the caller wants to test against: start it, then
+        `run` a client in the same sandbox. Loopback works even though
+        the sandbox is sealed -- detaching the networks leaves `lo`.
+
+        The code goes in as a FILE and the shell only ever sees a quoted
+        path, exactly as a foreground run does. Interpolating submitted
+        code into a shell string is the one thing put_file exists to
+        avoid: nothing is quoted, so nothing can be mis-quoted.
+
+        The id is generated here rather than taken from the engine's exec
+        id, because the log path has to be decided before the exec that
+        writes to it is created.
+        """
+        spec = self._spec(handle.language)
+        client = self._client(handle.backend)
+        cid = self._ref(handle)
+
+        run_id = uuid.uuid4().hex
+        stem = spec.get("filename") or run_id
+        path = f"{policy.CODE_DIR}/{stem}.{spec['extension']}"
+        log = f"{policy.BACKGROUND_DIR}/{run_id}.log"
+        api.put_file(client, cid, path, code.encode())
+
+        argv = " ".join(shlex.quote(part) for part in [*spec["argv"], path])
+        # ulimit -f counts 512-byte blocks and is a shell BUILTIN, so it
+        # needs no binary the slim images might not ship -- the same rule
+        # that keeps the timeout kill off `ps` and `pkill`.
+        #
+        # Piping through `head -c` was tried first and is wrong: head
+        # buffers its output, so a daemon's log read back before ~4 KB had
+        # accumulated came back EMPTY. "No logs" and "logs you cannot see
+        # yet" are different answers, and returning the first for the
+        # second is the failure this project is organised against.
+        # Redirecting straight to the file shows every line immediately.
+        blocks = policy.BACKGROUND_LOG_MAX_BYTES // 512
+        # A later run's timeout kills its own process GROUP with
+        # `kill -9 -<pid>`, and a background process must not be swept up
+        # by it. It is not: each exec gets its own process tree, so the
+        # daemon is already in a different group.
+        #
+        # setsid was tried here for that and removed. Mutation-tested: the
+        # daemon survives a foreground timeout with and without it, so it
+        # was not doing the job it was credited with -- and it is a
+        # util-linux binary, which is the dependency the timeout kill
+        # deliberately avoids by not using ps or pkill. nohup is a shell
+        # builtin in the shells these images ship and covers SIGHUP.
+        script = (
+            f"mkdir -p {policy.BACKGROUND_DIR}; "
+            f"nohup sh -c {shlex.quote(f'ulimit -f {blocks}; exec ' + argv)} "
+            f"> {log} 2>&1 & "
+            f"echo $! > {policy.BACKGROUND_DIR}/{run_id}.pid"
+        )
+        api.run_exec(client, cid, ["sh", "-c", script])
+        return run_id
+
+    def background_logs(self, handle: SandboxHandle, process_id: str) -> str:
+        """Whatever the background run has written so far."""
+        client = self._client(handle.backend)
+        cid = self._ref(handle)
+        log = f"{policy.BACKGROUND_DIR}/{process_id}.log"
+        code, out, err = api.run_exec(
+            client, cid, ["sh", "-c", f"cat {shlex.quote(log)} 2>/dev/null"]
+        )
+        if code != 0:
+            raise sandbox_ops.SandboxRuntimeError(
+                f"No background process '{process_id}' in this sandbox.",
+                fix="Check the process_id returned by run(background=True). "
+                    "Logs are lost when the sandbox is destroyed.",
+                context={"process_id": process_id},
+            )
+        return out
+
     def _exec_with_deadline(self, handle, client, cid, code, timeout):
         """Run the code, and stop it for real if it outlives its timeout."""
         spec = self._spec(handle.language)

@@ -296,6 +296,23 @@ NANO_CPUS = int(CPUS * 1_000_000_000)
 CPU_PERIOD = 100_000
 CPU_QUOTA = int(CPU_PERIOD * CPUS)
 
+#: Where a background run's log and pid live. Under CODE_DIR, not /work:
+#: /work is a 64 MB tmpfs charged to the container's memory cgroup, so a
+#: daemon logging there spends the sandbox's RAM to do it.
+BACKGROUND_DIR = "/sandbox/.hyperbox"
+
+#: A background log is capped at this with `ulimit -f`, a shell builtin,
+#: so a process that writes past it is killed with SIGXFSZ. Piping through
+#: `head -c` was tried and rejected: head buffers, so a log read back
+#: before a few KB had accumulated came back empty.
+#:
+#: That is a deliberate trade, and the surprising half is documented in
+#: run()'s description: CODE_DIR is the container's writable layer, which
+#: has no quota of any kind (no StorageOpt is set anywhere), so an
+#: uncapped daemon log is bounded only by the host's disk. A daemon that
+#: stops at 10 MB of output is a smaller problem than a full disk.
+BACKGROUND_LOG_MAX_BYTES = 10 * 1024 * 1024
+
 #: Bounded scratch space, declared as paths and a size rather than as one
 #: engine's syntax: Docker takes a `tmpfs` mapping while Podman rejects
 #: that keyword and wants tmpfs entries in `mounts`. The runtime builds

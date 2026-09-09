@@ -430,9 +430,16 @@ async def _check_tool_layer(language: str, backend: str) -> None:
 
     async with Client(server.mcp) as client:
         names = {t.name for t in await client.list_tools()}
+        # Four, and the count is asserted rather than a floor: an MCP
+        # client routes on tool name and description alone, so every tool
+        # added is another thing it can pick wrongly. The fourth exists
+        # because a background run has no moment to hand output back --
+        # reading it later is the only way -- and `build` is still kept
+        # OUT, because it runs arbitrary commands on the host.
         check(
-            "tool surface is exactly the three lifecycle tools",
-            names == {"create_sandbox", "run", "destroy_sandbox"},
+            "tool surface is exactly the four tools an agent may call",
+            names == {"create_sandbox", "run", "destroy_sandbox",
+                      "get_process_logs"},
             str(sorted(names)),
         )
 
