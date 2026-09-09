@@ -5,6 +5,64 @@ All notable changes to HyperBox are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] — unreleased
+
+Found by driving 0.3.0 through a full acceptance run in a real MCP
+client. Two of these are the failure this project exists to prevent: a
+confident, wrong answer.
+
+### Fixed
+
+- **A sandbox advertising `memory: "1g"` allowed 2 GB.** Setting Docker's
+  `Memory` without `MemorySwap` makes it default `MemorySwap` to *twice*
+  `Memory`, so every sandbox ran with double the ceiling
+  `hyperbox://capabilities` reported. Swap is now disabled explicitly, in
+  both runtimes.
+
+  The read-back did not catch it because it checked `Memory` — the field
+  it had just set — rather than the ceiling that applies. It now reads
+  back `MemorySwap` too.
+
+  Nor did the suites, because they allocate in an unbounded loop, which
+  grows past RAM *and* swap and dies whichever the ceiling is. There is
+  now a bounded case at 1.5× the limit, which fits in 1 GB + 1 GB of swap
+  and does not fit in 1 GB alone. Podman never doubled it and enforced
+  1 GB either way, so this was invisible on one engine and wrong on the
+  other.
+
+- **A live, healthy engine was reported as `ENGINE_NOT_RUNNING`.** Every
+  unexpected HTTP status became `EngineUnavailableError`, whose fix says
+  to start the engine — the one action that cannot help when it is
+  already running. A non-2xx from a reachable engine is now
+  `ENGINE_REFUSED`; `ENGINE_NOT_RUNNING` again means only that the engine
+  could not be reached.
+
+- **A locally built environment tried to pull from a registry.**
+  `hyperbox build` tags what it registers under `hyperbox-local/`, which
+  no registry has, so a missing image failed as *"pull access denied …
+  may require 'docker login'"* — sending the user after credentials for
+  an image that was never remote. It now says the image is missing and
+  names the command that rebuilds it.
+
+- **A `SyntaxWarning` printed on every command**, including
+  `hyperbox --version`: an invalid `\p` escape in a docstring. The suite
+  now compiles every module with warnings as errors.
+
+- **The unknown-environment error named `--custom`**, the v0.2 spelling,
+  in a string an agent relays to a user verbatim. It now names `--image`
+  first, which needs no Dockerfile.
+
+### Added
+
+- The server logs its runtime and version at startup. The runtime is
+  chosen at import from `HYPERBOX_RUNTIME`, and the client launches the
+  server with its own environment, so `hyperbox doctor` in a terminal
+  cannot answer what the running server used.
+
+### Verified
+
+Docker 29.1.3, both runtimes: 6/6 suites, no containers left behind.
+
 ## [0.3.0] — 2026-09-09
 
 ### Added

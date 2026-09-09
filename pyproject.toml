@@ -1,6 +1,6 @@
 [project]
 name = "hyperbox-mcp"
-version = "0.3.0"
+version = "0.3.1"
 description = "MCP server that runs LLM-generated code in a disposable Docker/Podman container before it touches your real project."
 # PyPI gets its own page: self-contained, no mermaid (PyPI renders it
 # as a raw code block) and no relative links into the repo tree.
