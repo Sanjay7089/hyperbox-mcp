@@ -32,6 +32,12 @@ def usage() -> str:
         "    --image <ref>          Pull an existing image and register it\n"
         "    --engine docker|podman Override which engine to use\n"
         "    --no-cache             Build without reusing cached layers\n"
+        "  hyperbox ps              List sandboxes on file\n"
+        "  hyperbox rm <id>         Destroy one sandbox\n"
+        "  hyperbox pull <id> <path> <dest>\n"
+        "                           Copy files out of a sandbox\n"
+        "  hyperbox init [dir]      Allow sandboxes to read files from a\n"
+        "                           directory (asks first; run it yourself)\n"
         "  hyperbox logs            Show the server log\n"
         "    --follow               Keep printing as new lines arrive\n"
         "  hyperbox --version       Print the installed version\n"
@@ -87,6 +93,7 @@ def _logs(follow: bool = False) -> int:
 #: WAL. Printing a version string created directories and a database.
 SUBCOMMANDS = frozenset({
     "doctor", "config", "envs", "build", "logs",
+    "init", "ps", "rm", "pull",
     "--version", "-V", "help", "--help", "-h",
 })
 
@@ -179,6 +186,42 @@ def _dispatch(argv: list[str]) -> int:
         from hyperbox_mcp.clientconfig import print_config
 
         return print_config(fmt, local=local)
+
+    if command == "init":
+        if len(rest) > 1:
+            print("hyperbox init: at most one directory\n", file=sys.stderr)
+            print(usage())
+            return 2
+        from hyperbox_mcp.lifecycle import init_sync_root
+
+        return init_sync_root(rest[0] if rest else None)
+
+    if command == "ps":
+        if rest:
+            print(f"hyperbox ps: unexpected argument {rest[0]!r}\n")
+            print(usage())
+            return 2
+        from hyperbox_mcp.lifecycle import list_sandboxes
+
+        return list_sandboxes()
+
+    if command == "rm":
+        if len(rest) != 1:
+            print("hyperbox rm: needs exactly one sandbox id\n")
+            print(usage())
+            return 2
+        from hyperbox_mcp.lifecycle import remove_sandbox
+
+        return remove_sandbox(rest[0])
+
+    if command == "pull":
+        if len(rest) != 3:
+            print("hyperbox pull: needs <id> <path-in-sandbox> <dest>\n")
+            print(usage())
+            return 2
+        from hyperbox_mcp.lifecycle import pull_from_sandbox
+
+        return pull_from_sandbox(rest[0], rest[1], rest[2])
 
     if command == "logs":
         unknown = [a for a in rest if a not in {"--follow", "-f"}]
