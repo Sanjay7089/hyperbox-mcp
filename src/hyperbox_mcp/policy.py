@@ -173,6 +173,28 @@ _env_root: Path | None = None
 _MTIME_SETTLE_SECONDS = 2.0
 
 
+def environment_allows_network(name: str) -> bool:
+    """Whether this environment was built to keep its network.
+
+    Network posture is server policy, not a caller's choice: no tool
+    parameter can ask for it. It is a property of an environment a HUMAN
+    built with `--allow-network`, which is the same shape as `build`
+    itself being a CLI action -- the agent selects from what a person
+    made, and cannot make one.
+
+    Read per call from the manifest, so turning it on does not need a
+    server restart.
+    """
+    manifest = env_dir() / name / "env.json"
+    try:
+        return bool(
+            json.loads(manifest.read_text(encoding="utf-8")).get("network")
+            == "bridge"
+        )
+    except (OSError, json.JSONDecodeError):
+        return False
+
+
 def _image_from_manifest(directory: Path) -> str | None:
     """The image an environment's manifest names, if it has one.
 

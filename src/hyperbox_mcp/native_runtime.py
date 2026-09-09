@@ -254,6 +254,9 @@ class NativeRuntime:
             )
 
         image = spec["image"]
+        networked = bool(environment) and policy.environment_allows_network(
+            environment
+        )
         if environment:
             available = policy.environments()
             if environment not in available:
@@ -324,8 +327,17 @@ class NativeRuntime:
                 api.run_exec(client, cid, step)
             if packages:
                 self._provision(handle, client, cid, spec, packages)
-            self._seal(handle)
-            self._assert_network_sealed(handle, client, cid)
+            if networked:
+                # Deliberately NOT sealed. A human built this environment
+                # with --allow-network, and the result says so in every
+                # place that otherwise promises the opposite -- the tool
+                # result and capabilities both. A sandbox that can reach
+                # the internet while something still calls it sealed is
+                # the worst outcome available here.
+                handle.meta["network"] = "bridge"
+            else:
+                self._seal(handle)
+                self._assert_network_sealed(handle, client, cid)
         except BaseException:
             try:
                 api.remove_container(client, cid)

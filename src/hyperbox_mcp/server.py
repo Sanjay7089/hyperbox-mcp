@@ -348,7 +348,19 @@ def capabilities() -> str:
             # "data-science" and "live-test" from names alone is guessing,
             # and the image is what tells it which one has what it needs.
             "environments": [
-                {"name": name, "image": image}
+                {
+                    "name": name,
+                    "image": image,
+                    # Stated per environment, because it is the one thing
+                    # that changes what a sandbox from it can do. An agent
+                    # that needs to download a model can pick the right
+                    # one instead of trying and failing.
+                    "network": (
+                        "open"
+                        if policy.environment_allows_network(name)
+                        else "sealed"
+                    ),
+                }
                 for name, image in sorted(policy.environments().items())
             ],
             # What this server CANNOT do, and the command a human runs to
@@ -616,7 +628,15 @@ async def create_sandbox(
         "backend": handle.backend,
         "environment": environment,
         "packages": packages or [],
-        "network": "sealed — this sandbox cannot reach the internet",
+        # Says which it actually is. An environment a human built with
+        # --allow-network keeps its network, and describing that sandbox
+        # as sealed would be the exact lie the read-backs exist to stop.
+        "network": (
+            "OPEN — this sandbox CAN reach the internet, because the "
+            f"environment '{environment}' was built with --allow-network"
+            if handle.meta.get("network") == "bridge"
+            else "sealed — this sandbox cannot reach the internet"
+        ),
         **({"sync": handle.meta["sync"]} if handle.meta.get("sync") else {}),
         "next": (
             f"Call run(sandbox_id='{handle.sandbox_id}', code=...) to execute. "

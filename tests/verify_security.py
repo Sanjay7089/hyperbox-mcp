@@ -16,7 +16,9 @@ compared to what the engine reports about a container that exists.
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
+from pathlib import Path
 
 sys.path.insert(0, "src")
 
@@ -263,6 +265,74 @@ async def main() -> int:
                 gone.get("status") == "destroyed",
                 str(gone),
             )
+
+    # --- a networked environment says so, and a sealed one is sealed ---
+    #
+    # `--allow-network` is the one way a sandbox keeps its network, and it
+    # is a property of an environment a HUMAN built, never a tool
+    # parameter. What matters is that the description and the behaviour
+    # agree in BOTH directions: a sandbox that can reach the internet
+    # while something calls it sealed is the worst outcome available
+    # here, and so is refusing an environment the user deliberately
+    # opened.
+    import json
+    import tempfile
+
+    from hyperbox_mcp.builder import _write_manifest
+
+    env_root = Path(tempfile.mkdtemp(prefix="hyperbox-netenv-"))
+    real_env_dir = os.environ.get("HYPERBOX_ENV_DIR")
+    os.environ["HYPERBOX_ENV_DIR"] = str(env_root)
+    try:
+        image = server._runtime.image_for("python")
+        # Written directly rather than built: this asserts how the flag is
+        # HONOURED, and a pull would only re-test the builder.
+        _write_manifest("netopen", image, "image", backend, allow_network=True)
+        _write_manifest("netsealed", image, "image", backend, allow_network=False)
+
+        probe = (
+            "import socket\n"
+            "try:\n"
+            "    socket.create_connection(('1.1.1.1', 443), 5)\n"
+            "    print('REACHABLE')\n"
+            "except Exception:\n"
+            "    print('SEALED')\n"
+        )
+        async with Client(server.mcp) as client:
+            for env, expect in (("netopen", "REACHABLE"), ("netsealed", "SEALED")):
+                made = (
+                    await client.call_tool(
+                        "create_sandbox",
+                        {"language": "python", "backend": backend,
+                         "environment": env},
+                    )
+                ).data
+                if "error" in made:
+                    check(f"environment '{env}' can be created", False,
+                          str(made)[:140])
+                    continue
+                sid = made["sandbox_id"]
+                try:
+                    said_open = "CAN reach the internet" in made["network"]
+                    got = (
+                        await client.call_tool(
+                            "run", {"sandbox_id": sid, "code": probe}
+                        )
+                    ).data["stdout"].strip()
+                    check(
+                        f"'{env}' behaves the way its result describes it",
+                        got == expect and said_open == (expect == "REACHABLE"),
+                        f"result says {'open' if said_open else 'sealed'}, "
+                        f"probe says {got}, expected {expect}",
+                    )
+                finally:
+                    await client.call_tool("destroy_sandbox",
+                                           {"sandbox_id": sid})
+    finally:
+        if real_env_dir is None:
+            os.environ.pop("HYPERBOX_ENV_DIR", None)
+        else:
+            os.environ["HYPERBOX_ENV_DIR"] = real_env_dir
 
     failed = [r for r in results if not r[1]]
     print(f"\n{len(results) - len(failed)}/{len(results)} passed")

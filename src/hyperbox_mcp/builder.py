@@ -44,7 +44,10 @@ def _resolve_engine(choice: str) -> tuple[EngineClient, engine.Resolution]:
     return EngineClient(resolution.endpoint, timeout=1800.0), resolution
 
 
-def _write_manifest(name: str, image: str, source: str, product: str) -> Path:
+def _write_manifest(
+    name: str, image: str, source: str, product: str,
+    allow_network: bool = False,
+) -> Path:
     """Record what this environment is, so the server can resolve it.
 
     A pulled image has no Dockerfile and no predictable tag, so the
@@ -59,6 +62,10 @@ def _write_manifest(name: str, image: str, source: str, product: str) -> Path:
                 "image": image,
                 "source": source,
                 "engine": product,
+                # Absent means sealed. Only ever written by an explicit
+                # --allow-network, so an environment cannot acquire a
+                # network by upgrade or by accident.
+                "network": "bridge" if allow_network else "sealed",
                 "built_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             },
             indent=2,
@@ -96,6 +103,7 @@ def run_build(
     image: str | None = None,
     engine_choice: str = "auto",
     no_cache: bool = False,
+    allow_network: bool = False,
 ) -> int:
     try:
         name = validate.environment_name(env_name)
@@ -129,8 +137,10 @@ def run_build(
     target = f"{policy.LOCAL_IMAGE_PREFIX}{name}"
     try:
         if image:
-            return _pull(client, resolution, image, target, name)
-        return _build(client, resolution, Path(dockerfile), target, name, no_cache)
+            return _pull(client, resolution, image, target, name,
+                         allow_network)
+        return _build(client, resolution, Path(dockerfile), target, name,
+                      no_cache, allow_network)
     except errors.HyperBoxError as exc:
         say(exc.message, icon="fail")
         if exc.fix:
@@ -141,18 +151,19 @@ def run_build(
         return 130
 
 
-def _pull(client, resolution, reference, target, name) -> int:
+def _pull(client, resolution, reference, target, name, allow_network=False) -> int:
     say(f"Pulling {reference}...", icon="pull")
     with EngineProgress(f"pulling {reference}") as progress:
         for event in api.pull_image(client, reference):
             progress.update(event)
     api.tag_image(client, reference, target, "latest")
-    manifest = _write_manifest(name, f"{target}:latest", "image", resolution.product)
+    manifest = _write_manifest(name, f"{target}:latest", "image",
+                               resolution.product, allow_network)
     _done(name, f"{target}:latest", manifest)
     return 0
 
 
-def _build(client, resolution, path, target, name, no_cache) -> int:
+def _build(client, resolution, path, target, name, no_cache, allow_network=False) -> int:
     """Build from a Dockerfile, which may be a file or a directory."""
     path = path.expanduser().resolve()
     if path.is_dir():
@@ -188,7 +199,7 @@ def _build(client, resolution, path, target, name, no_cache) -> int:
         return 1
 
     manifest = _write_manifest(name, f"{target}:latest", "dockerfile",
-                               resolution.product)
+                               resolution.product, allow_network)
     _done(name, f"{target}:latest", manifest)
     return 0
 

@@ -33,9 +33,13 @@ limited while being nothing of the sort.
 
 ## The network is severed before your code runs, and proven severed
 
-Submitted code never runs with network access. There is exactly one moment
-a sandbox can reach the internet, and it is over before the sandbox is
-handed to you:
+**Unless you deliberately built an environment that keeps it.** That is
+the one exception, it is described in full below, and nothing an agent
+can say brings it about — see *Environments that keep their network*.
+
+For every ordinary sandbox: submitted code never runs with network
+access. There is exactly one moment a sandbox can reach the internet, and
+it is over before the sandbox is handed to you:
 
 1. The container starts with a network attached.
 2. Packages you declared in `create_sandbox(packages=[...])` are
@@ -68,6 +72,43 @@ code held back. But it re-opens the network **on a sandbox that was
 already sealed**, which is precisely the window create-time provisioning
 removes. Declare packages at create time instead. It will be refused in a
 future release.
+
+## Environments that keep their network
+
+Some work genuinely needs the internet at run time — fetching a model,
+talking to a staging API. That is possible, and it is deliberately
+awkward in a specific way: **it is not something an agent can ask for.**
+
+There is no tool parameter for it. Network posture is server policy, like
+memory and CPU, and no argument to `create_sandbox` can change it. The
+only way a sandbox keeps its network is if a human built the environment
+that way:
+
+```bash
+hyperbox build scraper --image python:3.12-slim --allow-network
+```
+
+An agent can then select it — `create_sandbox(environment="scraper")` —
+exactly as it selects any other environment. It can never create one.
+
+**Such a sandbox says so, everywhere.** The `create_sandbox` result reads
+*"OPEN — this sandbox CAN reach the internet"* rather than the usual
+"sealed", and `hyperbox://capabilities` marks the environment `"network":
+"open"` so an agent can tell before it chooses. The seal verification is
+skipped for it, because there is no seal to verify — not quietly, but as
+the stated consequence of a flag a person passed.
+
+The acceptance suite asserts both directions: an open environment must
+actually reach the network AND describe itself as open, and a sealed one
+must do neither. A sandbox that can reach the internet while something
+still calls it sealed is the worst outcome available here, so it is
+tested from both sides rather than assumed.
+
+**What you are accepting.** Code in such a sandbox can reach anything
+your machine can, including your LAN and any local services. It is still
+contained in every other way — the filesystem, the limits, the engine
+socket — but the network boundary is off. Use it for the task that needs
+it, not as a default.
 
 ## Custom environments
 

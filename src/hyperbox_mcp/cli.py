@@ -32,6 +32,7 @@ def usage() -> str:
         "    --image <ref>          Pull an existing image and register it\n"
         "    --engine docker|podman Override which engine to use\n"
         "    --no-cache             Build without reusing cached layers\n"
+        "    --allow-network        Sandboxes from it keep internet access\n"
         "  hyperbox ps              List sandboxes on file\n"
         "  hyperbox rm <id>         Destroy one sandbox\n"
         "  hyperbox pull <id> <path> <dest>\n"
@@ -248,6 +249,7 @@ def _dispatch(argv: list[str]) -> int:
         name, *opts = rest
         dockerfile = image = None
         engine_choice, no_cache = "auto", False
+        allow_network = False
         takes_value = {"--dockerfile", "--custom", "--image", "--engine"}
         while opts:
             arg = opts.pop(0)
@@ -266,6 +268,8 @@ def _dispatch(argv: list[str]) -> int:
                     engine_choice = value
             elif arg == "--no-cache":
                 no_cache = True
+            elif arg == "--allow-network":
+                allow_network = True
             else:
                 print(f"hyperbox build: unknown option {arg!r}\n")
                 print(usage())
@@ -276,7 +280,8 @@ def _dispatch(argv: list[str]) -> int:
             return 2
         from hyperbox_mcp.builder import run_build
 
-        return run_build(name, dockerfile, image, engine_choice, no_cache)
+        return run_build(name, dockerfile, image, engine_choice, no_cache,
+                         allow_network)
 
     print(usage())
     return 2
