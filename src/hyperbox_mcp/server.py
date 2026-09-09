@@ -50,10 +50,13 @@ from hyperbox_mcp.registry import Registry
 from hyperbox_mcp.runtime import Runtime, SandboxHandle
 from hyperbox_mcp.validate import InvalidInput
 
-LOG_DIR = Path.home() / ".hyperbox" / "logs"
-LOG_FILE = LOG_DIR / "server.log"
-LOG_MAX_BYTES = 5_000_000
-LOG_BACKUPS = 3
+#: Re-exported from policy so `from hyperbox_mcp.server import LOG_FILE`
+#: keeps working; policy is where they live now, because the CLI needs
+#: them without paying for this module.
+LOG_DIR = policy.LOG_DIR
+LOG_FILE = policy.LOG_FILE
+LOG_MAX_BYTES = policy.LOG_MAX_BYTES
+LOG_BACKUPS = policy.LOG_BACKUPS
 
 logger = logging.getLogger("hyperbox")
 
@@ -806,28 +809,15 @@ def serve() -> None:
 
 
 def main() -> None:
-    """Entry point for the `hyperbox` command.
+    """Kept so `python -m hyperbox_mcp.server` still works.
 
-    With no arguments it starts the stdio MCP server, so an existing
-    client configuration keeps working unchanged. Subcommands are for
-    humans at a terminal and never write to the stdio channel a client
-    is using.
+    The `hyperbox` entry point is cli.main, which dispatches subcommands
+    without importing this module at all. Anyone already here has paid
+    for the import, so this just forwards.
     """
-    argv = sys.argv[1:]
-    if argv and argv[0] in {
-        "doctor", "config", "envs", "build", "logs",
-        "--version", "-V", "help", "--help", "-h",
-    }:
-        from hyperbox_mcp.cli import dispatch
+    from hyperbox_mcp.cli import main as cli_main
 
-        raise SystemExit(dispatch(argv))
-    if argv:
-        from hyperbox_mcp.cli import usage
-
-        print(f"hyperbox: unknown argument {argv[0]!r}\n", file=sys.stderr)
-        print(usage(), file=sys.stderr)
-        raise SystemExit(2)
-    serve()
+    cli_main()
 
 
 if __name__ == "__main__":

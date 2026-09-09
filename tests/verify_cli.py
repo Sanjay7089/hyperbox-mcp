@@ -98,6 +98,36 @@ def main() -> int:
         f"stderr={r.stderr.strip()[:160]!r}" if r.stderr.strip() else "clean",
     )
 
+    # --- 1b. a subcommand does not start a server ----------------------
+    #
+    # The entry point used to be server:main, so importing it built a
+    # FastMCP instance, instantiated a runtime and constructed a Registry
+    # -- mkdir, legacy-state migration, SQLite with WAL -- before looking
+    # at argv. `hyperbox --version` took 0.87s against a 0.02s bare
+    # interpreter and created directories to print a string.
+    #
+    # Measured with -X importtime rather than by timing, because a slow
+    # machine makes a wall-clock threshold flaky while the import either
+    # happens or does not.
+    probe = subprocess.run(
+        [sys.executable, "-X", "importtime", "-c",
+         "import sys; sys.argv = ['hyperbox', '--version']\n"
+         "from hyperbox_mcp.cli import main\n"
+         "try:\n    main()\nexcept SystemExit:\n    pass\n"],
+        capture_output=True, text=True, timeout=120,
+        cwd=Path(__file__).resolve().parent.parent,
+        env={**os.environ, "PYTHONPATH": "src"},
+    )
+    heavy = [
+        name for name in ("fastmcp", "sqlite3")
+        if any(line.rstrip().endswith(name) for line in probe.stderr.splitlines())
+    ]
+    check(
+        "a subcommand does not import the MCP server stack",
+        not heavy,
+        f"imported: {heavy}" if heavy else "no fastmcp, no sqlite3",
+    )
+
     # --- 2. help and unknown input -------------------------------------
     r = run("help")
     check(

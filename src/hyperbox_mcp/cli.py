@@ -54,7 +54,7 @@ def _logs(follow: bool = False) -> int:
     """
     import time
 
-    from hyperbox_mcp.server import LOG_FILE
+    from hyperbox_mcp.policy import LOG_FILE
 
     if not LOG_FILE.exists():
         print(f"No log yet at {LOG_FILE}")
@@ -76,6 +76,41 @@ def _logs(follow: bool = False) -> int:
                     time.sleep(0.4)
         except KeyboardInterrupt:
             return 0
+
+
+#: Subcommands, and the fact that they are all served without importing
+#: the MCP server. That is the point of this module being the entry
+#: point: `hyperbox --version` used to take 0.87s against a 0.02s bare
+#: interpreter, because importing server.py builds a FastMCP instance
+#: (~200ms on its own), instantiates a runtime, and constructs a
+#: Registry -- which mkdirs, migrates legacy state and opens SQLite with
+#: WAL. Printing a version string created directories and a database.
+SUBCOMMANDS = frozenset({
+    "doctor", "config", "envs", "build", "logs",
+    "--version", "-V", "help", "--help", "-h",
+})
+
+
+def main() -> None:
+    """Entry point for the `hyperbox` command.
+
+    With no arguments it starts the stdio MCP server, so an existing
+    client configuration keeps working unchanged. Subcommands are for
+    humans at a terminal, never touch the stdio channel a client is
+    using, and are dispatched WITHOUT importing the server.
+    """
+    argv = sys.argv[1:]
+    if argv and argv[0] in SUBCOMMANDS:
+        raise SystemExit(dispatch(argv))
+    if argv:
+        print(f"hyperbox: unknown argument {argv[0]!r}\n", file=sys.stderr)
+        print(usage(), file=sys.stderr)
+        raise SystemExit(2)
+
+    # Only now is the server worth loading.
+    from hyperbox_mcp.server import serve
+
+    serve()
 
 
 def dispatch(argv: list[str]) -> int:

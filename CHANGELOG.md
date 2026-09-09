@@ -5,13 +5,14 @@ All notable changes to HyperBox are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.3.1] — unreleased
-
-Found by driving 0.3.0 through a full acceptance run in a real MCP
-client. Two of these are the failure this project exists to prevent: a
-confident, wrong answer.
+## [0.4.0] — unreleased
 
 ### Fixed
+
+Found by driving 0.3.0 through a full acceptance run in a real MCP
+client, and by testing the CLI as a program rather than a library. Two
+of these are the failure this project exists to prevent: a confident,
+wrong answer.
 
 - **A sandbox advertising `memory: "1g"` allowed 2 GB.** Setting Docker's
   `Memory` without `MemorySwap` makes it default `MemorySwap` to *twice*

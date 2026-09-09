@@ -57,6 +57,16 @@ _BUILTIN_ENVIRONMENTS: dict[str, str] = {
     "python": "ghcr.io/vndee/sandbox-python-311-bullseye:latest",
 }
 
+#: Where the server writes its log. Here rather than in server.py so a
+#: CLI subcommand can find it without importing the MCP server, which
+#: costs ~200ms of fastmcp import, a runtime instantiation and a SQLite
+#: open -- all of it to print a path.
+LOG_DIR = Path.home() / ".hyperbox" / "logs"
+LOG_FILE = LOG_DIR / "server.log"
+LOG_MAX_BYTES = 5_000_000
+LOG_BACKUPS = 3
+
+
 def env_dir() -> Path:
     """Where locally built environments live.
 
