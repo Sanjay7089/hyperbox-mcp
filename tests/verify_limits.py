@@ -193,9 +193,19 @@ async def main() -> int:
             )
         )
         elapsed = time.time() - t0
+        # The code sleeps 300s and asks for 600s. If the cap were not
+        # applied, elapsed would be ~300 (the sleep) or ~600 (the
+        # request), so anything comfortably under 300 proves clamping.
+        #
+        # The bound was cap*2 = 120s, which left only 60s for the kill
+        # and its verification and so failed on a loaded machine while
+        # clamping worked perfectly -- measured at 131s here, and the
+        # same check has been seen to take 1846s on UNMODIFIED main under
+        # load. That made it a latency benchmark, not a correctness
+        # check. 240s still catches a real regression by a wide margin.
         check(
             "oversized timeout is clamped to the server cap",
-            elapsed < (policy.MAX_TIMEOUT_SECONDS * 2) and r.get("success") is False,
+            elapsed < 240 and r.get("success") is False,
             f"elapsed={elapsed:.1f}s cap={policy.MAX_TIMEOUT_SECONDS:g}s "
             f"timed_out={r.get('timed_out')}",
         )

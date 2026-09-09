@@ -377,6 +377,23 @@ NO_NEW_PRIVILEGES = True
 # --- execution ceilings --------------------------------------------------
 
 MAX_TIMEOUT_SECONDS = 60.0
+
+#: How long the HTTP connection to the engine may block, and it MUST
+#: exceed MAX_TIMEOUT_SECONDS by a real margin.
+#:
+#: They used to be equal, both 60.0, which made a run at the cap a race
+#: between two timeouts: if the host-side deadline fired first the caller
+#: got a clean `timed_out: true`, and if the socket read fired first the
+#: worker died early, `worker.is_alive()` was False, the timeout branch
+#: was skipped and a raw "TimeoutError: timed out" came back as
+#: UNEXPECTED. A coin flip that read as flakiness under load, and a
+#: timeout reporting the wrong thing -- the failure this project exists
+#: to prevent.
+#:
+#: The sandbox deadline must always win. The margin covers the kill and
+#: its verification, which happen after the deadline on the same
+#: connection.
+ENGINE_SOCKET_TIMEOUT = MAX_TIMEOUT_SECONDS + 120.0
 DEFAULT_TIMEOUT_SECONDS = 30.0
 MAX_OUTPUT_CHARS = 20_000
 MAX_CODE_CHARS = 1024 * 1024

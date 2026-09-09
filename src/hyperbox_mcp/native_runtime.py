@@ -121,7 +121,12 @@ class NativeRuntime:
         if existing is None:
             from hyperbox_mcp import engine
 
-            existing = EngineClient(engine.endpoint_for(backend))
+            # Explicit, not the default: the socket must outlive the
+            # longest run it carries, or the two timeouts race.
+            existing = EngineClient(
+                engine.endpoint_for(backend),
+                timeout=policy.ENGINE_SOCKET_TIMEOUT,
+            )
             self._clients[backend] = existing
         return existing
 
