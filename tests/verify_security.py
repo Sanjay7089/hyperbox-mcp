@@ -275,7 +275,6 @@ async def main() -> int:
     # while something calls it sealed is the worst outcome available
     # here, and so is refusing an environment the user deliberately
     # opened.
-    import json
     import tempfile
 
     from hyperbox_mcp.builder import _write_manifest
