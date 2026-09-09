@@ -2,10 +2,12 @@ name: CI
 
 on:
   push:
-    # The v0.3 work happens on its own branch and is not merged until it
-    # has passed on Windows and in a real MCP client, so the branch needs
-    # the same three-OS host checks main gets.
-    branches: [main, v0.3-engine]
+    # Release work happens on its own branch and is not merged until it
+    # has passed on Windows and in a real MCP client, so those branches
+    # need the same three-OS host checks main gets. A pattern rather
+    # than a list: naming one release branch means the next one silently
+    # gets no CI, which is what happened to v0.3.1.
+    branches: [main, "v*"]
   pull_request:
 
 jobs:
