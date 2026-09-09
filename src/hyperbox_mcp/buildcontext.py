@@ -95,3 +95,96 @@ def build_tar(context: Path, dockerfile: Path | None = None) -> tuple[bytes, str
                 included += 1
 
     return buffer.getvalue(), name, included
+
+
+def read_ignore(source: Path, filename: str) -> list[str]:
+    """Patterns from an ignore file, comments and blanks dropped."""
+    path = source / filename
+    if not path.is_file():
+        return []
+    patterns = []
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw.strip()
+        if line and not line.startswith("#"):
+            patterns.append(line.rstrip("/"))
+    return patterns
+
+
+def sync_tar(
+    source: Path,
+    *,
+    ignore_file: str,
+    deny_files: tuple[str, ...],
+    deny_dirs: tuple[str, ...],
+    max_bytes: int,
+    max_files: int,
+) -> tuple[bytes, dict]:
+    """Tar a host directory to sync into a sandbox.
+
+    Returns (tar bytes, manifest). The manifest records what went in AND
+    everything that did not, with a reason for each — because a file that
+    silently fails to arrive is indistinguishable, from inside the
+    sandbox, from a file the agent never wrote. It then invents an
+    explanation. Naming the exclusion is the whole point.
+
+    Deliberately reads `ignore_file` (.hyperboxignore) rather than
+    .dockerignore. A .dockerignore describes what should not go into a
+    production IMAGE, and a project that excludes tests/ or *.sql from
+    its image excludes exactly what an integration run needs synced.
+
+    Over a cap this RAISES rather than truncating. A half-copied
+    directory is the silent-wrong-answer failure again: the sandbox
+    looks populated and is not.
+    """
+    patterns = read_ignore(source, ignore_file)
+    buffer = io.BytesIO()
+    skipped: list[dict] = []
+    included = 0
+    total = 0
+
+    with tarfile.open(fileobj=buffer, mode="w") as archive:
+        for path in sorted(source.rglob("*")):
+            relative = str(path.relative_to(source))
+            parts = Path(relative).parts
+
+            if path.is_symlink():
+                # Not followed: a link inside the tree can point anywhere,
+                # including outside every allowed root.
+                skipped.append({"path": relative, "reason": "symlink"})
+                continue
+            if not path.is_file():
+                continue
+            if path.name in deny_files or any(p in deny_dirs for p in parts):
+                skipped.append({"path": relative, "reason": "secret"})
+                continue
+            if excluded(relative, patterns):
+                skipped.append({"path": relative, "reason": "ignored"})
+                continue
+
+            size = path.stat().st_size
+            if included + 1 > max_files:
+                raise ValueError(
+                    f"{source} holds more than {max_files} files to sync. "
+                    "Narrow sync_in_dir to the directory actually needed, "
+                    f"or exclude what is not in a {ignore_file}."
+                )
+            if total + size > max_bytes:
+                limit = (
+                    f"{max_bytes / (1024 * 1024):.0f} MB"
+                    if max_bytes >= 1024 * 1024
+                    else f"{max_bytes} bytes"
+                )
+                raise ValueError(
+                    f"{source} is larger than the {limit} sync limit "
+                    f"(reached at {relative}). Narrow sync_in_dir, or "
+                    f"exclude what is not needed in a {ignore_file}."
+                )
+            archive.add(path, arcname=relative)
+            included += 1
+            total += size
+
+    return buffer.getvalue(), {
+        "files": included,
+        "bytes": total,
+        "skipped": skipped,
+    }

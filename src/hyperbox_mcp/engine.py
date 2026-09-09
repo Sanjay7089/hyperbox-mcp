@@ -1218,6 +1218,19 @@ def resolve(preferred: str = "auto") -> Resolution:
             )
         return Resolution(backend, target, version, product, rejected)
 
+    if preferred != "auto":
+        # A specific engine was asked for and could not be reached. Saying
+        # "no container engine is reachable" would be a broader claim than
+        # anything was checked -- only this one was -- and it is plainly
+        # false on a machine where the other engine is running fine.
+        why = dict(rejected).get(preferred, "it could not be reached")
+        raise EngineUnavailableError(
+            f"'{preferred}' is not reachable: {why}",
+            fix=f"Start {preferred}, or pass backend='auto' to use "
+                "whichever engine is running.",
+            context={"requested": preferred},
+        )
+
     raise NoEngineError(
         "No container engine is reachable, so there is nowhere to run code.\n"
         + "\n".join(f"  {name}: {why}" for name, why in rejected),

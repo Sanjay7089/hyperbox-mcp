@@ -35,9 +35,10 @@ from __future__ import annotations
 import shlex
 import threading
 import uuid
+from pathlib import Path as PathType
 from typing import Any
 
-from hyperbox_mcp import errors, policy, sandbox_ops
+from hyperbox_mcp import buildcontext, errors, policy, sandbox_ops
 from hyperbox_mcp.rest import api
 from hyperbox_mcp.rest.client import EngineClient
 from hyperbox_mcp.runtime import ExecResult, SandboxHandle
@@ -156,6 +157,31 @@ class NativeRuntime:
 
         return get
 
+    def _sync_in(self, client, cid, source) -> dict:
+        """Copy a host directory into the sandbox, and say what arrived.
+
+        Into CODE_DIR, never /work: the archive API cannot write through
+        a tmpfs mount on Docker -- it returns 200 having put the files in
+        the layer the mount hides.
+
+        The manifest goes back to the caller because a file that does not
+        arrive is, from inside the sandbox, indistinguishable from one the
+        agent never wrote. Told which files were skipped and why, it can
+        act; left to guess, it invents a reason.
+        """
+        blob, manifest = buildcontext.sync_tar(
+            source,
+            ignore_file=policy.SYNC_IGNORE_FILE,
+            deny_files=policy.SYNC_DENYLIST,
+            deny_dirs=policy.SYNC_DENY_DIRS,
+            max_bytes=policy.SYNC_MAX_BYTES,
+            max_files=policy.SYNC_MAX_FILES,
+        )
+        api.put_tree(client, cid, policy.CODE_DIR, blob)
+        manifest["from"] = str(source)
+        manifest["to"] = policy.CODE_DIR
+        return manifest
+
     def _seal(self, handle: SandboxHandle) -> None:
         client = self._client(handle.backend)
         cid = self._ref(handle)
@@ -205,6 +231,7 @@ class NativeRuntime:
         self, language: str, backend: str, sandbox_id: str,
         environment: str | None = None,
         packages: list[str] | None = None,
+        sync_in_dir: "PathType | None" = None,
     ) -> SandboxHandle:
         """Create a sandbox, provision it, then sever its network for good.
 
@@ -291,6 +318,8 @@ class NativeRuntime:
                 api.inspect_container(client, cid), sandbox_id
             )
             api.run_exec(client, cid, ["mkdir", "-p", policy.CODE_DIR])
+            if sync_in_dir is not None:
+                handle.meta["sync"] = self._sync_in(client, cid, sync_in_dir)
             for step in spec.get("setup", []):
                 api.run_exec(client, cid, step)
             if packages:

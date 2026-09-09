@@ -16,6 +16,8 @@ bug, not a shortcut.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
@@ -79,6 +81,8 @@ class Runtime(Protocol):
     def create(
         self, language: str, backend: str, sandbox_id: str,
         environment: str | None = None,
+        packages: list[str] | None = None,
+        sync_in_dir: "Path | None" = None,
     ) -> SandboxHandle:
         """Create and open a persistent sandbox under the given id.
 

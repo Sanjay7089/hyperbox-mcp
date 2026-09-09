@@ -546,16 +546,32 @@ def main() -> int:
                 resolved == "podman",
                 f"auto resolved to {resolved!r} with every endpoint served by podman",
             )
-            refused = False
+            refused = None
             try:
                 engine.detect("docker")
             except engine.EngineUnavailableError as exc:
-                refused = "podman" in str(exc)
-            check(
-                "asking for the wrong engine is refused, not silently honoured",
-                refused,
-                "requesting docker on a podman-only machine names podman in the error",
-            )
+                refused = str(exc)
+            if refused is None:
+                check(
+                    "asking for the wrong engine is refused, not silently honoured",
+                    False,
+                    "detect('docker') returned instead of refusing",
+                )
+            elif "podman" in refused:
+                check(
+                    "asking for the wrong engine is refused, not silently honoured",
+                    True,
+                    "requesting docker on a podman-only machine names podman",
+                )
+            else:
+                # Docker's endpoint is not reachable at all here, so the
+                # "served by the other engine" case cannot be built. Not a
+                # pass: the scenario went untested.
+                skip(
+                    "asking for the wrong engine is refused, not silently honoured",
+                    f"docker endpoint unreachable, so the case cannot be "
+                    f"constructed: {refused[:80]}",
+                )
         finally:
             engine.identify_version = real_identify
             engine.reset_clients()

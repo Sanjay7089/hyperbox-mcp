@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import math
 import re
+from pathlib import Path
 
 from hyperbox_mcp import errors, policy
 from hyperbox_mcp.policy import (
@@ -230,3 +231,65 @@ def environment(value: object) -> str | None:
             "hyperbox build <name> --image <ref>   (or --dockerfile <path>)"
         )
     return name
+
+
+def sync_dir(value: object) -> Path | None:
+    """Resolve a host directory the caller wants synced in. None = nothing.
+
+    Not a pure function, unlike everything above it: deciding whether a
+    path is inside an allowed root means asking the filesystem what the
+    path really is. A prefix comparison on the string is not enough --
+    a directory inside a root can be a symlink pointing anywhere, so both
+    sides are resolved before they are compared.
+
+    The roots come from a file the user writes (see policy.sync_roots).
+    Unset means the feature is off, and that is the default: host files
+    reach a sandbox only because a human named the directory they may
+    come from.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise InvalidInput(
+            "sync_in_dir must be a path to a directory on the user's "
+            "machine, or omitted."
+        )
+
+    roots = policy.sync_roots()
+    if not roots:
+        raise InvalidInput(
+            "Syncing host files is not enabled on this machine, so "
+            "sync_in_dir cannot be used.",
+            fix="The user enables it at their terminal, once, by running "
+                "`hyperbox init` in a directory they are willing to share. "
+                "You cannot run it for them.",
+        )
+
+    try:
+        candidate = Path(value).expanduser().resolve(strict=True)
+    except OSError as exc:
+        raise InvalidInput(
+            f"sync_in_dir '{value}' does not exist on the user's machine.",
+            fix="Ask the user for the correct path, or omit sync_in_dir.",
+            context={"path": str(value), "error": str(exc)},
+        ) from exc
+
+    if not candidate.is_dir():
+        raise InvalidInput(
+            f"sync_in_dir '{value}' is not a directory.",
+            fix="Pass a directory; a single file cannot be synced.",
+        )
+
+    for root in roots:
+        if candidate == root or root in candidate.parents:
+            return candidate
+
+    raise InvalidInput(
+        f"'{candidate}' is outside every directory the user allows "
+        "syncing from.",
+        fix="Allowed: " + ", ".join(str(r) for r in roots) + ". Ask the "
+            "user to run `hyperbox init` in the directory they want to "
+            "share, if it should be one of them.",
+        context={"requested": str(candidate),
+                 "roots": [str(r) for r in roots]},
+    )

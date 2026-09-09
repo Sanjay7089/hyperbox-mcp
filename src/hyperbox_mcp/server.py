@@ -23,6 +23,7 @@ lifecycle race this server has had.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import logging.handlers
@@ -141,6 +142,24 @@ def select_runtime(choice: str | None = None) -> Runtime:
         f"Unknown HYPERBOX_RUNTIME '{name}'. Choose one of: "
         f"{', '.join(RUNTIME_CHOICES)}."
     )
+
+
+def _create_parameters() -> frozenset[str]:
+    """Which optional arguments the active runtime's create() accepts.
+
+    Read from the signature rather than tracked by hand: the two runtimes
+    genuinely differ, and a list maintained separately drifts silently
+    into passing a keyword that raises TypeError.
+    """
+    global _create_params
+    if _create_params is None:
+        _create_params = frozenset(
+            inspect.signature(_runtime.create).parameters
+        )
+    return _create_params
+
+
+_create_params: frozenset[str] | None = None
 
 
 # The one place a concrete backend is chosen.
@@ -427,6 +446,7 @@ async def create_sandbox(
     backend: str = "auto",
     environment: str | None = None,
     packages: list[str] | None = None,
+    sync_in_dir: str | None = None,
 ) -> dict:
     """Create a disposable container to run untrusted or unverified code in.
 
@@ -477,10 +497,24 @@ async def create_sandbox(
     `hyperbox://capabilities` carries a `host_actions` block with the exact
     command to give them.
 
+    `sync_in_dir` copies a directory from the user's machine into the
+    sandbox at /sandbox, so you can run their real code and their real
+    test data instead of a snippet you retyped. It is OFF unless the user
+    has allowed it: they run `hyperbox init` once, in a directory they are
+    willing to share, and only paths under an allowed directory are
+    accepted. You cannot run `hyperbox init` for them — ask.
+
+    The result carries a `sync` manifest saying how many files arrived and
+    naming every one that did not, with a reason: secrets like .env are
+    never copied, and a .hyperboxignore is honoured. READ IT. If a file
+    you expected is missing it will be named there, which is faster and
+    more honest than guessing why an import failed.
+
     Read the `hyperbox://capabilities` resource for exact limits.
     """
     try:
         language = validate.language(language, _runtime.supported_languages())
+        synced_from = validate.sync_dir(sync_in_dir)
         requested = validate.backend(backend)
         environment = validate.environment(environment)
         packages = validate.libraries(packages)
@@ -528,11 +562,28 @@ async def create_sandbox(
                 sandbox_id=sandbox_id,
                 environment=environment,
             )
-            # Only the native runtime provisions at create time. Passing
-            # `packages` to one that cannot honour it would silently drop
-            # them, so it is offered only where it means something.
-            if packages:
-                create_kwargs["packages"] = packages
+            # Only the native runtime provisions at create time or syncs
+            # files in. Passing either to a runtime that cannot honour it
+            # would silently drop it -- and passing a keyword its create()
+            # does not take raises a TypeError the caller cannot act on.
+            # So the capability is checked, and an unsupported request is
+            # REFUSED with a reason rather than ignored.
+            accepted = _create_parameters()
+            for name, value in (("packages", packages),
+                                ("sync_in_dir", synced_from)):
+                if not value:
+                    continue
+                if name not in accepted:
+                    _registry.remove(sandbox_id)
+                    return errors.to_result(InvalidInput(
+                        f"The active runtime ({type(_runtime).__name__}) "
+                        f"cannot honour `{name}`.",
+                        fix="Unset HYPERBOX_RUNTIME to use the default "
+                            "native runtime, which supports it.",
+                        context={"runtime": type(_runtime).__name__,
+                                 "parameter": name},
+                    ))
+                create_kwargs[name] = value
             def create_under_slot():
                 # Bounded across processes: several servers commonly share
                 # one engine, and simultaneous image pulls are what
@@ -566,6 +617,7 @@ async def create_sandbox(
         "environment": environment,
         "packages": packages or [],
         "network": "sealed — this sandbox cannot reach the internet",
+        **({"sync": handle.meta["sync"]} if handle.meta.get("sync") else {}),
         "next": (
             f"Call run(sandbox_id='{handle.sandbox_id}', code=...) to execute. "
             "Call destroy_sandbox when done."

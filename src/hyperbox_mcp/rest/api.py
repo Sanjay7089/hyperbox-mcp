@@ -41,7 +41,7 @@ from hyperbox_mcp.policy import (
     TMPFS_PATHS,
     TMPFS_SIZE,
 )
-from hyperbox_mcp.rest.client import EngineClient
+from hyperbox_mcp.rest.client import EngineClient, _message
 
 
 def identify(client: EngineClient) -> str:
@@ -188,6 +188,57 @@ def run_exec(client: EngineClient, cid: str, argv: list[str]) -> tuple[int, str,
 
 
 # --- images -----------------------------------------------------------
+
+
+def put_tree(client: EngineClient, cid: str, dest: str, tar_bytes: bytes) -> None:
+    """Extract a prepared tar into `dest` inside the container.
+
+    Same endpoint as put_file and the same tmpfs trap: on Docker a write
+    under a tmpfs mount returns 200 and lands in the image layer beneath
+    it, where nothing can see it. Callers sync into CODE_DIR for that
+    reason, and this refuses anything else rather than no-op.
+    """
+    for mount in TMPFS_PATHS:
+        if dest == mount or dest.startswith(mount + "/"):
+            raise errors.ProvisionError(
+                f"Cannot extract into {dest}: {mount} is a tmpfs mount, "
+                "and on Docker the write lands in the layer underneath it "
+                "and is never visible.",
+                fix=f"Sync into {CODE_DIR} instead.",
+                context={"dest": dest, "tmpfs": mount},
+            )
+    client._raw(  # noqa: SLF001 - a tar body is not JSON
+        "PUT",
+        f"{client.api}/containers/{cid}/archive?path={dest}",
+        tar_bytes,
+        {"Content-Type": "application/x-tar"},
+    )
+
+
+def get_archive(client: EngineClient, cid: str, path: str) -> bytes:
+    """The tar the engine produces for `path` inside the container.
+
+    Returned whole rather than streamed: the caller caps what it will
+    accept before extracting, and a bounded read is simpler to reason
+    about than a bounded stream. Everything in here was written by code
+    running in the sandbox, so the extraction on the other side treats it
+    as hostile.
+    """
+    status, raw = client._raw(  # noqa: SLF001 - a tar body is not JSON
+        "GET", f"{client.api}/containers/{cid}/archive?path={path}"
+    )
+    if status == 404:
+        raise errors.ProvisionError(
+            f"{path} does not exist in the sandbox.",
+            fix="Check the path. `run` a listing first if you are unsure.",
+            context={"path": path},
+        )
+    if status != 200:
+        raise errors.EngineRefusedError(
+            f"GET archive {path} returned {status}: {_message(raw)}",
+            context={"path": path, "status": status},
+        )
+    return raw
 
 
 def image_present(client: EngineClient, image: str) -> bool:

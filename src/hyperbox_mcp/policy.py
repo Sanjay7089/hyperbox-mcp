@@ -81,6 +81,75 @@ def env_dir() -> Path:
     return Path.home() / ".hyperbox" / "environments"
 
 
+# --- host directories a caller may sync from ----------------------------
+#
+# Read from a FILE, not an environment variable, and resolved per call.
+# `hyperbox init` runs in a short-lived CLI process while the server has
+# often been running for days inside an editor, and a child process
+# cannot change its parent's environment -- so an env-var gate could
+# never be configured by the command meant to configure it. Same reason
+# environments are resolved per call, and the same fix.
+#
+# HYPERBOX_SYNC_ROOTS still overrides, for CI and headless runs where the
+# process is short-lived and a file is awkward.
+#
+# Unset means the feature is OFF. Syncing host files into a sandbox is
+# opt-in by a human who names the directories, never a default.
+
+SYNC_MAX_BYTES = 64 * 1024 * 1024
+SYNC_MAX_FILES = 2_000
+
+#: Never synced, whatever the ignore file says. A project directory
+#: routinely holds credentials, and the sandbox runs generated code.
+#: Skipped entries are always REPORTED, never silently dropped.
+SYNC_DENYLIST = (
+    ".env", ".envrc", "id_rsa", "id_ed25519", ".netrc", ".npmrc",
+    ".pypirc", "credentials", ".git-credentials",
+)
+SYNC_DENY_DIRS = (".aws", ".ssh", ".gnupg", ".docker")
+
+#: Read when present. Deliberately NOT .dockerignore: that is build-time
+#: lifecycle, and a project that excludes tests/ or *.sql from its image
+#: excludes exactly what an integration run needs to sync.
+SYNC_IGNORE_FILE = ".hyperboxignore"
+
+
+def sync_roots_file() -> Path:
+    override = os.environ.get("HYPERBOX_SYNC_ROOTS_FILE")
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".hyperbox" / "sync-roots"
+
+
+def sync_roots() -> list[Path]:
+    """Absolute directories a caller may sync from. Empty means disabled.
+
+    Resolved per call so `hyperbox init` reaches a running server.
+    """
+    env = os.environ.get("HYPERBOX_SYNC_ROOTS")
+    if env:
+        raw = [part for part in env.split(os.pathsep) if part.strip()]
+    else:
+        path = sync_roots_file()
+        try:
+            raw = [
+                line.strip()
+                for line in path.read_text(encoding="utf-8").splitlines()
+                if line.strip() and not line.startswith("#")
+            ]
+        except OSError:
+            return []
+    roots = []
+    for entry in raw:
+        try:
+            resolved = Path(entry).expanduser().resolve(strict=True)
+        except OSError:
+            continue        # a root that no longer exists grants nothing
+        if resolved.is_dir():
+            roots.append(resolved)
+    return roots
+
+
 _env_cache: dict[str, str] | None = None
 _env_mtime: float = 0.0
 _env_root: Path | None = None
