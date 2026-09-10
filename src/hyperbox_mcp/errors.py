@@ -212,10 +212,12 @@ class UnknownEnvironmentError(ConfigError):
 def to_result(exc: BaseException) -> dict[str, Any]:
     """Render any exception as a tool result's error payload.
 
-    Carries `error_message` alongside the structured `error` for one
-    release. The old shape was a bare string, and every client parsing it
-    would break on the day this changed; the duplicate costs a few bytes
-    and buys a migration window.
+    One shape, and only one: `{"error": {code, message, fix, context}}`.
+    0.3.0 also carried the message as a top-level `error_message` string,
+    so a client parsing the pre-0.3 bare-string shape kept working; that
+    migration window was one release wide and closed in 0.4.0. Two fields
+    saying the same thing is exactly what structured errors were meant to
+    end — the caller branches on `code`, not on prose.
     """
     if isinstance(exc, HyperBoxError):
         payload = exc.as_dict()
@@ -224,4 +226,4 @@ def to_result(exc: BaseException) -> dict[str, Any]:
             "code": "UNEXPECTED",
             "message": f"{type(exc).__name__}: {exc}",
         }
-    return {"error": payload, "error_message": payload["message"]}
+    return {"error": payload}

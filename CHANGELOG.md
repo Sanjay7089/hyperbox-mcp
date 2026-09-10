@@ -103,6 +103,22 @@ wrong answer.
   in a string an agent relays to a user verbatim. It now names `--image`
   first, which needs no Dockerfile.
 
+### Removed — breaking
+
+- **The top-level `error_message` string is gone from tool errors.** A
+  failing tool call now returns `{"error": {code, message, fix, context}}`
+  and nothing else.
+
+  0.3.0 made tool errors structured and carried the message a second time
+  at the top level, so a client parsing the pre-0.3 bare-string shape kept
+  working; that entry said the duplicate lasted one release and would go
+  in 0.4.0. This is that removal. A client still reading `error_message`
+  should read `error.message` instead — same string, one place.
+
+  The error **codes** are unchanged and remain part of the public surface.
+  Branch on `error.code`, which is what it is for; the prose in
+  `error.message` is for a human and may be reworded in any release.
+
 ### Internal
 
 - The server logs its runtime and version at startup. The runtime is

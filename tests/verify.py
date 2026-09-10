@@ -200,13 +200,16 @@ def main() -> int:
         str(broken),
     )
 
-    # 4b. Every failure is structured, and still readable by a v0.2 client.
+    # 4b. Every failure is structured, and structured is now the ONLY
+    #     shape.
     #
     #     The caller is usually a model that will read the error and
     #     retry, so a code it can branch on and a fix it can act on are
-    #     worth more than prose. `error_message` carries the old bare
-    #     string for one release, because every client parsing that shape
-    #     would otherwise break on the day this changed.
+    #     worth more than prose. 0.3.0 also carried a top-level
+    #     `error_message` for clients parsing the pre-0.3 bare string;
+    #     that window was one release wide and closed in 0.4.0, so its
+    #     absence is asserted rather than assumed — reinstating the
+    #     duplicate must fail here.
     # FastMCP may hand back the plain function or a wrapper; take
     # whichever is callable rather than assuming.
     run_fn = getattr(server.run, "fn", server.run)
@@ -224,11 +227,13 @@ def main() -> int:
     bad = call_run(sandbox_id="../etc/passwd", code="x")
     payload = bad.get("error")
     check(
-        "errors carry a machine-readable code and a compat string",
+        "errors carry a machine-readable code, and only the structured shape",
         isinstance(payload, dict)
         and payload.get("code") == "INVALID_INPUT"
-        and bad.get("error_message") == payload.get("message"),
-        f"code={payload.get('code') if isinstance(payload, dict) else payload!r}",
+        and bool(payload.get("message"))
+        and "error_message" not in bad,
+        f"code={payload.get('code') if isinstance(payload, dict) else payload!r} "
+        f"keys={sorted(bad)}",
     )
     gone = call_run(sandbox_id="000000000000", code="print(1)")
     gone_payload = gone.get("error", {})
@@ -554,7 +559,7 @@ async def _check_tool_layer(language: str, backend: str) -> None:
         check(
             "unknown sandbox_id returns a readable error",
             "error" in unknown
-            and "No sandbox" in unknown.get("error_message", ""),
+            and "No sandbox" in (unknown.get("error") or {}).get("message", ""),
             str(unknown)[:90],
         )
 

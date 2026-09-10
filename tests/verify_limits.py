@@ -324,7 +324,7 @@ async def main() -> int:
             "error" in d
             and any(
                 hint in (
-                    d.get("error_message", "")
+                    (d.get("error") or {}).get("message", "")
                     + " "
                     + (d.get("error") or {}).get("fix", "")
                 ).lower()
