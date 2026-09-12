@@ -408,3 +408,29 @@ tool description carries the load-bearing limits (network posture, package
 declaration timing, persistence) directly, precisely so a client that never
 reads `capabilities` still has the safety-relevant facts. Treat
 `capabilities` as a nice-to-have deep read, not a dependency.
+
+## The agent says my app is running, but the URL does not load
+
+It is running. You cannot reach it, and that is by design.
+
+A sandbox publishes no ports to your machine. A server started inside one
+binds `127.0.0.1` *in the container*, which is a different loopback from
+your host's. So `http://localhost:8000` in your browser reaches your own
+machine and finds nothing, however healthy the sandbox is.
+
+Agents get this wrong because it is the natural thing to say once a
+server starts. HyperBox's tool descriptions now state it explicitly, but
+an agent that has already decided to hand you a URL may still do it.
+
+To see that a service actually works, ask the agent to request it from
+inside the sandbox and show you the response:
+
+```
+run(sandbox_id=..., code="import urllib.request;
+    print(urllib.request.urlopen('http://127.0.0.1:8000/health').read())")
+```
+
+That is a real check — it exercises the running server and reports what
+came back. If you want to click it yourself, run the app on your own
+machine; a sandbox is for proving the code works, not for serving it to
+you.

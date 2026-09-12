@@ -113,6 +113,18 @@ SYNC_DENYLIST = (
 )
 SYNC_DENY_DIRS = (".aws", ".ssh", ".gnupg", ".docker")
 
+#: The ONE dotenv file that may cross into a sandbox, and it arrives
+#: named `.env` so an app reading its normal config path just works.
+#:
+#: Everything else matching `.env*` is refused. The old rule matched exact
+#: filenames, so `.env` was blocked while `.env.production`, `.env.local`
+#: and `.env.dev` -- the ones most likely to hold live credentials --
+#: synced straight into a sandbox running generated code.
+#:
+#: No heuristic about which variants are "safe": the name states the
+#: intent, and the person who writes the file decides what is in it.
+SYNC_ENV_OPT_IN = ".env.hyperbox"
+
 #: Read when present. Deliberately NOT .dockerignore: that is build-time
 #: lifecycle, and a project that excludes tests/ or *.sql from its image
 #: excludes exactly what an integration run needs to sync.

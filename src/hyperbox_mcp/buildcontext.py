@@ -118,6 +118,7 @@ def sync_tar(
     deny_dirs: tuple[str, ...],
     max_bytes: int,
     max_files: int,
+    env_opt_in: str = "",
 ) -> tuple[bytes, dict]:
     """Tar a host directory to sync into a sandbox.
 
@@ -135,10 +136,17 @@ def sync_tar(
     Over a cap this RAISES rather than truncating. A half-copied
     directory is the silent-wrong-answer failure again: the sandbox
     looks populated and is not.
+
+    `env_opt_in` names the single dotenv file allowed through, and it is
+    RENAMED to `.env` inside the sandbox so an app reading its normal
+    config path needs no change. Every other `.env*` is refused whatever
+    `deny_files` says, and both the refusals and the rename are in the
+    manifest.
     """
     patterns = read_ignore(source, ignore_file)
     buffer = io.BytesIO()
     skipped: list[dict] = []
+    renamed: list[dict] = []
     included = 0
     total = 0
 
@@ -154,9 +162,22 @@ def sync_tar(
                 continue
             if not path.is_file():
                 continue
-            if path.name in deny_files or any(p in deny_dirs for p in parts):
+            if any(p in deny_dirs for p in parts):
                 skipped.append({"path": relative, "reason": "secret"})
                 continue
+
+            arcname = relative
+            if env_opt_in and path.name == env_opt_in:
+                # The one dotenv that may cross, renamed on the way in.
+                parent = Path(relative).parent
+                arcname = ".env" if str(parent) == "." else str(parent / ".env")
+                renamed.append({"from": relative, "to": arcname})
+            elif path.name.startswith(".env") or path.name in deny_files:
+                # Prefix, not exact match. `.env` was blocked while
+                # `.env.production` and `.env.local` went straight through.
+                skipped.append({"path": relative, "reason": "secret"})
+                continue
+
             if excluded(relative, patterns):
                 skipped.append({"path": relative, "reason": "ignored"})
                 continue
@@ -179,7 +200,7 @@ def sync_tar(
                     f"(reached at {relative}). Narrow sync_from, or "
                     f"exclude what is not needed in a {ignore_file}."
                 )
-            archive.add(path, arcname=relative)
+            archive.add(path, arcname=arcname)
             included += 1
             total += size
 
@@ -187,4 +208,5 @@ def sync_tar(
         "files": included,
         "bytes": total,
         "skipped": skipped,
+        "renamed": renamed,
     }

@@ -409,6 +409,12 @@ def capabilities() -> str:
             },
             "network": {
                 "while_your_code_runs": "disabled",
+                "inbound_from_the_host": (
+                    "impossible. No port is published to the user's machine, "
+                    "so a server you start in a sandbox is reachable only "
+                    "from inside that same sandbox, on 127.0.0.1. Never "
+                    "report a URL to the user as something they can open."
+                ),
                 "when_it_is_ever_enabled": (
                     "only while the sandbox is being created, to install the "
                     "packages you declared, and before any of your code has "
@@ -514,12 +520,21 @@ async def create_sandbox(
     do instead. `hyperbox://capabilities` lists which do.
 
     WHICH TO USE. A handful of pure-Python packages: `packages`. A heavy
-    or native stack — torch, pandas, a JDK toolchain — or one you will
-    want again on the next task: ask the user for an environment instead.
-    Installing those on every create costs minutes each time, and the
-    install happens inside the one window where the sandbox has network.
-    `hyperbox://capabilities` carries a `host_actions` block with the exact
-    command to give them.
+    or native stack — torch, pandas, a JDK toolchain, anything that
+    compiles — or one you will want again on the next task: ask the user
+    for an environment instead. Installing those on every create costs
+    minutes each time, and the install happens inside the one window where
+    the sandbox has network. A long install can also outlive your client's
+    own tool-call timeout, so the call fails even though the sandbox was
+    fine.
+
+    The command to give the user, verbatim:
+
+        hyperbox build <name> --dockerfile <path>    (or --image <ref>)
+
+    then `create_sandbox(environment="<name>")`. It is repeated here
+    rather than only in `hyperbox://capabilities` because some clients
+    never read resources, and an escape hatch nobody can see is not one.
 
     `sync_from` copies a directory from the user's machine into the
     sandbox at /sandbox, so you can run their real code and their real
@@ -707,6 +722,14 @@ async def run(
     keep running — a web server, a worker — and then `run` a normal
     foreground call in the SAME sandbox to talk to it on 127.0.0.1.
     Loopback works even though the sandbox has no route to the internet.
+
+    THAT PORT IS REACHABLE ONLY FROM INSIDE THIS SANDBOX. Nothing is
+    published to the user's machine: they cannot open it in a browser,
+    curl it from their terminal, or point another program at it. Do not
+    hand them a URL — it will not resolve, and saying "your app is running
+    at http://localhost:8000" is a claim this server cannot honour. To
+    show that a service works, `run` a foreground call that requests it on
+    127.0.0.1 and report what came back.
 
     Read its output with `get_process_logs`. `timeout` does not apply to
     a background run: nothing stops it but `destroy_sandbox`, or the

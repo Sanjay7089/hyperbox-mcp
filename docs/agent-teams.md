@@ -107,6 +107,14 @@ background process's logs with `get_process_logs` counts as using the
 sandbox, so a polled service does not expire underneath the agents
 watching it.
 
+**That is the only way to reach it.** No port is published to the host,
+so the service is invisible from your browser, your terminal, and any
+other program on your machine — `curl http://localhost:8000` on the host
+will not reach a sandbox listening on 8000. An agent that reports a URL
+to a user is reporting something that does not resolve. Verify a service
+the way subagent B does above: request it from inside the same sandbox
+and report the response.
+
 ## Seeing what your agents are doing
 
 Agents create sandboxes; you can inspect and clean up without one:

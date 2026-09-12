@@ -564,10 +564,14 @@ async def _check_tool_layer(language: str, backend: str) -> None:
         # create_sandbox exposes environment, and it is the ONLY way an
         # agent touches environments: building one runs arbitrary RUN
         # commands as root with network access, so it stays a CLI action.
+        _tools = await client.list_tools()
         create_schema = {
             t.name: getattr(t, "input_schema", None) or t.inputSchema
-            for t in await client.list_tools()
+            for t in _tools
         }["create_sandbox"]
+        create_desc = " ".join(next(
+            (t.description or "") for t in _tools if t.name == "create_sandbox"
+        ).split())
         check(
             "create_sandbox accepts an environment",
             "environment" in (create_schema.get("properties") or {}),
@@ -617,6 +621,38 @@ async def _check_tool_layer(language: str, backend: str) -> None:
             ),
             str(envs)[:150],
         )
+        # The inbound boundary must be STATED, not left to be inferred.
+        # It was documented nowhere -- not in a description, not in
+        # capabilities, not in docs -- while 127.0.0.1 appeared three
+        # times purely as an affordance that works. An agent read that,
+        # reasonably concluded a URL was a real thing to hand back, and a
+        # user clicked it and got nothing. Tool descriptions are routing
+        # logic, so this is asserted like any other behaviour.
+        # Whitespace-normalised: the assertion is that the statement is
+        # still THERE, not that it is still wrapped the same way.
+        run_desc = " ".join(next(
+            (t.description or "") for t in _tools if t.name == "run"
+        ).split())
+        check(
+            "run() states that a sandbox port is unreachable from the host",
+            "ONLY FROM INSIDE THIS SANDBOX" in run_desc
+            and "Do not hand them a URL" in run_desc,
+            "an agent must not have to infer this from 'no route to the "
+            "internet', which is the outbound half only",
+        )
+        check(
+            "capabilities states the inbound boundary too",
+            "impossible" in (caps.get("network", {})
+                             .get("inbound_from_the_host", "")),
+            str(caps.get("network", {}).get("inbound_from_the_host"))[:110],
+        )
+        check(
+            "create_sandbox carries the hyperbox build command itself",
+            "hyperbox build" in (create_desc or ""),
+            "deferring it to a resource hides it from clients that cannot "
+            "read resources -- which is where the heavy-install wall is hit",
+        )
+
         check(
             "capabilities names the running runtime",
             caps.get("runtime") == "NativeRuntime",

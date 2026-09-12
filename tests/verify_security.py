@@ -279,6 +279,15 @@ async def main() -> int:
                                encoding="utf-8")
     (tree / ".npmrc").write_text("//registry:_authToken=hunter2\n",
                                  encoding="utf-8")
+    # The exact-name denylist blocked `.env` and let these through -- the
+    # ones most likely to hold live credentials.
+    (tree / ".env.production").write_text("STRIPE_KEY=live_hunter2\n",
+                                          encoding="utf-8")
+    (tree / ".env.local").write_text("DB_PASSWORD=hunter2\n",
+                                     encoding="utf-8")
+    # The one file a person may deliberately hand to a sandbox. It must
+    # arrive, and arrive named `.env` so an app finds it unchanged.
+    (tree / ".env.hyperbox").write_text("SANDBOX_MODE=1\n", encoding="utf-8")
     (tree / ".ssh").mkdir()
     (tree / ".ssh" / "id_ed25519").write_text("PRIVATE KEY\n",
                                               encoding="utf-8")
@@ -316,8 +325,9 @@ async def main() -> int:
                     ).data["stdout"]
                     arrived = {Path(line).name
                                for line in listing.splitlines() if line.strip()}
-                    leaked = arrived & {".env", ".npmrc", "id_ed25519",
-                                        "loot.txt", "escape"}
+                    leaked = arrived & {".npmrc", "id_ed25519", "loot.txt",
+                                        "escape", ".env.production",
+                                        ".env.local", ".env.hyperbox"}
                     check(
                         "no denylisted secret reaches the sandbox",
                         not leaked,
@@ -336,9 +346,35 @@ async def main() -> int:
                     names = {Path(s.get("path", "")).name for s in skipped}
                     check(
                         "and the manifest names what it withheld, with a reason",
-                        {".env", ".npmrc"} <= names
+                        {".env", ".npmrc", ".env.production", ".env.local"}
+                        <= names
                         and all(s.get("reason") for s in skipped),
-                        f"skipped: {skipped}"[:160],
+                        f"skipped: {skipped}"[:200],
+                    )
+                    # The opt-in: the single dotenv a person may hand over,
+                    # and it must land under the name an app looks for.
+                    body = (
+                        await client.call_tool("run", {
+                            "sandbox_id": sid,
+                            "code": "import os,pathlib\n"
+                                    "p=pathlib.Path('/sandbox/.env')\n"
+                                    "print(p.read_text().strip() if p.exists()"
+                                    " else 'MISSING')",
+                        })
+                    ).data
+                    check(
+                        "the .env.hyperbox opt-in arrives, renamed to .env",
+                        (body.get("stdout") or "").strip() == "SANDBOX_MODE=1",
+                        f"/sandbox/.env contained "
+                        f"{(body.get('stdout') or '').strip()!r} -- the host's "
+                        "real .env must NOT be what landed here",
+                    )
+                    check(
+                        "and the rename is named in the manifest, not silent",
+                        any(r.get("from") == ".env.hyperbox"
+                            and r.get("to") == ".env"
+                            for r in made.get("sync", {}).get("renamed", [])),
+                        str(made.get("sync", {}).get("renamed"))[:160],
                     )
                 finally:
                     await client.call_tool("destroy_sandbox",

@@ -205,6 +205,7 @@ class NativeRuntime:
             deny_dirs=policy.SYNC_DENY_DIRS,
             max_bytes=policy.SYNC_MAX_BYTES,
             max_files=policy.SYNC_MAX_FILES,
+            env_opt_in=policy.SYNC_ENV_OPT_IN,
         )
         api.put_tree(client, cid, policy.CODE_DIR, blob)
         manifest["from"] = str(source)

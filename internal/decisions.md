@@ -636,3 +636,66 @@ as `appuser`, `/sandbox` writable. Negative control reverted the fix and failed
 on both — Docker at create, Podman at first use.
 
 **Revisit when.** Not expected.
+
+## 2026-09-12 — `.env.hyperbox` is the only dotenv that crosses, and it arrives as `.env`
+
+**Context.** The field report complained that `.env` was blocked. Tracing the
+filter found the opposite and worse defect: `buildcontext.sync_tar` matched
+`path.name in deny_files` — exact strings — so `.env` was refused while
+`.env.production`, `.env.local` and `.env.dev` synced straight into a sandbox
+running generated code.
+
+**Decided (owner's call).** Refuse every `.env*`, with exactly one exception:
+`policy.SYNC_ENV_OPT_IN = ".env.hyperbox"`. It arrives renamed to `.env`, at the
+same depth, so an app reading its normal config path needs no change. Both the
+refusals and the rename are in the sync manifest.
+
+**Because.** The name states the intent, so there is no heuristic about which
+variants are "safe" and no new config format to learn — the person who writes
+the file decides what is in it. The owner ruled out a broader `.hyperbox`
+project config as overengineering, and it already has a designed home in 0.5's
+`hyperbox init` preflight.
+
+**Costs.** `.env.example` is now refused too, which is harmless (it holds no
+secrets by convention) but might surprise. It is reported, not silent.
+
+**A mistake worth recording.** The first patch replaced
+`archive.add(path, arcname=relative)` with a `count=1` string replace — and hit
+`build_tar`'s copy rather than `sync_tar`'s. Both functions had the identical
+line. `build_tar` then referenced an `arcname` that does not exist in its scope:
+a NameError that would have broken every `hyperbox build`, and it compiled
+cleanly because Python resolves names at call time. Caught by running the
+behaviour, not by the compiler. Patch by line number or unique context when two
+functions share a line.
+
+**Revisit when.** Not expected.
+
+## 2026-09-12 — Say that a sandbox port is unreachable from the host
+
+**Context.** An agent started a FastAPI app with `run(background=True)` and told
+the user it was at `http://localhost:8000`. It was not: no port is published, so
+a sandbox's `127.0.0.1` is a different loopback from the host's.
+
+**The routing was one-directional.** Every surface said the sandbox cannot reach
+OUT — `run`: "NO network access"; capabilities: `while_your_code_runs:
+"disabled"`, "verified unreachable". Nothing anywhere said a listening port is
+invisible to the host, while `127.0.0.1` appeared three times purely as an
+affordance that works. An agent reading that reasonably concluded a URL was a
+real thing to hand back.
+
+**Decided.** State it where the agent reads: in `run`'s `background=True`
+paragraph, and as `network.inbound_from_the_host` in capabilities. Plus a
+troubleshooting entry and a paragraph in `agent-teams.md`. Asserted in
+`verify.py` on the whitespace-normalised description, so it cannot drift out.
+
+**Also.** `create_sandbox` deferred the `hyperbox build` command to
+`hyperbox://capabilities` — a resource Cursor cannot read. So in the client where
+the heavy-dependency wall was hit, the documented way around it was invisible.
+The command is now in the tool description itself, alongside a note that a long
+install can outlive the client's own tool-call timeout.
+
+**Costs.** Tool descriptions get longer, and description length is real cost —
+every token is read on every call. Judged worth it: this one caused an observed
+false claim to a user.
+
+**Revisit when.** Not expected.
