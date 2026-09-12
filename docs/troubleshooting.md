@@ -381,3 +381,30 @@ Only plain package names are accepted: `requests`, `pandas==2.2.0`,
 `uvicorn[standard]`. Installer flags, URLs, filesystem paths and VCS
 references are refused on purpose — that install is the only moment the
 sandbox can reach the network. See [security.md](security.md).
+
+## `hyperbox://capabilities` returns nothing in Cursor
+
+The `run`/`create_sandbox`/`destroy_sandbox` tools work, but a call to read
+the `hyperbox://capabilities` resource returns no result — not an error,
+just nothing.
+
+This is not a HyperBox bug. MCP defines resources and tools as separate
+capabilities, and not every client surfaces both to its agent. Confirmed
+directly: driving the real `hyperbox` subprocess over stdio with a
+spec-compliant client and calling `resources/list` then
+`resources/read("hyperbox://capabilities")` returns the resource correctly
+— the server answers the wire protocol exactly as designed. If your client
+cannot read it, the gap is in how that client exposes MCP resources to its
+model, not in what the server sent.
+
+Check your client's MCP settings for a separate "Resources" list next to
+"Tools" for the HyperBox server. If it is missing or empty there, that
+client does not currently give its agent autonomous access to resource
+content — resources may still be attachable by hand through the UI,
+depending on the client.
+
+Nothing here changes what an agent can safely do: `create_sandbox`'s own
+tool description carries the load-bearing limits (network posture, package
+declaration timing, persistence) directly, precisely so a client that never
+reads `capabilities` still has the safety-relevant facts. Treat
+`capabilities` as a nice-to-have deep read, not a dependency.

@@ -414,3 +414,88 @@ wheel", and this is the second time that has been true here.
 structurally cannot.
 
 **Revisit when.** Not expected.
+
+## 2026-09-12 — Cursor cannot read `hyperbox://capabilities`; the server is not the cause
+
+**Context.** Running `01-smoke.md` in Cursor, check 2 (read `capabilities`)
+returned nothing — no error, just no result. Every tool call in the same run
+passed.
+
+**Investigated, not assumed.** Drove the real `hyperbox` subprocess over stdio
+with a spec-compliant client (the same `StdioTransport` pattern
+`tests/verify_registry.py` uses, not the in-process client `tests/verify.py`
+uses), and called `resources/list` then `resources/read` exactly as a real
+client would. The server answered correctly: the resource is listed, and reading
+it returns well-formed JSON. This rules out the server.
+
+**Conclusion.** MCP defines resources and tools as separate capabilities.
+Cursor's tool support is solid (every tool call in the smoke test passed); its
+handling of the `resources` capability for autonomous agent reads is the
+suspect, not code in this repo. This is exactly the kind of gap the blueprint's
+own open-items table anticipated ("can a tool return content the client handles
+but the model doesn't ingest?") — same theme, discovered here for the
+`resources` primitive specifically, in Cursor specifically, by direct testing
+rather than by reading FastMCP's docs.
+
+**Action taken.** Documented as a known client limitation in
+`docs/troubleshooting.md`, with the evidence, rather than treated as a bug to
+fix. `create_sandbox`'s own tool description already carries every
+safety-relevant fact `capabilities` would add (network posture, package
+declaration timing, persistence) precisely so a client that never reads
+`capabilities` still has what it needs — that design choice is what kept this
+from being a real gap in what an agent can safely do.
+
+**Not decided, flagged for later.** Whether HyperBox should ALSO expose a
+`get_capabilities` tool as a fallback for clients with partial resource
+support. That is tool-surface growth and deserves its own deliberate decision,
+not a reflexive fix — especially given `tests/verify.py`'s own argument against
+growing the four-tool surface. Left open until more clients are checked (blueprint
+open-item table already asks for a real Claude Desktop test too) — if capabilities
+turn out unreadable everywhere except the in-process test harness, that changes
+the argument; if it's Cursor-specific, it likely doesn't.
+
+**Costs.** None from the documentation change. The open tool-surface question, if
+answered yes later, costs exactly what any new tool costs — see verify.py's own
+comment on why four was chosen deliberately.
+
+**Revisit when.** Claude Desktop and/or Antigravity are checked the same way, or
+Cursor ships resource support and this becomes moot.
+
+## 2026-09-12 — An unrecognized language now returns `UNSUPPORTED_LANGUAGE`
+
+**Context.** Running `02-surface.md` in Antigravity, E7 (`create_sandbox(language=
+"klingon")`) expected `UNSUPPORTED_LANGUAGE` and got the generic `INVALID_INPUT`.
+Pre-existing — I never touched this code path in v0.4.0's own work.
+
+**Investigated.** `errors.UnsupportedLanguageError` was real and already used —
+`native_runtime.py`'s `_spec()` raises it, and `server.py`'s deeper except block
+already caught it — but `validate.language()`, the boundary check that actually
+fires first on every real call, raised the generic `InvalidInput` instead.
+Defense-in-depth for a divergence that never happens today, sitting behind a
+front door that never opened it.
+
+**Decided.** Fix `validate.language()` to raise `UnsupportedLanguageError`,
+matching the message/fix shape `native_runtime._spec()` already uses for the
+same condition, and widen `server.py`'s boundary `except` to catch it (it would
+otherwise fall through to the generic exception handler further down — correct
+behaviorally, since a tool call still can't crash, but with the wrong code
+reaching the caller from the wrong except block).
+
+**Because.** The whole design principle of structured errors is that an agent
+branches on `error.code`, not on parsing English (`errors.py`'s own docstring).
+`UNSUPPORTED_LANGUAGE` exists specifically so an agent can distinguish "you
+named something that doesn't exist — pick from this list" from "you passed a
+malformed argument." Collapsing that distinction at the one place it actually
+mattered defeated the reason the class exists.
+
+**Costs.** `validate.py`'s module docstring claimed "each raises `InvalidInput`"
+— now false for one function, and the docstring says so explicitly rather than
+silently going stale a second time.
+
+**Caught by:** a real client (Antigravity) running the acceptance prompt, not
+by any of the seven automated suites — `tests/verify.py` tested the runtime-level
+raise directly (`rt.create(language="cobol", ...)`, bypassing the MCP boundary
+entirely) and never checked which code came back from an actual tool call.
+Added that check now.
+
+**Revisit when.** Not expected.

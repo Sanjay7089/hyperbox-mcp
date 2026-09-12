@@ -523,7 +523,7 @@ async def create_sandbox(
         requested = validate.backend(backend)
         environment = validate.environment(environment)
         packages = validate.libraries(packages)
-    except InvalidInput as exc:
+    except (InvalidInput, UnsupportedLanguageError) as exc:
         return errors.to_result(exc)
 
     try:

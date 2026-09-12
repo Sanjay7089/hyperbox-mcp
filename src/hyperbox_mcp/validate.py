@@ -3,7 +3,11 @@
 Pure functions, no I/O. Each raises `InvalidInput` with a message that
 says what to pass instead, because the caller is usually a language model
 that will read the error and retry — a message that only says "invalid"
-costs a whole round trip to learn nothing.
+costs a whole round trip to learn nothing. One exception: `language()`
+raises `UnsupportedLanguageError` instead, because "you asked for
+something that doesn't exist" is a menu problem an agent can act on
+differently from a malformed argument -- see native_runtime._spec, which
+raises the same class for the same reason if this check is ever bypassed.
 
 Rules enforced here, and why each exists:
 
@@ -106,9 +110,16 @@ def language(value: object, supported: tuple[str, ...] | None = None) -> str:
     """
     allowed = supported if supported is not None else LANGUAGES
     if not isinstance(value, str) or value.strip().lower() not in allowed:
-        raise InvalidInput(
-            f"Unsupported language '{value}'. Supported: "
-            f"{', '.join(sorted(allowed))}."
+        # UNSUPPORTED_LANGUAGE, not the generic INVALID_INPUT this module
+        # otherwise raises everywhere: "you asked for something we've
+        # never heard of" is a menu problem an agent can act on
+        # differently from a malformed argument, and native_runtime._spec
+        # already raises the same class for the same condition if this
+        # check is ever bypassed. Two call sites, one code, matched fix
+        # shape.
+        raise errors.UnsupportedLanguageError(
+            f"Unsupported language '{value}'.",
+            fix=f"Supported: {', '.join(sorted(allowed))}.",
         )
     return value.strip().lower()
 

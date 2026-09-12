@@ -558,6 +558,24 @@ async def _check_tool_layer(language: str, backend: str) -> None:
                 str(payload)[:110],
             )
 
+        # A specific code, not just "an error happened": rt.create() raises
+        # UnsupportedLanguageError directly (checked earlier in this file),
+        # but that bypasses the MCP boundary entirely. validate.language()
+        # is what actually runs first on this path, and it used to raise
+        # the generic INVALID_INPUT instead -- a real mismatch a live
+        # client test caught that this in-process check never could,
+        # because it never looked at which code came back.
+        unsupported = await client.call_tool(
+            "create_sandbox", {"language": "klingon"}
+        )
+        up = unsupported.data if hasattr(unsupported, "data") else unsupported
+        check(
+            "an unrecognized language is UNSUPPORTED_LANGUAGE, not INVALID_INPUT",
+            isinstance(up, dict)
+            and up.get("error", {}).get("code") == "UNSUPPORTED_LANGUAGE",
+            str(up)[:120],
+        )
+
         bad_inputs = {
             "negative timeout is rejected": {
                 "sandbox_id": "a" * 12, "code": "print(1)", "timeout": -5},
