@@ -15,4 +15,12 @@ build/
 # Internal engineering notes: design rationale, the log of what was tried
 # and reverted, and talk material. Kept local on purpose — the public repo
 # documents what HyperBox does, not the story of building it.
-internal/
+#
+# `internal/*` rather than `internal/`, because git cannot re-include a file
+# whose parent DIRECTORY is excluded -- excluding the contents instead leaves
+# the directory walkable so the negation below can take effect.
+internal/*
+# ...except the decision log. The rest of internal/ is working notes; this one
+# is the record of what was decided and why, and a record only one machine can
+# see is not a record.
+!internal/decisions.md
