@@ -185,11 +185,10 @@ Run on macOS 26.5.2 (arm64), 2026-09-12, suite on Python 3.11.14:
 | 2. Container | Docker 29.1.3 — 7/7 suites, 2.5 min, no containers left behind |
 | 2. Container | Podman 6.1.1 — 7/7 suites, 5.0 min, no containers left behind |
 | 4. Install | wheel `hyperbox_mcp-0.4.0-py3-none-any.whl` into a clean venv (Python 3.13.5); `hyperbox doctor` 7/7, live round trip included |
+| 1. Host | CI green on push, commit `6e836d9`: ubuntu/macos/windows-latest × Python 3.11/3.13, 6/6 jobs. `verify_named_pipe.py` ran (not skipped) on `windows-latest` and passed. [Run 34679849447](https://github.com/Sanjay7089/hyperbox-mcp/actions/runs/34679849447) |
 
 Still outstanding:
 
-- **Gate 1 (host/CI).** Needs a push: 3 OS × 2 Python. Nothing here proves
-  Windows or Linux, and `verify_named_pipe.py` has not run at all.
 - **Gate 3 (client).** Needs a human driving a real MCP client — two
   windows at once, a restart mid-sandbox, a `hyperbox build` against a
   running server, and the leak check afterwards. No suite can stand in
