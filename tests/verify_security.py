@@ -440,6 +440,110 @@ async def main() -> int:
         else:
             os.environ["HYPERBOX_ENV_DIR"] = real_env_dir
 
+    # --- a hardened, non-root image works AND stays non-root ----------
+    #
+    # A production Dockerfile ends in `USER someone`. Every exec then
+    # inherits that user, and `mkdir -p /sandbox` at the filesystem root
+    # fails -- with its exit code discarded, so nothing noticed. The two
+    # engines then went wrong in different directions, both measured:
+    #
+    #   docker: the archive upload 404s, so create failed, blaming a
+    #           missing file rather than the permission behind it.
+    #   podman: the archive API made /sandbox itself as root:root 0755 and
+    #           create SUCCEEDED -- a sandbox reported ready whose own
+    #           user could not write to it, so every run() failed later.
+    #
+    # Both halves matter here: it must work, and agent code must STILL run
+    # as the image's user. Fixing this by running everything as root would
+    # make the check pass and quietly undo the hardening the Dockerfile
+    # asked for.
+    from hyperbox_mcp import buildcontext as _bc
+    from hyperbox_mcp.rest import api as _api
+    from hyperbox_mcp.rest.client import EngineClient as _EngineClient
+
+    nonroot_tag = "hyperbox-test/nonroot-acceptance:latest"
+    build_ctx = Path(_tempfile.mkdtemp(prefix="hyperbox-nonroot-"))
+    (build_ctx / "Dockerfile").write_text(
+        "FROM python:3.12-slim\nRUN useradd -m appuser\nUSER appuser\n",
+        encoding="utf-8",
+    )
+    built, build_err = False, ""
+    try:
+        blob, inner, _ = _bc.build_tar(build_ctx, build_ctx / "Dockerfile")
+        # Its own client: engine.client() carries the 60s default, and a
+        # build is not a 60s operation even when its base is local.
+        raw = _EngineClient(engine.endpoint_for(backend), timeout=600.0)
+        for event in _api.build_image(raw, blob, nonroot_tag, inner, False):
+            if "error" in event:
+                build_err = str(event["error"])[:120]
+        built = not build_err and _api.image_present(raw, nonroot_tag)
+    except Exception as exc:  # noqa: BLE001
+        build_err = f"{type(exc).__name__}: {exc}"[:120]
+
+    if not built:
+        # Skipped, never silently passed: this machine could not build the
+        # fixture, which says nothing about the behaviour under test.
+        check("SKIP a non-root image is usable", True,
+              f"could not build the fixture: {build_err}")
+    else:
+        sync_tree = Path(_tempfile.mkdtemp(prefix="hyperbox-nonroot-sync-"))
+        (sync_tree / "synced.py").write_text("print('ok')\n", encoding="utf-8")
+        env_root2 = Path(_tempfile.mkdtemp(prefix="hyperbox-nrenv-"))
+        prev_env_dir = os.environ.get("HYPERBOX_ENV_DIR")
+        prev_roots = os.environ.get("HYPERBOX_SYNC_ROOTS")
+        os.environ["HYPERBOX_ENV_DIR"] = str(env_root2)
+        os.environ["HYPERBOX_SYNC_ROOTS"] = str(sync_tree)
+        try:
+            _write_manifest("nonroot", nonroot_tag, "image", backend)
+            async with Client(server.mcp) as client:
+                made = (
+                    await client.call_tool(
+                        "create_sandbox",
+                        {"language": "python", "backend": backend,
+                         "environment": "nonroot", "sync_from": str(sync_tree)},
+                    )
+                ).data
+                if "error" in made:
+                    check("a non-root image can be created and synced into",
+                          False, str(made)[:160])
+                else:
+                    sid = made["sandbox_id"]
+                    try:
+                        check("a non-root image can be created and synced into",
+                              True, sid)
+                        probe = (
+                            await client.call_tool("run", {
+                                "sandbox_id": sid,
+                                "code": "import getpass\n"
+                                        "open('/sandbox/w.txt','w').write('ok')\n"
+                                        "print(getpass.getuser(),"
+                                        "open('/sandbox/synced.py').read().strip())",
+                            })
+                        ).data
+                        out = (probe.get("stdout") or "").strip()
+                        check(
+                            "its /sandbox is writable and the synced file arrived",
+                            probe.get("success") is True and "print('ok')" in out,
+                            f"exit={probe.get('exit_code')} out={out[:90]!r} "
+                            f"err={(probe.get('stderr') or '')[:90]!r}",
+                        )
+                        check(
+                            "and agent code still runs as the image's user",
+                            out.startswith("appuser"),
+                            f"ran as {out.split()[0] if out else '(no output)'} "
+                            "-- escalating to root would undo the hardening",
+                        )
+                    finally:
+                        await client.call_tool("destroy_sandbox",
+                                               {"sandbox_id": sid})
+        finally:
+            for name, prev in (("HYPERBOX_ENV_DIR", prev_env_dir),
+                               ("HYPERBOX_SYNC_ROOTS", prev_roots)):
+                if prev is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = prev
+
     failed = [r for r in results if not r[1]]
     print(f"\n{len(results) - len(failed)}/{len(results)} passed")
     return 1 if failed else 0

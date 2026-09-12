@@ -591,3 +591,48 @@ caller is in `native_runtime.py` and was audited; the run() path surfaces it as 
 structured error instead of a false zero, which is the point.
 
 **Revisit when.** Not expected.
+
+## 2026-09-12 — A non-root image gets /sandbox, and keeps its non-root user
+
+**Context.** Reported from a real run: a project Dockerfile ending `USER votify`
+produced `PROVISION_FAILED: Could not find the file /sandbox in container`.
+
+**Root cause.** `api.exec_create` never set `User`, so every exec inherited the
+image's own. `mkdir -p /sandbox` therefore ran as that user, failed at the
+filesystem root, and **its exit code was discarded** — as were the language
+`setup` steps immediately after.
+
+**Both engines were wrong, in different directions.** Measured:
+
+```
+docker: mkdir exit=1 Permission denied -> archive upload 404s -> create fails,
+        blaming a missing file rather than the permission behind it
+podman: mkdir exit=1 Permission denied -> archive API creates /sandbox ITSELF
+        as root:root 0755 -> create SUCCEEDS, and the image's own user cannot
+        write to it, so every run() fails later on a sandbox reported ready
+```
+
+Podman's is the worse one and would have been missed entirely by a Docker-only
+gate — the second time in one day that the two engines disagreed about a failure
+(see the `ExitCode` entry above).
+
+**Decided.** Create `CODE_DIR` as root via an explicit `User` override, then
+`chown` it to the image's configured user (`Config.User` off `inspect_container`).
+Check that exit code and the setup steps'.
+
+**Because.** The alternative — run everything as root — would make the symptom
+disappear while silently undoing the hardening the Dockerfile asked for. Agent
+code must still run as the image's user; it just needs a directory it can write
+to. The acceptance test asserts BOTH halves, so a future "fix" that escalates to
+root fails it.
+
+**Costs.** `exec_create` grows a `user` parameter. It is passed only for
+server-authored setup argv, never for anything a caller supplied, and the
+docstring says so.
+
+**Verified.** Built a real `USER appuser` image through HyperBox's own REST build
+path and ran it end to end on both engines: create + sync + run, code executing
+as `appuser`, `/sandbox` writable. Negative control reverted the fix and failed
+on both — Docker at create, Podman at first use.
+
+**Revisit when.** Not expected.

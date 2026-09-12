@@ -170,13 +170,25 @@ def list_managed(client: EngineClient) -> list[dict]:
 # --- exec -------------------------------------------------------------
 
 
-def exec_create(client: EngineClient, cid: str, argv: list[str]) -> str:
-    body = {
+def exec_create(
+    client: EngineClient, cid: str, argv: list[str], user: str | None = None
+) -> str:
+    """Create an exec. `user` overrides the image's own USER for this one.
+
+    Omitted means "whatever the image says", which is what agent code
+    must always get: an image hardened to run as a non-root user keeps
+    that. It is passed only for the handful of setup steps that have to
+    write outside that user's reach, and those are server-authored argv,
+    never anything a caller supplied.
+    """
+    body: dict[str, Any] = {
         "AttachStdout": True,
         "AttachStderr": True,
         "Tty": False,  # framing depends on this; see client.stream_frames
         "Cmd": argv,
     }
+    if user is not None:
+        body["User"] = user
     return client.request("POST", f"/containers/{cid}/exec", body)["Id"]
 
 
@@ -240,9 +252,11 @@ def exec_exit_code(client: EngineClient, exec_id: str) -> int:
     return int(code)
 
 
-def run_exec(client: EngineClient, cid: str, argv: list[str]) -> tuple[int, str, str]:
+def run_exec(
+    client: EngineClient, cid: str, argv: list[str], user: str | None = None
+) -> tuple[int, str, str]:
     """Create, run and collect one exec: (exit_code, stdout, stderr)."""
-    exec_id = exec_create(client, cid, argv)
+    exec_id = exec_create(client, cid, argv, user=user)
     out, err = exec_start(client, exec_id)
     return exec_exit_code(client, exec_id), out, err
 

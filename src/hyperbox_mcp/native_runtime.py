@@ -343,14 +343,19 @@ class NativeRuntime:
         # with it. A half-configured sandbox is never handed back.
         try:
             api.start_container(client, cid)
-            sandbox_ops.assert_policy_applied(
-                api.inspect_container(client, cid), sandbox_id
-            )
-            api.run_exec(client, cid, ["mkdir", "-p", policy.CODE_DIR])
+            attrs = api.inspect_container(client, cid)
+            sandbox_ops.assert_policy_applied(attrs, sandbox_id)
+            self._prepare_code_dir(client, cid, attrs)
             if sync_from is not None:
                 handle.meta["sync"] = self._sync_in(client, cid, sync_from)
             for step in spec.get("setup", []):
-                api.run_exec(client, cid, step)
+                code, out, err = api.run_exec(client, cid, step)
+                if code != 0:
+                    raise errors.ProvisionError(
+                        f"Language setup step {' '.join(step)!r} failed "
+                        f"({code}): {(err or out).strip()[:200]}",
+                        context={"sandbox_id": sandbox_id, "step": step},
+                    )
             if packages:
                 self._provision(handle, client, cid, spec, packages)
             # Unconditional since 0.4.0. An environment used to be able to
@@ -367,6 +372,56 @@ class NativeRuntime:
                 pass
             raise
         return handle
+
+    def _prepare_code_dir(self, client, cid, attrs) -> None:
+        """Create CODE_DIR, and make sure the image's own user owns it.
+
+        `mkdir -p /sandbox` used to run as whatever the image's USER is,
+        with its exit code discarded. For an image that ends in `USER
+        someone` -- which is what a hardened production Dockerfile looks
+        like -- that fails at the filesystem root, and the engines then
+        diverge in two different wrong directions. Measured on both:
+
+          docker: the archive upload 404s, so create fails, blaming a
+                  missing file rather than the permission that caused it.
+          podman: the archive API creates /sandbox itself, as root:root
+                  0755, and create SUCCEEDS -- handing back a sandbox
+                  whose own user cannot write to it, so every run() fails
+                  later on a sandbox already reported ready.
+
+        So: create it as root, then hand it to the image's user. Agent
+        code still runs as that user -- the hardening the Dockerfile asked
+        for is preserved -- it simply has a directory it can write to.
+        """
+        code, out, err = api.run_exec(
+            client, cid, ["mkdir", "-p", policy.CODE_DIR], user="root"
+        )
+        if code != 0:
+            raise errors.ProvisionError(
+                f"Could not create {policy.CODE_DIR} in the container "
+                f"({code}): {(err or out).strip()[:200]}",
+                fix="The image may forbid writing at the filesystem root "
+                    "even for root. Pre-create the directory in your "
+                    f"Dockerfile: RUN mkdir -p {policy.CODE_DIR}",
+                context={"path": policy.CODE_DIR},
+            )
+
+        image_user = str((attrs.get("Config") or {}).get("User") or "").strip()
+        if not image_user:
+            return  # runs as root already; nothing to hand over
+        code, out, err = api.run_exec(
+            client, cid,
+            ["chown", "-R", image_user, policy.CODE_DIR], user="root",
+        )
+        if code != 0:
+            raise errors.ProvisionError(
+                f"Could not give {policy.CODE_DIR} to the image's user "
+                f"'{image_user}' ({code}): {(err or out).strip()[:200]}",
+                fix=f"Pre-create it in your Dockerfile instead: RUN mkdir -p "
+                    f"{policy.CODE_DIR} && chown {image_user} "
+                    f"{policy.CODE_DIR}",
+                context={"path": policy.CODE_DIR, "user": image_user},
+            )
 
     def _provision(self, handle, client, cid, spec, packages) -> None:
         """Install declared packages while the network is still attached.
