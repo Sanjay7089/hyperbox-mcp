@@ -34,7 +34,26 @@ import time
 import uuid
 from contextlib import asynccontextmanager, suppress
 
-from fastmcp import Context, FastMCP
+# Set BEFORE fastmcp is imported: its Settings read the environment once,
+# at import, and both of these default to on.
+#
+# The update check is an outbound HTTPS call to PyPI on every server
+# start. A client launches a fresh server per window and relaunches it
+# freely, so this log has 835 starts in it -- 835 calls home from a
+# process whose stated design is that nothing leaves the machine (see
+# CLAUDE.md, and the no-egress rule it turns on). It also costs real
+# latency: initialize measured 0.84s mean with it on, 0.19s with it off,
+# and the spread came entirely from the network. On a machine with slow
+# DNS that is startup time a client can time out waiting for.
+#
+# setdefault, not assignment: someone who genuinely wants either can
+# still set it in the client config.
+os.environ.setdefault("FASTMCP_CHECK_FOR_UPDATES", "off")
+# Pure noise on a stdio server -- it renders an ANSI box on stderr that
+# no one reads, at every launch.
+os.environ.setdefault("FASTMCP_SHOW_SERVER_BANNER", "false")
+
+from fastmcp import Context, FastMCP  # noqa: E402 - must follow the env defaults
 
 from hyperbox_mcp import engine, errors, policy, slots, validate
 from hyperbox_mcp.engine import EngineUnavailableError

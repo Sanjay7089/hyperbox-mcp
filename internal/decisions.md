@@ -499,3 +499,44 @@ entirely) and never checked which code came back from an actual tool call.
 Added that check now.
 
 **Revisit when.** Not expected.
+
+## 2026-09-12 — FastMCP's update check phoned home on every server start
+
+**Context.** Investigating a client that spawned servers in a retry loop, found
+`fastmcp.settings.Settings` defaults: `check_for_updates="stable"` and
+`show_server_banner=True`. The update check is an outbound HTTPS call to PyPI,
+made once per server start. This machine's log has **835 server starts** in it.
+
+**Why this matters beyond latency.** The no-egress rule is not a performance
+preference, it is the product claim — nothing leaves the machine. A dependency
+was quietly making a network call from the server process on every launch, and
+nothing in seven acceptance suites looked for it. It is the same failure shape
+as the doctor bug from earlier today: a real behaviour nobody had reason to
+look at, because nothing asserts the absence of something.
+
+**Measured, not assumed.** Installed binary, `initialize` round trip, 3 runs
+each:
+
+- default: 1.06s / 0.73s / 0.74s, mean **0.84s**
+- `FASTMCP_CHECK_FOR_UPDATES=off`: 0.19s / 0.19s / 0.19s, mean **0.19s**
+
+The spread in the default case is the network; the disabled case is flat. On a
+machine with slow DNS this is startup time a client can time out waiting for.
+
+**Decided.** `os.environ.setdefault` both to off in `server.py`, before the
+`fastmcp` import — its `Settings` read the environment once, at import, so
+anywhere later is too late.
+
+`setdefault` rather than assignment: someone who genuinely wants either can set
+it in their client config, and the override was verified to still win.
+
+**Costs.** Two `os.environ` writes above an import, which needs a `noqa: E402`
+and an explanation of why the ordering is load-bearing. Cheap. The banner also
+goes away, which is pure gain on stdio — it rendered an ANSI box on stderr that
+nobody reads.
+
+**Not claimed.** This is *not* confirmed as the cause of the Antigravity
+connection failure. It is a plausible contributor and a real defect in its own
+right; the connection issue remains undiagnosed on the client side.
+
+**Revisit when.** Not expected.
