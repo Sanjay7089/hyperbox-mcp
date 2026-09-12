@@ -269,6 +269,16 @@ class EngineClient:
                     # More may follow, and the exec is plainly not done
                     # settling, so the trailing window starts over.
                     finished_at = None
+                    # So does the give-up budget. It is an IDLE timeout,
+                    # not a total one: a socket's own timeout fires only
+                    # when a read blocks that long, so on the plain path
+                    # below a command producing steady output runs as
+                    # long as it likes. `started` was set once here, which
+                    # made this transport mean something different -- a
+                    # ceiling on the whole exec -- and a twenty-minute
+                    # install that was progressing fine would be cut off
+                    # on Windows and complete on Linux.
+                    started = time.monotonic()
                     continue
             if is_finished():
                 # The trailing window is measured from the moment the exec
@@ -287,7 +297,22 @@ class EngineClient:
             else:
                 finished_at = None
                 if time.monotonic() - started >= self.timeout:
-                    break
+                    # RAISE, never break. `started` is set once, so this
+                    # is a budget on the whole exec rather than on idle
+                    # time -- a long quiet stretch (a native wheel
+                    # compiling) reaches it while the command is still
+                    # perfectly healthy. Returning reader.result() here
+                    # made that indistinguishable from a clean finish,
+                    # and the caller then asked for an exit code the
+                    # engine did not have and got a 0 for it.
+                    #
+                    # A socket raises TimeoutError by itself in the same
+                    # situation, on the plain read path below; matching it
+                    # keeps both transports failing the same way.
+                    raise TimeoutError(
+                        f"gave up reading an exec stream after "
+                        f"{self.timeout:g}s; the command had not finished"
+                    )
             time.sleep(POLL_SECONDS)
         return reader.result()
 

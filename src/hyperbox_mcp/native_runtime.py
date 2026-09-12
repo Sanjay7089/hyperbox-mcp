@@ -112,6 +112,9 @@ class NativeRuntime:
 
     def __init__(self) -> None:
         self._clients: dict[str, EngineClient] = {}
+        # Separate, because installs run on a different budget. See
+        # _install_client.
+        self._install_clients: dict[str, EngineClient] = {}
         self._verified: set[str] = set()
 
     # --- plumbing -----------------------------------------------------
@@ -128,6 +131,27 @@ class NativeRuntime:
                 timeout=policy.ENGINE_SOCKET_TIMEOUT,
             )
             self._clients[backend] = existing
+        return existing
+
+    def _install_client(self, backend: str) -> EngineClient:
+        """A client for dependency installs, which are not agent code.
+
+        Its own connection, on its own budget: the shared one is sized
+        from MAX_TIMEOUT_SECONDS, which bounds what an AGENT submits, and
+        a native wheel that compiles for ten minutes is not that. Sharing
+        the client meant an install inherited a 180s ceiling nobody had
+        measured it against. `builder.py` already keeps a long-budget
+        client of its own for image builds, for the same reason.
+        """
+        existing = self._install_clients.get(backend)
+        if existing is None:
+            from hyperbox_mcp import engine
+
+            existing = EngineClient(
+                engine.endpoint_for(backend),
+                timeout=policy.PROVISION_TIMEOUT_SECONDS,
+            )
+            self._install_clients[backend] = existing
         return existing
 
     def _spec(self, language: str) -> dict:
@@ -345,10 +369,35 @@ class NativeRuntime:
         return handle
 
     def _provision(self, handle, client, cid, spec, packages) -> None:
-        """Install declared packages while the network is still attached."""
-        for prelude in ([spec["install_prelude"]] if spec.get("install_prelude") else []):
-            api.run_exec(client, cid, prelude)
-        code, out, err = api.run_exec(client, cid, [*spec["install"], *packages])
+        """Install declared packages while the network is still attached.
+
+        Runs on the install client, not the one passed in: see
+        _install_client. An install that outlives its budget raises here
+        rather than being mistaken for a finished one -- the caller
+        destroys the container, which is the only safe outcome, because
+        the alternative is sealing a sandbox around a half-installed
+        dependency set it can never repair.
+        """
+        client = self._install_client(handle.backend)
+        try:
+            for prelude in (
+                [spec["install_prelude"]] if spec.get("install_prelude") else []
+            ):
+                api.run_exec(client, cid, prelude)
+            code, out, err = api.run_exec(
+                client, cid, [*spec["install"], *packages]
+            )
+        except (TimeoutError, errors.ExecIncompleteError) as exc:
+            raise errors.ProvisionError(
+                f"Installing {', '.join(packages)} did not finish within "
+                f"{policy.PROVISION_TIMEOUT_SECONDS:g}s, so this sandbox was "
+                "destroyed rather than handed back half-provisioned.",
+                fix="Bake the dependencies into an environment instead, "
+                    "which installs them once: hyperbox build <name> "
+                    "--dockerfile <path>, then pass environment=<name>.",
+                context={"sandbox_id": handle.sandbox_id, "packages": packages,
+                         "budget_seconds": policy.PROVISION_TIMEOUT_SECONDS},
+            ) from exc
         if code != 0:
             raise errors.ProvisionError(
                 f"Could not install {', '.join(packages)}: "
@@ -479,11 +528,26 @@ class NativeRuntime:
         """
         failure = None
         code, out, err = 0, "", ""
+        # The install budget, not the run() one -- same reasoning as
+        # _provision. This path is deprecated but it is still a pip
+        # install, and it was inheriting a ceiling sized for agent code.
+        install_client = self._install_client(handle.backend)
         try:
             self._unseal(handle)
             code, out, err = api.run_exec(
-                client, cid,
+                install_client, cid,
                 ["python3", "-m", "pip", "install", "--no-input", *libraries],
+            )
+        except (TimeoutError, errors.ExecIncompleteError):
+            failure = ExecResult(
+                stdout="",
+                stderr=(
+                    f"Installing {', '.join(libraries)} did not finish within "
+                    f"{policy.PROVISION_TIMEOUT_SECONDS:g}s. Declare packages "
+                    "at create_sandbox(packages=[...]) instead, or ask the "
+                    "user for an environment with them baked in."
+                ),
+                exit_code=-1,
             )
         except Exception as exc:  # noqa: BLE001
             failure = ExecResult(

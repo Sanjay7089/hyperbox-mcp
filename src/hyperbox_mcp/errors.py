@@ -115,6 +115,23 @@ class SocketBusyError(EngineError):
     code = "SOCKET_BUSY"
 
 
+class ExecIncompleteError(EngineError):
+    """The engine answered, and said the exec has not finished.
+
+    A running exec has no exit code: Docker reports `ExitCode: null` for
+    one. Reading that as 0 is how a dependency install cut short by the
+    socket budget got reported as a successful one -- and the sandbox was
+    then sealed around a half-installed state, with no network left to
+    repair it.
+
+    Not an outage. The engine is healthy and answered the question; the
+    answer was "not yet". What that means is the caller's to decide --
+    fatal while provisioning, merely a lost result elsewhere.
+    """
+
+    code = "EXEC_INCOMPLETE"
+
+
 class ContainerGoneError(EngineError, LookupError):
     """The engine answered and confirmed this container does not exist.
 

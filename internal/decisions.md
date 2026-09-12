@@ -540,3 +540,54 @@ connection failure. It is a plausible contributor and a real defect in its own
 right; the connection issue remains undiagnosed on the client side.
 
 **Revisit when.** Not expected.
+
+## 2026-09-12 — A running exec must never yield an exit code
+
+**Context.** Running a real FastAPI backend through HyperBox surfaced that heavy
+dependency installs were "impractical". Tracing why found something worse than
+slowness: `api.exec_exit_code` read `.get("ExitCode") or 0`, and a running exec
+has no exit code. An install the reader had given up on came back as a clean
+success, `_provision`'s `if code != 0` passed, and `create()` sealed the sandbox
+around a half-installed dependency set with no network left to repair it.
+
+**Measured on both engines**, a `sleep 5` queried one second in:
+
+```
+docker  while running -> Running=True  ExitCode=None
+podman  while running -> Running=True  ExitCode=0
+```
+
+**This is the part worth remembering.** The obvious fix — refuse when `ExitCode`
+is `None` — is correct on Docker and useless on Podman, where a running exec is
+indistinguishable from a successful one by exit code alone. It passed the Docker
+gate and failed the Podman one. The check keys on `Running`.
+
+That is failure pattern #2 from the blueprint, verbatim: *a property that holds
+on one engine and not the other is invisible until it isn't*. It would have
+shipped if the gate were one engine.
+
+**Also fixed, same chain.** `_read_until_done` returned a partial result when it
+gave up, indistinguishable from a clean finish — now raises, matching what a
+socket does by itself on the other transport. And its budget was cumulative
+(`started` set once) while the socket's is idle-based, so a twenty-minute
+install progressing fine would be cut off on Windows and complete on Linux; it
+now resets on every chunk, so both mean "no output for N seconds".
+
+**Provisioning got its own budget.** `ENGINE_SOCKET_TIMEOUT` is derived from
+`MAX_TIMEOUT_SECONDS`, which bounds AGENT CODE at 60s; nothing ever sized it for
+an install. `policy.PROVISION_TIMEOUT_SECONDS = 900` on its own client, with no
+`+ margin` — that margin exists to stop run()'s host-side deadline racing the
+socket, and provisioning has no second clock to race.
+
+**What the test had to reproduce.** Not a slow install — a SILENT one. Both read
+paths give up on an idle stream, so a pip install streaming progress never trips
+the budget however long it runs, which is correct. What tripped it in the field
+was a native wheel compiling: minutes of real work with nothing on stdout. The
+first version of the test used a real `pip install` and passed against the
+unfixed code.
+
+**Costs.** `exec_exit_code` now raises where callers previously got an int. Every
+caller is in `native_runtime.py` and was audited; the run() path surfaces it as a
+structured error instead of a false zero, which is the point.
+
+**Revisit when.** Not expected.

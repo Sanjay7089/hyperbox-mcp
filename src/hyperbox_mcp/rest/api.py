@@ -205,8 +205,39 @@ def exec_exit_code(client: EngineClient, exec_id: str) -> int:
     Not optional: the streamed start call does not carry it, and both SDKs
     return None for it when streaming — a trap this path avoids by always
     asking.
+
+    A RUNNING exec has no exit code, and refusing to invent one is the
+    whole point of the check below. This used to read `.get("ExitCode")
+    or 0`, so an exec the reader had given up on -- Docker reports
+    `ExitCode: null` while it is still going -- came back as a clean
+    success. `_provision` then passed its `if code != 0` check and
+    `create()` sealed the sandbox around a half-finished install. Verified
+    against a real engine: a running exec reports
+    `Running: True, ExitCode: None`, and `None or 0` is 0.
     """
-    return client.request("GET", f"/exec/{exec_id}/json").get("ExitCode") or 0
+    state = client.request("GET", f"/exec/{exec_id}/json")
+    code = state.get("ExitCode")
+    running = bool(state.get("Running"))
+    # `Running` FIRST, and the engines differ on exactly this. Measured,
+    # both on a `sleep 5` queried one second in:
+    #
+    #   docker  while running -> Running=True  ExitCode=None
+    #   podman  while running -> Running=True  ExitCode=0
+    #
+    # So on Podman a running exec is byte-for-byte indistinguishable from
+    # a successful one if you look only at the exit code -- there is no
+    # null to notice. Keying on ExitCode alone fixes Docker and leaves
+    # Podman reporting a half-finished install as a clean success.
+    if running or code is None:
+        raise errors.ExecIncompleteError(
+            "The engine has no exit code for this command: it had not "
+            f"finished{' and is still running' if running else ''}.",
+            fix="It outlived the time HyperBox waited for it. For a heavy "
+                "dependency install, bake it into an environment instead: "
+                "hyperbox build <name> --dockerfile <path>.",
+            context={"exec_id": exec_id, "running": running},
+        )
+    return int(code)
 
 
 def run_exec(client: EngineClient, cid: str, argv: list[str]) -> tuple[int, str, str]:

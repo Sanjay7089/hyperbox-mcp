@@ -372,6 +372,23 @@ MAX_TIMEOUT_SECONDS = 60.0
 #: its verification, which happen after the deadline on the same
 #: connection.
 ENGINE_SOCKET_TIMEOUT = MAX_TIMEOUT_SECONDS + 120.0
+
+#: How long a create-time dependency install may take, and the socket
+#: budget that carries it.
+#:
+#: ENGINE_SOCKET_TIMEOUT is derived from MAX_TIMEOUT_SECONDS, which governs
+#: AGENT CODE and is 60s. Nothing ever sized it for provisioning, so an
+#: install inherited a 180s ceiling it was never measured against: a real
+#: backend with seventeen dependencies, several of them native wheels that
+#: compile (cryptography, asyncpg), runs past that routinely. What made it
+#: dangerous rather than merely slow is documented in api.exec_exit_code.
+#:
+#: Deliberately NOT `deadline + margin` like the pair above. That margin
+#: exists because run() has a host-side deadline the socket must not race;
+#: provisioning has no second clock, so this budget IS the deadline and
+#: there is nothing to race. One timeout, one meaning.
+PROVISION_TIMEOUT_SECONDS = 900.0
+
 DEFAULT_TIMEOUT_SECONDS = 30.0
 MAX_OUTPUT_CHARS = 20_000
 MAX_CODE_CHARS = 1024 * 1024

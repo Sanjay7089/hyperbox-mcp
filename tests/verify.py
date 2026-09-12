@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import time
 import uuid
 
 sys.path.insert(0, "src")
@@ -425,6 +426,108 @@ def main() -> int:
             "a failed RESEAL after run(libraries=...) is refused",
             "this runtime has no seal proof.",
         )
+
+    # 5e2. A RUNNING exec has no exit code, and must not be given one.
+    #
+    #      The linchpin, tested directly because the path that turns it
+    #      into corruption is Windows-only: there, _read_until_done gives
+    #      up on an idle stream and the caller then asks for an exit code
+    #      the engine does not have. On a unix socket the read raises
+    #      first, so this check is the only place the underlying rule is
+    #      asserted on this platform.
+    #
+    #      Verified against a real engine: a running exec reports
+    #      `Running: True, ExitCode: None`, and the old `or 0` read that
+    #      as a clean success.
+    import threading as _threading
+
+    from hyperbox_mcp.rest import api as _api2
+
+    probe_client = rt._client(backend)  # noqa: SLF001 - asserting a primitive
+    probe_cid = rt._ref(handle)  # noqa: SLF001
+    live_exec = _api2.exec_create(probe_client, probe_cid, ["sleep", "5"])
+    _threading.Thread(
+        target=lambda: _api2.exec_start(probe_client, live_exec), daemon=True
+    ).start()
+    time.sleep(1.0)
+    try:
+        got = _api2.exec_exit_code(probe_client, live_exec)
+        invented = f"returned {got!r} for an exec that is still running"
+        refused_code = False
+    except errors.ExecIncompleteError as exc:
+        invented, refused_code = exc.code, True
+    except Exception as exc:  # noqa: BLE001
+        invented, refused_code = f"wrong error: {type(exc).__name__}", False
+    check(
+        "a running exec yields no exit code, rather than an invented zero",
+        refused_code,
+        invented,
+    )
+
+    # 5f. An install that outruns its budget must FAIL, and take the
+    #     container with it.
+    #
+    #     This is the one that matters most. `exec_exit_code` used to read
+    #     Docker's `ExitCode: null` -- what a RUNNING exec reports -- as
+    #     `or 0`, so an install the reader had given up on came back as a
+    #     clean success. _provision's `if code != 0` then passed and
+    #     create() sealed the sandbox around a half-installed dependency
+    #     set, with no network left to repair it. A sandbox described as
+    #     provisioned that is not is the exact failure this project
+    #     exists to prevent, so the assertion is not merely "an error was
+    #     returned" -- it is that NO container survives.
+    import hyperbox_mcp.policy as pol
+    from hyperbox_mcp import native_runtime as _nr
+    from hyperbox_mcp.rest import api as _api
+
+    original_budget = pol.PROVISION_TIMEOUT_SECONDS
+    original_install = _nr.LANGUAGES["python"]["install"]
+    pol.PROVISION_TIMEOUT_SECONDS = 3.0
+    # SILENT, not merely slow, and that distinction is the whole bug. Both
+    # read paths give up on an idle stream, so a pip install streaming
+    # progress never trips the budget however long it runs -- which is
+    # correct. What tripped it in the field was a native wheel
+    # (cryptography, asyncpg) compiling: minutes of real work with nothing
+    # on stdout. `sleep` reproduces exactly that and nothing else.
+    _nr.LANGUAGES["python"]["install"] = ["sh", "-c", "sleep 30; exit 0"]
+    starved_id = new_id()
+    # A fresh runtime: install clients are cached per instance and carry
+    # the budget, so reusing `rt` would reuse the original ceiling.
+    starved_rt = type(rt)()
+    try:
+        starved_rt.create(
+            language="python", backend=backend, sandbox_id=starved_id,
+            packages=["six"],
+        )
+        refused, why = False, "create returned a handle"
+    except errors.ProvisionError as exc:
+        refused, why = True, f"{exc.code}"
+    except Exception as exc:  # noqa: BLE001
+        refused, why = False, f"wrong error: {type(exc).__name__}: {exc}"
+    finally:
+        pol.PROVISION_TIMEOUT_SECONDS = original_budget
+        _nr.LANGUAGES["python"]["install"] = original_install
+
+    check(
+        "an install that outruns its budget is refused, not reported done",
+        refused,
+        why,
+    )
+
+    # The container must be gone, not merely unreported.
+    survivors = []
+    try:
+        client = rt._client(backend)  # noqa: SLF001 - asserting cleanup
+        for row in _api.list_managed(client):
+            if (row.get("Labels") or {}).get(pol.LABEL_ID) == starved_id:
+                survivors.append(row.get("Id", "")[:12])
+    except Exception as exc:  # noqa: BLE001
+        survivors = [f"(could not ask the engine: {exc})"]
+    check(
+        "and its container is destroyed, not left sealed and half-built",
+        not survivors,
+        f"survivors: {survivors}" if survivors else "no container carries that id",
+    )
 
     # 6. Destroy, then destroy again — idempotent.
     rt.destroy(handle)
