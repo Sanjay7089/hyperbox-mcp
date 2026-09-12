@@ -185,6 +185,37 @@ def main() -> int:
             f"reachable: {', '.join(reachable) or 'NONE — see the fix lines above'}",
         )
 
+    # A reachable engine must report its actual version. `probe()` treats
+    # this as informational and swallows whatever goes wrong, so when the
+    # container SDKs were dropped and the REST shim lost its `version()`,
+    # every doctor run said `unknown (AttributeError)` and no suite
+    # noticed. A release is supposed to name the engine versions it was
+    # verified against; this is where that number comes from.
+    for backend, status in statuses.items():
+        if not status.reachable:
+            continue
+        check(
+            f"{backend} reports a real version, not 'unknown'",
+            bool(status.version) and not status.version.startswith("unknown"),
+            f"version={status.version or '(empty)'}",
+        )
+
+    # A bug in this package must never be reported as an engine outage.
+    # `_RestEngine` was missing `images`, and the resulting AttributeError
+    # went through classify() and reached the user as "Could not reach
+    # docker -- start the engine", on a machine where docker was running
+    # fine. Sending someone to restart a healthy engine is the same
+    # failure as claiming a limit that was never applied: a confident
+    # wrong answer.
+    for exc in (AttributeError("no attribute 'images'"),
+                TypeError("not callable"), NameError("x")):
+        classified = engine.classify("docker", exc, "image foo")
+        check(
+            f"a {type(exc).__name__} is not dressed up as an engine outage",
+            classified is exc,
+            f"got {type(classified).__name__}",
+        )
+
     # --- 5b. a socket FILE is not a listener -------------------------
     #
     # The regression this guards is the whole reason v0.3 exists: a
@@ -820,8 +851,15 @@ def main() -> int:
     # cheapest possible check and it guards the whole package.
     import warnings as _warnings
 
+    # Covers tests/ as well as src/: the suite that exists BECAUSE of the
+    # 0.3.0 `\p` escape shipped with a `\p` escape of its own in the very
+    # docstring describing it, for a year, because this loop only ever
+    # looked at the package. A guard that does not cover the guard is half
+    # a guard.
     offenders = []
-    for source in sorted(Path("src").rglob("*.py")):
+    for source in sorted(
+        [*Path("src").rglob("*.py"), *Path("tests").rglob("*.py")]
+    ):
         with _warnings.catch_warnings():
             _warnings.simplefilter("error")
             try:

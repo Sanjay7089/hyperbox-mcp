@@ -1,4 +1,4 @@
-"""The `hyperbox` command line, driven as a real subprocess.
+r"""The `hyperbox` command line, driven as a real subprocess.
 
     python tests/verify_cli.py [docker|podman]
 
@@ -277,6 +277,120 @@ def main() -> int:
             "logs with no log yet explains rather than crashing",
             "Traceback (most recent call last)" not in out and out != "",
             f"exit={r.returncode} out={out[:100]!r}",
+        )
+
+    # --- 8. the lifecycle subcommands added in 0.4.0 -------------------
+    #
+    # `ps`, `rm`, `pull` and `init` shipped with no coverage anywhere.
+    # These run against a redirected state dir so they never touch the
+    # developer's real registry.
+    with tempfile.TemporaryDirectory() as td:
+        clean = {"HYPERBOX_STATE_DIR": str(Path(td) / "state"),
+                 "HOME": td, "USERPROFILE": td}
+
+        r = run("ps", env=clean)
+        check(
+            "ps on an empty registry succeeds and says so",
+            r.returncode == 0 and "Traceback" not in (r.stdout + r.stderr),
+            f"exit={r.returncode} out={(r.stdout + r.stderr).strip()[:90]!r}",
+        )
+
+        r = run("ps", "extra-arg", env=clean)
+        check(
+            "ps rejects an argument it does not take",
+            r.returncode == 2,
+            f"exit={r.returncode}",
+        )
+
+        # An id that parses but does not exist. This is a SUCCESS, on
+        # purpose: `rm` inherits destroy_sandbox's idempotency, where
+        # removing something already gone is the outcome the caller
+        # wanted, not an error. Asserting non-zero here is the mistake
+        # this comment exists to stop the next person repeating -- it was
+        # made while writing this case.
+        r = run("rm", "000000000000", env=clean)
+        out = (r.stdout + r.stderr)
+        check(
+            "rm on an unknown id is an idempotent success, not a crash",
+            r.returncode == 0 and "Traceback" not in out
+            and "already gone" in out,
+            f"exit={r.returncode} out={out.strip()[:90]!r}",
+        )
+
+        r = run("rm", env=clean)
+        check("rm with no id exits 2", r.returncode == 2, f"exit={r.returncode}")
+
+        r = run("pull", "000000000000", "/sandbox", env=clean)
+        check(
+            "pull with too few arguments exits 2",
+            r.returncode == 2,
+            f"exit={r.returncode}",
+        )
+
+        # The TTY gate. `hyperbox init` is what widens the boundary host
+        # files may cross, and agents have shell access in the clients
+        # HyperBox targets -- so an agent able to run it non-interactively
+        # could allowlist a directory for itself. subprocess gives the
+        # child a pipe, not a terminal, which is exactly the case that
+        # must refuse.
+        target = Path(td) / "project"
+        target.mkdir()
+        roots = Path(td) / "sync-roots"
+        r = run("init", str(target),
+                env={**clean, "HYPERBOX_SYNC_ROOTS_FILE": str(roots)})
+        out = (r.stdout + r.stderr)
+        check(
+            "init refuses to run without a TTY",
+            r.returncode == 2,
+            f"exit={r.returncode} out={out.strip()[:90]!r}",
+        )
+        check(
+            "and it allowlisted nothing while refusing",
+            not roots.exists() or str(target) not in
+            roots.read_text(encoding="utf-8"),
+            "a non-interactive init must not widen the boundary",
+        )
+        check(
+            "and it names the command a human should run instead",
+            "hyperbox init" in out,
+            out.strip()[:110],
+        )
+
+        r = run("init", str(Path(td) / "no-such-dir"), env=clean)
+        check(
+            "init on a missing directory exits 2",
+            r.returncode == 2,
+            f"exit={r.returncode}",
+        )
+
+    # --- 9. the FULL doctor, not just --quick --------------------------
+    #
+    # Every doctor case above uses --quick, which skips the live
+    # create/run/destroy. So the round trip -- the only check that proves
+    # the installed program can actually make a sandbox -- was never run
+    # by any suite, and shipped broken: `_RestEngine` had no `images`, and
+    # doctor reported it as "start the engine" on a healthy machine. Found
+    # by installing the wheel by hand, which is exactly the gap this case
+    # closes.
+    r = run("doctor", timeout=300)
+    out = r.stdout + r.stderr
+    if "engine reachable" not in out and r.returncode != 0:
+        check("full doctor runs the live round trip", True,
+              "SKIP: no engine reachable on this machine")
+    else:
+        check(
+            "full doctor passes every check, round trip included",
+            r.returncode == 0 and "live sandbox round trip" in out
+            and "FAIL" not in out,
+            f"exit={r.returncode} "
+            + next((ln.strip() for ln in out.splitlines()
+                    if ln.startswith("FAIL")), out.strip()[-120:]),
+        )
+        check(
+            "and it never blames a healthy engine for a bug in the package",
+            "AttributeError" not in out and "TypeError" not in out,
+            "a code bug reported as an outage sends users to restart "
+            "something already running",
         )
 
     return summarize()

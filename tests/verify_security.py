@@ -265,15 +265,116 @@ async def main() -> int:
                 str(gone),
             )
 
-    # --- a networked environment says so, and a sealed one is sealed ---
+    # --- sync_from never carries a secret in, and says what it dropped -
     #
-    # `--allow-network` is the one way a sandbox keeps its network, and it
-    # is a property of an environment a HUMAN built, never a tool
-    # parameter. What matters is that the description and the behaviour
-    # agree in BOTH directions: a sandbox that can reach the internet
-    # while something calls it sealed is the worst outcome available
-    # here, and so is refusing an environment the user deliberately
-    # opened.
+    # Shipped in 0.4.0 with no coverage. The denylist is the whole safety
+    # argument for letting host files into a sandbox at all, and until now
+    # nothing had ever put a `.env` next to a source file and checked
+    # which one arrived.
+    import tempfile as _tempfile
+
+    tree = Path(_tempfile.mkdtemp(prefix="hyperbox-sync-"))
+    (tree / "app.py").write_text("SECRET = 'not-really'\n", encoding="utf-8")
+    (tree / ".env").write_text("AWS_SECRET_ACCESS_KEY=hunter2\n",
+                               encoding="utf-8")
+    (tree / ".npmrc").write_text("//registry:_authToken=hunter2\n",
+                                 encoding="utf-8")
+    (tree / ".ssh").mkdir()
+    (tree / ".ssh" / "id_ed25519").write_text("PRIVATE KEY\n",
+                                              encoding="utf-8")
+    outside = Path(_tempfile.mkdtemp(prefix="hyperbox-outside-"))
+    (outside / "loot.txt").write_text("host file\n", encoding="utf-8")
+    try:
+        (tree / "escape").symlink_to(outside / "loot.txt")
+    except OSError:
+        pass  # symlinks may need privilege on Windows; the rest still holds
+
+    real_roots = os.environ.get("HYPERBOX_SYNC_ROOTS")
+    os.environ["HYPERBOX_SYNC_ROOTS"] = str(tree)
+    try:
+        async with Client(server.mcp) as client:
+            made = (
+                await client.call_tool(
+                    "create_sandbox",
+                    {"language": "python", "backend": backend,
+                     "sync_from": str(tree)},
+                )
+            ).data
+            if "error" in made:
+                check("a directory can be synced in", False, str(made)[:140])
+            else:
+                sid = made["sandbox_id"]
+                try:
+                    listing = (
+                        await client.call_tool(
+                            "run",
+                            {"sandbox_id": sid,
+                             "code": "import os\n"
+                                     "for r, d, f in os.walk('/sandbox'):\n"
+                                     "    for n in f: print(os.path.join(r, n))\n"},
+                        )
+                    ).data["stdout"]
+                    arrived = {Path(line).name
+                               for line in listing.splitlines() if line.strip()}
+                    leaked = arrived & {".env", ".npmrc", "id_ed25519",
+                                        "loot.txt", "escape"}
+                    check(
+                        "no denylisted secret reaches the sandbox",
+                        not leaked,
+                        f"leaked: {sorted(leaked)}" if leaked
+                        else f"arrived: {sorted(arrived)}",
+                    )
+                    check(
+                        "the ordinary file it was asked for does arrive",
+                        "app.py" in arrived,
+                        f"arrived: {sorted(arrived)}",
+                    )
+                    # Reported, not silently dropped -- an agent that
+                    # cannot see what was withheld will debug the wrong
+                    # thing when its code cannot find a config file.
+                    skipped = made.get("sync", {}).get("skipped", [])
+                    names = {Path(s.get("path", "")).name for s in skipped}
+                    check(
+                        "and the manifest names what it withheld, with a reason",
+                        {".env", ".npmrc"} <= names
+                        and all(s.get("reason") for s in skipped),
+                        f"skipped: {skipped}"[:160],
+                    )
+                finally:
+                    await client.call_tool("destroy_sandbox",
+                                           {"sandbox_id": sid})
+
+            # The boundary itself: a directory nobody allowed is refused
+            # before any container is involved.
+            refused = (
+                await client.call_tool(
+                    "create_sandbox",
+                    {"language": "python", "backend": backend,
+                     "sync_from": str(outside)},
+                )
+            ).data
+            check(
+                "a directory outside every allowed root is refused",
+                "error" in refused
+                and refused["error"].get("code") == "INVALID_INPUT",
+                str(refused)[:120],
+            )
+    finally:
+        if real_roots is None:
+            os.environ.pop("HYPERBOX_SYNC_ROOTS", None)
+        else:
+            os.environ["HYPERBOX_SYNC_ROOTS"] = real_roots
+
+    # --- a pre-0.4.0 "open" environment is sealed anyway ---
+    #
+    # `--allow-network` was removed in 0.4.0, but manifests written by
+    # older versions still sit in ~/.hyperbox/environments carrying
+    # {"network": "bridge"}. Nothing reads that key any more, and this is
+    # what proves it: the assertion is not that the code was deleted but
+    # that a sandbox built from such an environment cannot reach the
+    # internet. Deleting the old test and stopping there would have left
+    # the removal unverified against the one input that used to trigger it.
+    import json
     import tempfile
 
     from hyperbox_mcp.builder import _write_manifest
@@ -283,10 +384,15 @@ async def main() -> int:
     os.environ["HYPERBOX_ENV_DIR"] = str(env_root)
     try:
         image = server._runtime.image_for("python")
-        # Written directly rather than built: this asserts how the flag is
-        # HONOURED, and a pull would only re-test the builder.
-        _write_manifest("netopen", image, "image", backend, allow_network=True)
-        _write_manifest("netsealed", image, "image", backend, allow_network=False)
+        _write_manifest("legacyopen", image, "image", backend)
+        # Put the field back by hand, exactly as a pre-0.4.0 build wrote
+        # it. _write_manifest no longer emits it, so this is the only way
+        # to reproduce the input that mattered.
+        legacy = env_root / "legacyopen" / "env.json"
+        manifest = json.loads(legacy.read_text(encoding="utf-8"))
+        manifest["network"] = "bridge"
+        legacy.write_text(json.dumps(manifest, indent=2) + "\n",
+                          encoding="utf-8")
 
         probe = (
             "import socket\n"
@@ -297,31 +403,33 @@ async def main() -> int:
             "    print('SEALED')\n"
         )
         async with Client(server.mcp) as client:
-            for env, expect in (("netopen", "REACHABLE"), ("netsealed", "SEALED")):
-                made = (
-                    await client.call_tool(
-                        "create_sandbox",
-                        {"language": "python", "backend": backend,
-                         "environment": env},
-                    )
-                ).data
-                if "error" in made:
-                    check(f"environment '{env}' can be created", False,
-                          str(made)[:140])
-                    continue
+            made = (
+                await client.call_tool(
+                    "create_sandbox",
+                    {"language": "python", "backend": backend,
+                     "environment": "legacyopen"},
+                )
+            ).data
+            if "error" in made:
+                check("a legacy 'open' environment can still be created",
+                      False, str(made)[:140])
+            else:
                 sid = made["sandbox_id"]
                 try:
-                    said_open = "CAN reach the internet" in made["network"]
                     got = (
                         await client.call_tool(
                             "run", {"sandbox_id": sid, "code": probe}
                         )
                     ).data["stdout"].strip()
                     check(
-                        f"'{env}' behaves the way its result describes it",
-                        got == expect and said_open == (expect == "REACHABLE"),
-                        f"result says {'open' if said_open else 'sealed'}, "
-                        f"probe says {got}, expected {expect}",
+                        "a pre-0.4.0 network:bridge environment is sealed anyway",
+                        got == "SEALED",
+                        f"probe says {got}, expected SEALED",
+                    )
+                    check(
+                        "and its result describes it as sealed",
+                        "cannot reach the internet" in made["network"],
+                        str(made.get("network")),
                     )
                 finally:
                     await client.call_tool("destroy_sandbox",

@@ -135,7 +135,7 @@ It shows you the path and asks. It also refuses to run without a
 terminal — the point of the gate is that a *person* chose the directory,
 and agents can run shell commands in the clients HyperBox targets.
 
-After that an agent can ask for `create_sandbox(sync_in_dir="...")` for
+After that an agent can ask for `create_sandbox(sync_from="...")` for
 any path under an allowed directory, and the files land at `/sandbox`.
 The result lists what arrived and what did not.
 
@@ -172,14 +172,15 @@ hyperbox pull <sandbox-id> /sandbox/results.csv ./out
 | `HYPERBOX_ENV_DIR` | Move locally built environments |
 | `HYPERBOX_TTL_SECONDS` | How long an idle sandbox survives (default 1800) |
 | `HYPERBOX_ENGINE_SLOTS` | Cap concurrent heavy engine work — pulls, builds, creates — across every HyperBox process on the machine |
-| `HYPERBOX_RUNTIME` | `native` (default) or `llm-sandbox` |
+| `HYPERBOX_RUNTIME` | `native` only. Any other value is refused |
 | `HYPERBOX_SYNC_ROOTS` | Override the allowed sync directories, `:`-separated. For CI; `hyperbox init` is the normal way |
 
 **About `HYPERBOX_RUNTIME`.** HyperBox speaks the engine's REST API
 directly, over a unix socket or a Windows named pipe. That is the `native`
-runtime and it is the default. `llm-sandbox` selects the previous backend
-and exists as an escape hatch for one release — if you need it, please open
-an issue saying why, because it goes away in 0.4.0.
+runtime, it is the default, and since 0.4.0 it is the only one. The
+variable is still read so that a stale `HYPERBOX_RUNTIME=llm-sandbox` in
+someone's client config is refused with an explanation rather than
+silently ignored — unset it.
 
 ## Command reference
 
@@ -202,7 +203,6 @@ hyperbox build <name>    Create an environment agents can select
   --image <ref>          Pull an existing image and register it
   --engine docker|podman Override which engine to use
   --no-cache             Build without reusing cached layers
-  --allow-network        Sandboxes from it keep internet access
 hyperbox logs            Show the server log
   --follow               Keep printing as new lines arrive
 hyperbox --version       Print the installed version

@@ -82,7 +82,7 @@ class Runtime(Protocol):
         self, language: str, backend: str, sandbox_id: str,
         environment: str | None = None,
         packages: list[str] | None = None,
-        sync_in_dir: "Path | None" = None,
+        sync_from: "Path | None" = None,
     ) -> SandboxHandle:
         """Create and open a persistent sandbox under the given id.
 

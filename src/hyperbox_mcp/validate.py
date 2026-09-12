@@ -259,7 +259,7 @@ def environment(value: object) -> str | None:
     return name
 
 
-def sync_dir(value: object) -> Path | None:
+def sync_from(value: object) -> Path | None:
     """Resolve a host directory the caller wants synced in. None = nothing.
 
     Not a pure function, unlike everything above it: deciding whether a
@@ -277,7 +277,7 @@ def sync_dir(value: object) -> Path | None:
         return None
     if not isinstance(value, str) or not value.strip():
         raise InvalidInput(
-            "sync_in_dir must be a path to a directory on the user's "
+            "sync_from must be a path to a directory on the user's "
             "machine, or omitted."
         )
 
@@ -285,7 +285,7 @@ def sync_dir(value: object) -> Path | None:
     if not roots:
         raise InvalidInput(
             "Syncing host files is not enabled on this machine, so "
-            "sync_in_dir cannot be used.",
+            "sync_from cannot be used.",
             fix="The user enables it at their terminal, once, by running "
                 "`hyperbox init` in a directory they are willing to share. "
                 "You cannot run it for them.",
@@ -295,14 +295,14 @@ def sync_dir(value: object) -> Path | None:
         candidate = Path(value).expanduser().resolve(strict=True)
     except OSError as exc:
         raise InvalidInput(
-            f"sync_in_dir '{value}' does not exist on the user's machine.",
-            fix="Ask the user for the correct path, or omit sync_in_dir.",
+            f"sync_from '{value}' does not exist on the user's machine.",
+            fix="Ask the user for the correct path, or omit sync_from.",
             context={"path": str(value), "error": str(exc)},
         ) from exc
 
     if not candidate.is_dir():
         raise InvalidInput(
-            f"sync_in_dir '{value}' is not a directory.",
+            f"sync_from '{value}' is not a directory.",
             fix="Pass a directory; a single file cannot be synced.",
         )
 

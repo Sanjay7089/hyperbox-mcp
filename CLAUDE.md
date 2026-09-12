@@ -80,12 +80,13 @@ container and raises, rather than handing back a sandbox that is
 
 ## Network policy
 
-Network posture is a property of the environment, not a caller choice:
-built-in and default environments are sealed after preparation; only an
-environment a human built with `--allow-network` (`policy.
-environment_allows_network`, read per call from its manifest) keeps
-network for its entire lifetime. No `create_sandbox`/`run` parameter can
-request network access directly.
+Every sandbox is sealed after preparation, with no exception. Posture is
+server policy, not a caller choice, and no `create_sandbox`/`run`
+parameter can request network access directly. Until 0.4.0 an environment
+a human built with `--allow-network` kept its network for its whole
+lifetime; that flag and `policy.environment_allows_network` are both gone,
+so "sealed" no longer needs qualifying anywhere. A manifest written
+before 0.4.0 may still carry `"network": "bridge"` — nothing reads it.
 
 ## Registry vs engine semantics
 

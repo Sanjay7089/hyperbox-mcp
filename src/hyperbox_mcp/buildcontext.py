@@ -165,7 +165,7 @@ def sync_tar(
             if included + 1 > max_files:
                 raise ValueError(
                     f"{source} holds more than {max_files} files to sync. "
-                    "Narrow sync_in_dir to the directory actually needed, "
+                    "Narrow sync_from to the directory actually needed, "
                     f"or exclude what is not in a {ignore_file}."
                 )
             if total + size > max_bytes:
@@ -176,7 +176,7 @@ def sync_tar(
                 )
                 raise ValueError(
                     f"{source} is larger than the {limit} sync limit "
-                    f"(reached at {relative}). Narrow sync_in_dir, or "
+                    f"(reached at {relative}). Narrow sync_from, or "
                     f"exclude what is not needed in a {ignore_file}."
                 )
             archive.add(path, arcname=relative)

@@ -347,15 +347,12 @@ def capabilities() -> str:
                 {
                     "name": name,
                     "image": image,
-                    # Stated per environment, because it is the one thing
-                    # that changes what a sandbox from it can do. An agent
-                    # that needs to download a model can pick the right
-                    # one instead of trying and failing.
-                    "network": (
-                        "open"
-                        if policy.environment_allows_network(name)
-                        else "sealed"
-                    ),
+                    # Always "sealed" since 0.4.0, and stated rather than
+                    # omitted: an agent reading this should not have to
+                    # infer a security property from a missing key. An
+                    # environment used to be able to keep its network,
+                    # which is what made this field a discriminator.
+                    "network": "sealed",
                 }
                 for name, image in sorted(policy.environments().items())
             ],
@@ -454,7 +451,7 @@ async def create_sandbox(
     backend: str = "auto",
     environment: str | None = None,
     packages: list[str] | None = None,
-    sync_in_dir: str | None = None,
+    sync_from: str | None = None,
 ) -> dict:
     """Create a disposable container to run untrusted or unverified code in.
 
@@ -505,7 +502,7 @@ async def create_sandbox(
     `hyperbox://capabilities` carries a `host_actions` block with the exact
     command to give them.
 
-    `sync_in_dir` copies a directory from the user's machine into the
+    `sync_from` copies a directory from the user's machine into the
     sandbox at /sandbox, so you can run their real code and their real
     test data instead of a snippet you retyped. It is OFF unless the user
     has allowed it: they run `hyperbox init` once, in a directory they are
@@ -522,7 +519,7 @@ async def create_sandbox(
     """
     try:
         language = validate.language(language, _runtime.supported_languages())
-        synced_from = validate.sync_dir(sync_in_dir)
+        synced_from = validate.sync_from(sync_from)
         requested = validate.backend(backend)
         environment = validate.environment(environment)
         packages = validate.libraries(packages)
@@ -559,7 +556,11 @@ async def create_sandbox(
         "creating sandbox %s (language=%s, backend=%s, environment=%s)",
         sandbox_id, language, resolved, environment,
     )
-    _registry.reserve(sandbox_id, language=language, backend=resolved)
+    # The short reservation TTL, not the default: until this row is
+    # finalised it shields a container that may be running, root and still
+    # networked. See policy.CREATING_TTL_SECONDS.
+    _registry.reserve(sandbox_id, language=language, backend=resolved,
+                      ttl_seconds=policy.CREATING_TTL_SECONDS)
     try:
         async with _heartbeat(ctx, what):
             # Offloaded: container creation blocks for seconds to minutes,
@@ -578,7 +579,7 @@ async def create_sandbox(
             # REFUSED with a reason rather than ignored.
             accepted = _create_parameters()
             for name, value in (("packages", packages),
-                                ("sync_in_dir", synced_from)):
+                                ("sync_from", synced_from)):
                 if not value:
                     continue
                 if name not in accepted:
@@ -624,15 +625,11 @@ async def create_sandbox(
         "backend": handle.backend,
         "environment": environment,
         "packages": packages or [],
-        # Says which it actually is. An environment a human built with
-        # --allow-network keeps its network, and describing that sandbox
-        # as sealed would be the exact lie the read-backs exist to stop.
-        "network": (
-            "OPEN — this sandbox CAN reach the internet, because the "
-            f"environment '{environment}' was built with --allow-network"
-            if handle.meta.get("network") == "bridge"
-            else "sealed — this sandbox cannot reach the internet"
-        ),
+        # Unconditional: create() seals every sandbox and proves it from
+        # inside, or destroys the container. Reaching this line at all
+        # means the probe came back blocked, so this is a read-back and
+        # not a promise.
+        "network": "sealed — this sandbox cannot reach the internet",
         **({"sync": handle.meta["sync"]} if handle.meta.get("sync") else {}),
         "next": (
             f"Call run(sandbox_id='{handle.sandbox_id}', code=...) to execute. "

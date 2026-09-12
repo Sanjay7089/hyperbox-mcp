@@ -16,8 +16,8 @@ layer, one updating tests, one checking a dependency bump.
 **Each takes its own sandbox.**
 
 ```
-subagent A → create_sandbox(language="python", sync_in_dir="~/proj/db")
-subagent B → create_sandbox(language="python", sync_in_dir="~/proj/tests")
+subagent A → create_sandbox(language="python", sync_from="~/proj/db")
+subagent B → create_sandbox(language="python", sync_from="~/proj/tests")
 subagent C → create_sandbox(language="python", packages=["requests"])
 ```
 

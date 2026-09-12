@@ -236,7 +236,7 @@ class NativeRuntime:
         self, language: str, backend: str, sandbox_id: str,
         environment: str | None = None,
         packages: list[str] | None = None,
-        sync_in_dir: "PathType | None" = None,
+        sync_from: "PathType | None" = None,
     ) -> SandboxHandle:
         """Create a sandbox, provision it, then sever its network for good.
 
@@ -259,9 +259,6 @@ class NativeRuntime:
             )
 
         image = spec["image"]
-        networked = bool(environment) and policy.environment_allows_network(
-            environment
-        )
         if environment:
             available = policy.environments()
             if environment not in available:
@@ -326,23 +323,19 @@ class NativeRuntime:
                 api.inspect_container(client, cid), sandbox_id
             )
             api.run_exec(client, cid, ["mkdir", "-p", policy.CODE_DIR])
-            if sync_in_dir is not None:
-                handle.meta["sync"] = self._sync_in(client, cid, sync_in_dir)
+            if sync_from is not None:
+                handle.meta["sync"] = self._sync_in(client, cid, sync_from)
             for step in spec.get("setup", []):
                 api.run_exec(client, cid, step)
             if packages:
                 self._provision(handle, client, cid, spec, packages)
-            if networked:
-                # Deliberately NOT sealed. A human built this environment
-                # with --allow-network, and the result says so in every
-                # place that otherwise promises the opposite -- the tool
-                # result and capabilities both. A sandbox that can reach
-                # the internet while something still calls it sealed is
-                # the worst outcome available here.
-                handle.meta["network"] = "bridge"
-            else:
-                self._seal(handle)
-                self._assert_network_sealed(handle, client, cid)
+            # Unconditional since 0.4.0. An environment used to be able to
+            # keep its network (`hyperbox build --allow-network`), which
+            # made "sealed" a claim every caller had to qualify. There is
+            # no exception left to describe: every sandbox is sealed here,
+            # and proven sealed on the next line or destroyed.
+            self._seal(handle)
+            self._assert_network_sealed(handle, client, cid)
         except BaseException:
             try:
                 api.remove_container(client, cid)
@@ -475,7 +468,17 @@ class NativeRuntime:
 
         The caller's code is not run here, and the reseal is unconditional:
         a failed install must still leave the sandbox sealed.
+
+        The reseal is also PROVEN, not assumed. create() has always probed
+        from inside the container after sealing; this path re-opened the
+        network mid-session and then trusted the detach to have worked --
+        so the one code path that deliberately un-seals a live sandbox was
+        the one path never checking the seal it put back. A leak here
+        destroys the container rather than returning a sandbox that is
+        described as sealed and is not.
         """
+        failure = None
+        code, out, err = 0, "", ""
         try:
             self._unseal(handle)
             code, out, err = api.run_exec(
@@ -483,11 +486,26 @@ class NativeRuntime:
                 ["python3", "-m", "pip", "install", "--no-input", *libraries],
             )
         except Exception as exc:  # noqa: BLE001
-            return ExecResult(
+            failure = ExecResult(
                 stdout="", stderr=f"Dependency install failed: {exc}", exit_code=-1
             )
         finally:
             self._seal(handle)
+
+        # Deliberately outside the finally: raising from a finally would
+        # swallow whatever was already in flight, and a leak must be the
+        # error the caller sees, not a silent replacement for another one.
+        try:
+            self._assert_network_sealed(handle, client, cid)
+        except errors.NetworkLeakError:
+            try:
+                api.remove_container(client, cid)
+            except Exception:  # noqa: BLE001 - already failing
+                pass
+            raise
+
+        if failure is not None:
+            return failure
         if code != 0:
             return ExecResult(
                 stdout=out, stderr=f"Dependency install failed:\n{err}",

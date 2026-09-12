@@ -29,9 +29,9 @@ FAIL = "fail"
 
 _MARK = {OK: "PASS", WARN: "WARN", FAIL: "FAIL"}
 
-#: The image `create_sandbox(language="python")` needs. Read from
-#: llm-sandbox rather than hardcoded, so it cannot drift from what the
-#: runtime will actually pull.
+#: The image `create_sandbox(language="python")` needs. Read from the
+#: RUNTIME rather than hardcoded, so it cannot drift from what create
+#: will actually pull.
 def python_image() -> str:
     """The image a default python sandbox starts from.
 
@@ -118,7 +118,6 @@ def check_environment(report: Report) -> None:
                 f"Python {py} on {platform.system()} {platform.machine()} "
                 f"({'named pipes' if engine.WINDOWS else 'unix sockets'}); "
                 f"hyperbox-mcp {_version('hyperbox-mcp')}, "
-                f"llm-sandbox {_version('llm-sandbox')}, "
                 f"fastmcp {_version('fastmcp')}"
             ),
             fix="HyperBox needs Python 3.11 or newer. Run it under `uv run`.",

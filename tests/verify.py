@@ -374,6 +374,58 @@ def main() -> int:
             "this runtime has no create-time seal proof.",
         )
 
+    # 5e. The RESEAL proof must be able to fail too.
+    #
+    #     5d covers create(). This covers the only other path that ever
+    #     un-seals a live sandbox: run(libraries=[...]), which re-opens
+    #     the network mid-session to install and then re-seals. That
+    #     reseal used to be trusted rather than proven -- so the one code
+    #     path deliberately opening a hole was the one never checking it
+    #     had closed. Stub the seal and the sandbox must be destroyed,
+    #     not returned describing itself as sealed.
+    if hasattr(rt, "_assert_network_sealed"):
+        leaky = type(rt)()
+        leaky_handle = None
+        try:
+            leaky_handle = leaky.create(
+                language="python", backend=backend, sandbox_id=new_id()
+            )
+            # Sealed correctly at create; break it only for the reseal.
+            leaky._seal = lambda handle: None
+            try:
+                leaky.run(leaky_handle, "print('unreachable')",
+                          libraries=["six"])
+                reseal_refused = False
+            except errors.NetworkLeakError:
+                reseal_refused = True
+            except Exception:  # noqa: BLE001 - any other failure is not it
+                reseal_refused = False
+            gone = not leaky.alive(leaky_handle)
+        except Exception as exc:  # noqa: BLE001 - setup failure, not a result
+            reseal_refused = gone = False
+            print(f"      (setup failed: {exc})")
+        finally:
+            if leaky_handle is not None:
+                try:
+                    leaky.destroy(leaky_handle)
+                except Exception:  # noqa: BLE001
+                    pass
+        check(
+            "a failed RESEAL after run(libraries=...) is refused",
+            reseal_refused,
+            "NETWORK_LEAK when the mid-session reseal is stubbed out",
+        )
+        check(
+            "and the leaking sandbox is destroyed, not left running",
+            gone,
+            "a sandbox that cannot be proven sealed must not survive",
+        )
+    else:
+        skip(
+            "a failed RESEAL after run(libraries=...) is refused",
+            "this runtime has no seal proof.",
+        )
+
     # 6. Destroy, then destroy again — idempotent.
     rt.destroy(handle)
     rt.destroy(handle)  # must not raise
@@ -584,6 +636,82 @@ async def _check_tool_layer(language: str, backend: str) -> None:
             isinstance(crashed, dict) and "exit_code" in crashed,
             str(crashed)[:110],
         )
+
+        # A background run and its log, end to end. Shipped in 0.4.0 with
+        # no coverage at all: `get_process_logs` appeared in this file
+        # only as a string inside the tool-name assertion above, so
+        # nothing had ever called it.
+        started = (
+            await client.call_tool(
+                "run",
+                {"sandbox_id": sid, "background": True,
+                 "code": (
+                     "import time, sys\n"
+                     "for i in range(6):\n"
+                     "    print('tick', i, flush=True)\n"
+                     "    time.sleep(0.5)\n"
+                 )},
+            )
+        ).data
+        pid = started.get("process_id") if isinstance(started, dict) else None
+        check(
+            "a background run returns a process_id instead of output",
+            bool(pid) and started.get("status") == "running"
+            and "stdout" not in started,
+            str(started)[:120],
+        )
+
+        if pid:
+            # Poll rather than sleep a fixed time: the assertion is that
+            # the log GROWS, and a fixed wait either flakes on a slow
+            # engine or wastes time on a fast one.
+            first_seen, grew = "", False
+            for _ in range(20):
+                await asyncio.sleep(0.5)
+                logs = (
+                    await client.call_tool(
+                        "get_process_logs",
+                        {"sandbox_id": sid, "process_id": pid},
+                    )
+                ).data
+                out = (logs or {}).get("output", "")
+                if out and not first_seen:
+                    first_seen = out
+                elif first_seen and len(out) > len(first_seen):
+                    grew = True
+                    break
+            check(
+                "get_process_logs returns output that grows as it runs",
+                grew,
+                f"first={first_seen!r} (a background run must keep writing)",
+            )
+
+            # Reading a log counts as use -- otherwise an agent polling a
+            # long job watches its sandbox expire underneath it.
+            before = server._registry.get(sid)
+            await asyncio.sleep(1.1)
+            await client.call_tool(
+                "get_process_logs", {"sandbox_id": sid, "process_id": pid}
+            )
+            after = server._registry.get(sid)
+            check(
+                "reading logs counts as use, so polling holds off the TTL",
+                bool(before and after and after.expires_at > before.expires_at),
+                f"expires_at {getattr(before, 'expires_at', None)} -> "
+                f"{getattr(after, 'expires_at', None)}",
+            )
+
+            bad = (
+                await client.call_tool(
+                    "get_process_logs",
+                    {"sandbox_id": sid, "process_id": "0" * 32},
+                )
+            ).data
+            check(
+                "an unknown process_id is an error, not empty output",
+                isinstance(bad, dict) and "error" in bad,
+                str(bad)[:110],
+            )
 
         first = (await client.call_tool("destroy_sandbox", {"sandbox_id": sid})).data
         second = (await client.call_tool("destroy_sandbox", {"sandbox_id": sid})).data

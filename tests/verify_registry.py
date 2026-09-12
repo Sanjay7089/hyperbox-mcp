@@ -331,6 +331,114 @@ async def main() -> int:
         "the row is gone, so its container id is collectable again",
     )
 
+    # --- 5c. an abandoned MID-CREATE container is actually reclaimed --
+    #
+    # 5b proves a stale row is dropped. This proves the thing that row was
+    # shielding is destroyed -- and on the clock the server really uses,
+    # rather than one the test forced.
+    #
+    # The window matters because three individually-correct rules conspire
+    # to hold it open: `expired_records()` filters state='ready' so it
+    # never sees a `creating` row; `stale_reservations()` waits for the
+    # TTL; and the id is in `known_ids()`, so `collect_orphans` skips the
+    # container as possibly mid-create elsewhere. With the default 30-min
+    # TTL that shielded a started, root, still-NETWORKED, unsealed
+    # container for half an hour whenever a server was killed during a
+    # slow `pip install`. Hence policy.CREATING_TTL_SECONDS.
+    import hyperbox_mcp.policy as pol
+
+    # Watch the call site, not the constant. The defect this guards was
+    # never a wrong value in policy.py -- it was create_sandbox letting
+    # reserve() fall back to its 30-minute default. Comparing the two
+    # constants would have passed throughout.
+    # Driven IN-PROCESS (Client(srv.mcp)), unlike everything else in this
+    # suite: the spy has to live in the same interpreter as the tool it
+    # watches, and every other case here deliberately uses a subprocess.
+    seen_ttl: list[float] = []
+    real_reserve = srv._registry.reserve
+
+    def spy_reserve(sandbox_id, language, backend,
+                    ttl_seconds=pol.DEFAULT_TTL_SECONDS):
+        seen_ttl.append(ttl_seconds)
+        return real_reserve(sandbox_id, language=language, backend=backend,
+                            ttl_seconds=ttl_seconds)
+
+    srv._registry.reserve = spy_reserve
+    spy_id = ""
+    try:
+        async with Client(srv.mcp) as cspy:
+            spied = data(
+                await cspy.call_tool(
+                    "create_sandbox", {"language": "python",
+                                       "backend": BACKEND}
+                )
+            )
+            spy_id = spied.get("sandbox_id", "")
+            if spy_id:
+                await cspy.call_tool("destroy_sandbox",
+                                     {"sandbox_id": spy_id})
+    finally:
+        srv._registry.reserve = real_reserve
+    check(
+        "create_sandbox reserves with the short TTL, not the default",
+        bool(seen_ttl) and seen_ttl[-1] == pol.CREATING_TTL_SECONDS,
+        f"reserve() got ttl_seconds={seen_ttl[-1] if seen_ttl else None}, "
+        f"expected {pol.CREATING_TTL_SECONDS} "
+        f"(the default it used to fall back to is {pol.DEFAULT_TTL_SECONDS})",
+    )
+
+    async with Client(transport()) as c6:
+        midway = data(
+            await c6.call_tool(
+                "create_sandbox", {"language": "python", "backend": BACKEND}
+            )
+        )
+    mid_id = midway.get("sandbox_id")
+    mid_rec = reg.get(mid_id)
+    mid_ref = mid_rec.container_ref if mid_rec else ""
+
+    # Rewind the row to exactly what a server killed mid-create leaves
+    # behind: state `creating`, container already running, nothing sealed.
+    with srv._registry._connect() as conn:
+        conn.execute(
+            "UPDATE sandboxes SET state = ?, expires_at = ? "
+            "WHERE sandbox_id = ?",
+            ("creating", time.time() + pol.CREATING_TTL_SECONDS, mid_id),
+        )
+
+    original_grace = pol.GC_GRACE_SECONDS
+    pol.GC_GRACE_SECONDS = 0.0
+    try:
+        # Inside its TTL the container must survive: this is the guarantee
+        # reservations exist for, and a sweep that ignored it would break
+        # every concurrent create.
+        srv.collect_garbage()
+        check(
+            "a reservation still inside its TTL is left alone",
+            container_exists(BACKEND, mid_ref),
+            "a create in flight must never be collected",
+        )
+
+        with srv._registry._connect() as conn:
+            conn.execute(
+                "UPDATE sandboxes SET expires_at = ? WHERE sandbox_id = ?",
+                (time.time() - 1, mid_id),
+            )
+        srv.collect_garbage()
+        check(
+            "an abandoned mid-create container is destroyed once its TTL passes",
+            not container_exists(BACKEND, mid_ref),
+            mid_ref[:12] or "(no ref)",
+        )
+    finally:
+        pol.GC_GRACE_SECONDS = original_grace
+        if container_exists(BACKEND, mid_ref):
+            try:
+                srv._runtime.destroy(srv._handle_for(reg.get(mid_id)))
+            except Exception:  # noqa: BLE001 - cleanup only
+                pass
+        reg.remove(mid_id)
+
     # --- 6. GC reclaims OUR orphans and nothing else ------------------
     async with Client(transport()) as c5:
         orphan = data(

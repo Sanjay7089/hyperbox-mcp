@@ -178,28 +178,6 @@ _env_root: Path | None = None
 _MTIME_SETTLE_SECONDS = 2.0
 
 
-def environment_allows_network(name: str) -> bool:
-    """Whether this environment was built to keep its network.
-
-    Network posture is server policy, not a caller's choice: no tool
-    parameter can ask for it. It is a property of an environment a HUMAN
-    built with `--allow-network`, which is the same shape as `build`
-    itself being a CLI action -- the agent selects from what a person
-    made, and cannot make one.
-
-    Read per call from the manifest, so turning it on does not need a
-    server restart.
-    """
-    manifest = env_dir() / name / "env.json"
-    try:
-        return bool(
-            json.loads(manifest.read_text(encoding="utf-8")).get("network")
-            == "bridge"
-        )
-    except (OSError, json.JSONDecodeError):
-        return False
-
-
 def _image_from_manifest(directory: Path) -> str | None:
     """The image an environment's manifest names, if it has one.
 
@@ -418,3 +396,35 @@ GC_GRACE_SECONDS = 120.0
 
 #: Inactivity TTL. A sandbox untouched for this long becomes reclaimable.
 DEFAULT_TTL_SECONDS = float(os.environ.get("HYPERBOX_TTL_SECONDS", 30 * 60))
+
+#: TTL for a reservation, which is a row written BEFORE its container
+#: exists. Deliberately not DEFAULT_TTL_SECONDS, and the reason is worth
+#: stating because three individually-correct rules conspire here:
+#:
+#:   1. `expired_records()` filters `state = 'ready'`, so a `creating`
+#:      row is never swept by the normal expiry path.
+#:   2. `stale_reservations()` will not see it until `expires_at <= now`.
+#:   3. its id IS in `known_ids()`, so `collect_orphans` skips its
+#:      container as one another process may be mid-create.
+#:
+#: Together they shield whatever that row points at for the whole TTL.
+#: Usually that is nothing. But `create()` starts the container on its
+#: normal network and only then installs packages and seals -- so for the
+#: length of a `pip install`, the shielded thing is a started, root,
+#: network-attached, UNSEALED container. `except BaseException: remove`
+#: in native_runtime.create covers a raise; it does not cover the server
+#: being killed, which is what MCP clients do routinely.
+#:
+#: Thirty minutes of that is not a grace period, it is an outage nobody is
+#: watching. Ten bounds it; only a check keyed on the container itself
+#: closes it.
+CREATING_TTL_SECONDS = 600.0
+
+#: The bound above is only real if it sits clear of the mid-create grace:
+#: reclaiming a reservation whose container `collect_orphans` still
+#: considers too young to touch just moves the orphan one sweep later.
+assert CREATING_TTL_SECONDS > GC_GRACE_SECONDS * 2, (
+    "CREATING_TTL_SECONDS must sit well clear of GC_GRACE_SECONDS, or the "
+    "sweep that reclaims an abandoned unsealed container starts racing the "
+    "grace period that exists to protect containers mid-create."
+)

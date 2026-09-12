@@ -625,6 +625,46 @@ class _Containers:
         return _Container(self._client, cid)
 
 
+class _Images:
+    """`client.images` — the two calls this project makes of it.
+
+    Missing entirely until 0.4.0, which `hyperbox doctor` surfaced the
+    hard way: its live round trip died with `'_RestEngine' object has no
+    attribute 'images'`, and that AttributeError was then classified as
+    an engine outage, so doctor told a user with a perfectly healthy
+    Docker to go and start Docker.
+    """
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+
+    def get(self, image: str) -> dict:
+        """Raise if the engine does not have `image`, SDK-style.
+
+        `image_present` expects the SDK's raise-on-absent contract and
+        turns it into a bool via is_not_found, so returning False here
+        would make every image look present.
+        """
+        from hyperbox_mcp.rest import api
+
+        if not api.image_present(self._client, image):
+            raise errors.ContainerGoneError(f"No such image: {image}")
+        return {"Id": image}
+
+    def pull(self, image: str) -> dict:
+        from hyperbox_mcp.rest import api
+
+        last: dict = {}
+        for event in api.pull_image(self._client, image):
+            if "error" in event:
+                raise errors.ProvisionError(
+                    f"Could not pull {image}: {event['error']}",
+                    context={"image": image},
+                )
+            last = event
+        return last
+
+
 class _RestEngine:
     """What `client(backend)` returns now: a REST client wearing the
     small part of the SDK surface this project actually used."""
@@ -634,6 +674,20 @@ class _RestEngine:
 
         self._client = EngineClient(endpoint)
         self.containers = _Containers(self._client)
+        self.images = _Images(self._client)
+
+    def version(self) -> dict[str, Any]:
+        """The engine's /version payload, as docker-py spelled it.
+
+        A METHOD, not a property, because that is the shape the SDK had
+        and `probe()` still calls it that way. Its absence here was not
+        an error anyone saw: probe catches it as "version is
+        informational" and reported `unknown (AttributeError)` on every
+        `hyperbox doctor` run since the SDKs were dropped -- which is
+        also why no release could state the engine version it was
+        verified against without reading it off the CLI by hand.
+        """
+        return self._client.version
 
     @property
     def raw(self) -> Any:
@@ -1021,8 +1075,18 @@ def is_not_found(backend: str, exc: BaseException) -> bool:
     return bool(types) and isinstance(exc, types)
 
 
+#: Never an engine outage, always a bug in this package. Without this,
+#: a missing method on the REST shim reaches the user as "Could not reach
+#: docker -- start the engine", sending them to restart something that is
+#: already running. That is the same shape as the ENGINE_NOT_RUNNING-on-a-
+#: healthy-engine bug 0.4.0 fixed, arriving through a different door.
+_PROGRAMMING_ERRORS = (AttributeError, TypeError, NameError, ImportError)
+
+
 def classify(backend: str, exc: BaseException, what: str) -> BaseException:
     """Turn a raw client exception into one of our two truths."""
+    if isinstance(exc, _PROGRAMMING_ERRORS):
+        return exc
     if is_not_found(backend, exc):
         return ContainerGoneError(f"{what} does not exist on {backend}.")
     fix = _DOCKER_FIX if backend == "docker" else _PODMAN_MACHINE_FIX

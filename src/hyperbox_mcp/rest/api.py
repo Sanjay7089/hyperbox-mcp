@@ -219,6 +219,25 @@ def run_exec(client: EngineClient, cid: str, argv: list[str]) -> tuple[int, str,
 # --- images -----------------------------------------------------------
 
 
+def _check_upload(status: int, raw: bytes, dest: str, what: str) -> None:
+    """Fail loudly on a rejected archive upload.
+
+    Both upload paths used to discard the status entirely. A 4xx/5xx from
+    the archive endpoint then surfaced much later and somewhere else --
+    as a file that was not there -- which reads as a bug in whatever went
+    looking for it rather than in the write. `get_archive` has always
+    checked; these now do too.
+    """
+    if status not in (200, 204):
+        raise errors.ProvisionError(
+            f"The engine refused to write {what} into {dest} "
+            f"({status}): {_message(raw)}",
+            fix="Check the destination exists in the sandbox and is not "
+                "under a read-only or tmpfs mount.",
+            context={"dest": dest, "status": status},
+        )
+
+
 def put_tree(client: EngineClient, cid: str, dest: str, tar_bytes: bytes) -> None:
     """Extract a prepared tar into `dest` inside the container.
 
@@ -236,12 +255,13 @@ def put_tree(client: EngineClient, cid: str, dest: str, tar_bytes: bytes) -> Non
                 fix=f"Sync into {CODE_DIR} instead.",
                 context={"dest": dest, "tmpfs": mount},
             )
-    client._raw(  # noqa: SLF001 - a tar body is not JSON
+    status, raw = client._raw(  # noqa: SLF001 - a tar body is not JSON
         "PUT",
         f"{client.api}/containers/{cid}/archive?path={dest}",
         tar_bytes,
         {"Content-Type": "application/x-tar"},
     )
+    _check_upload(status, raw, dest, "a directory tree")
 
 
 def get_archive(client: EngineClient, cid: str, path: str) -> bytes:
@@ -378,9 +398,10 @@ def put_file(client: EngineClient, cid: str, path: str, content: bytes) -> None:
         info.size = len(content)
         info.mode = 0o644
         archive.addfile(info, io.BytesIO(content))
-    client._raw(  # noqa: SLF001 - a tar body is not JSON
+    status, raw = client._raw(  # noqa: SLF001 - a tar body is not JSON
         "PUT",
         f"{client.api}/containers/{cid}/archive?path={directory or '/'}",
         buffer.getvalue(),
         {"Content-Type": "application/x-tar"},
     )
+    _check_upload(status, raw, directory or "/", name)

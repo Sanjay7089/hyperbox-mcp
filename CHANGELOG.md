@@ -5,11 +5,19 @@ All notable changes to HyperBox are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] — planned
+
+- **Environments that keep their network.** `hyperbox build
+  --allow-network` was cut from 0.4.0 rather than shipped unproven: it
+  weakens the one claim the project is organised around, and the case for
+  it is better made against a release whose sealing is already verified
+  end to end. Nothing in 0.4.0 can reopen a sealed network.
+
 ## [0.4.0] — unreleased
 
 ### Added
 
-- **`create_sandbox(sync_in_dir=...)`** copies a directory from your
+- **`create_sandbox(sync_from=...)`** copies a directory from your
   machine into the sandbox, so an agent can run your real code and real
   test data instead of a snippet it retyped.
 
@@ -31,14 +39,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a sealed sandbox, so a foreground `run` can talk to a background server
   on `127.0.0.1`. Reading logs counts as use, so polling holds off the
   inactivity timeout.
-
-- **Environments can keep their network**:
-  `hyperbox build <name> --image <ref> --allow-network`. There is no tool
-  parameter for this — network posture is server policy — so an agent can
-  select such an environment and never create one. A sandbox from one
-  says `OPEN — this sandbox CAN reach the internet` rather than "sealed",
-  and `capabilities` marks each environment, so an agent chooses instead
-  of failing.
 
 - **`hyperbox ps`, `rm`, `pull` and `init`.** Everything about a
   sandbox's life used to require an MCP client; now you can see what is
@@ -105,6 +105,23 @@ wrong answer.
 
 ### Removed — breaking
 
+- **`hyperbox build --allow-network` is gone, and so is the network
+  posture it granted.** Every sandbox is now sealed after its packages
+  install, with no exception an environment can grant. `create_sandbox`
+  always reports `sealed`, and `hyperbox://capabilities` marks every
+  environment `"network": "sealed"`.
+
+  An environment built with the flag before 0.4.0 **keeps working** — its
+  `env.json` still carries `"network": "bridge"`, nothing reads it, and
+  sandboxes from it are sealed like every other. The acceptance suite
+  asserts exactly that, against a manifest carrying the old field, so the
+  removal is verified against the input that used to trigger it rather
+  than assumed from deleted code.
+
+  Passing the flag now exits 2 with an explanation rather than failing as
+  an unknown option. If you relied on it, say so on the issue tracker —
+  see 0.4.1 above.
+
 - **The top-level `error_message` string is gone from tool errors.** A
   failing tool call now returns `{"error": {code, message, fix, context}}`
   and nothing else.
@@ -128,10 +145,60 @@ wrong answer.
 - A seventh acceptance suite, `tests/verify_cli.py`, drives the `hyperbox`
   command as a subprocess. Every other suite imports the package; nothing
   ran the program a person actually installs.
+- **The features this release is for are now tested.** `sync_from`,
+  `run(background=True)`/`get_process_logs` and `hyperbox ps|rm|pull|init`
+  all shipped in 0.4.0 with no automated coverage at all —
+  `get_process_logs` appeared in the whole test tree only as a string in
+  a tool-name assertion. Each now has cases, and each new guard was
+  watched failing before being kept.
+- **`hyperbox doctor` works again, end to end.** Its live round trip died
+  with `'_RestEngine' object has no attribute 'images'` — the REST shim
+  that replaced the container SDKs never grew `images`. Worse, that
+  AttributeError was classified as an engine outage, so doctor told
+  people with a perfectly healthy Docker to go and start Docker. A code
+  bug in this package is now never reported as an engine being down, and
+  the full doctor (not just `--quick`) is exercised by the suite, which
+  is why this was found by hand rather than by CI.
+- `hyperbox doctor` reports the engine version again. The REST shim that
+  replaced the container SDKs never grew a `version()`, and `probe()`
+  treats the version as informational — so every run said
+  `unknown (AttributeError)` and nothing noticed. A release states the
+  engine versions it was verified against; that number comes from here.
+- The reseal after `run(libraries=[...])` is now proven from inside the
+  container, as `create` always was, and a sandbox that cannot be proven
+  sealed is destroyed rather than returned.
+- Archive uploads check the engine's response. `put_tree` and `put_file`
+  discarded the status, so a refused write surfaced later as a missing
+  file rather than as the error it was.
 
-### Verified
+### Verified — INCOMPLETE, not yet a release
 
-Podman 6.1.1, native runtime: 7/7 suites, no containers left behind.
+Two of the four release gates have been run. **This section is not a
+pass.** It is filled in by whoever runs the gates, at the moment they run
+them, and two are still outstanding — so this release is not ready to
+tag.
+
+Run on macOS 26.5.2 (arm64), 2026-09-12, suite on Python 3.11.14:
+
+| gate | result |
+|---|---|
+| 2. Container | Docker 29.1.3 — 7/7 suites, 2.5 min, no containers left behind |
+| 2. Container | Podman 6.1.1 — 7/7 suites, 5.0 min, no containers left behind |
+| 4. Install | wheel `hyperbox_mcp-0.4.0-py3-none-any.whl` into a clean venv (Python 3.13.5); `hyperbox doctor` 7/7, live round trip included |
+
+Still outstanding:
+
+- **Gate 1 (host/CI).** Needs a push: 3 OS × 2 Python. Nothing here proves
+  Windows or Linux, and `verify_named_pipe.py` has not run at all.
+- **Gate 3 (client).** Needs a human driving a real MCP client — two
+  windows at once, a restart mid-sandbox, a `hyperbox build` against a
+  running server, and the leak check afterwards. No suite can stand in
+  for it: the seven above all drive the server from Python, and the
+  failures this gate exists to catch are the ones a client causes.
+
+Gate 4 is the reason the other two matter. It was run last, after seven
+green suites on both engines, and failed immediately on a broken
+`hyperbox doctor` that no suite executed.
 
 ## [0.3.0] — 2026-09-09
 

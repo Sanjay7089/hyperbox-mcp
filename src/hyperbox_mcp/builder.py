@@ -46,7 +46,6 @@ def _resolve_engine(choice: str) -> tuple[EngineClient, engine.Resolution]:
 
 def _write_manifest(
     name: str, image: str, source: str, product: str,
-    allow_network: bool = False,
 ) -> Path:
     """Record what this environment is, so the server can resolve it.
 
@@ -62,10 +61,11 @@ def _write_manifest(
                 "image": image,
                 "source": source,
                 "engine": product,
-                # Absent means sealed. Only ever written by an explicit
-                # --allow-network, so an environment cannot acquire a
-                # network by upgrade or by accident.
-                "network": "bridge" if allow_network else "sealed",
+                # No "network" field: every sandbox is sealed, and an
+                # environment has no say in it. A manifest written before
+                # 0.4.0 may still carry one -- nothing reads it. Writing a
+                # field no longer consulted is how a manifest starts
+                # describing a posture the server does not honour.
                 "built_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             },
             indent=2,
@@ -103,7 +103,6 @@ def run_build(
     image: str | None = None,
     engine_choice: str = "auto",
     no_cache: bool = False,
-    allow_network: bool = False,
 ) -> int:
     try:
         name = validate.environment_name(env_name)
@@ -137,10 +136,9 @@ def run_build(
     target = f"{policy.LOCAL_IMAGE_PREFIX}{name}"
     try:
         if image:
-            return _pull(client, resolution, image, target, name,
-                         allow_network)
+            return _pull(client, resolution, image, target, name)
         return _build(client, resolution, Path(dockerfile), target, name,
-                      no_cache, allow_network)
+                      no_cache)
     except errors.HyperBoxError as exc:
         say(exc.message, icon="fail")
         if exc.fix:
@@ -151,19 +149,19 @@ def run_build(
         return 130
 
 
-def _pull(client, resolution, reference, target, name, allow_network=False) -> int:
+def _pull(client, resolution, reference, target, name) -> int:
     say(f"Pulling {reference}...", icon="pull")
     with EngineProgress(f"pulling {reference}") as progress:
         for event in api.pull_image(client, reference):
             progress.update(event)
     api.tag_image(client, reference, target, "latest")
     manifest = _write_manifest(name, f"{target}:latest", "image",
-                               resolution.product, allow_network)
+                               resolution.product)
     _done(name, f"{target}:latest", manifest)
     return 0
 
 
-def _build(client, resolution, path, target, name, no_cache, allow_network=False) -> int:
+def _build(client, resolution, path, target, name, no_cache) -> int:
     """Build from a Dockerfile, which may be a file or a directory."""
     path = path.expanduser().resolve()
     if path.is_dir():
@@ -199,7 +197,7 @@ def _build(client, resolution, path, target, name, no_cache, allow_network=False
         return 1
 
     manifest = _write_manifest(name, f"{target}:latest", "dockerfile",
-                               resolution.product, allow_network)
+                               resolution.product)
     _done(name, f"{target}:latest", manifest)
     return 0
 

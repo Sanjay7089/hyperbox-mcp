@@ -11,7 +11,7 @@ flowchart TB
     client["MCP client<br/>editor · desktop app · CLI agent"]
     server["server.py — four tools, one resource<br/>validate → lock → re-read → act"]
     registry[("registry.db<br/>SQLite, outside the repo")]
-    runtime["Runtime protocol<br/>native (REST) · llm-sandbox (legacy)"]
+    runtime["Runtime protocol<br/>native (REST) — the only backend"]
     engine["Docker or Podman<br/>unix socket · Windows named pipe"]
     box["your code, in a container<br/>1 CPU · 1 GB · 128 PIDs · no network"]
 
@@ -92,14 +92,17 @@ an inactivity timeout.
 
 ## The Runtime boundary
 
-The tools talk only to the `Runtime` protocol in `runtime.py`. Two
-implementations exist:
+The tools talk only to the `Runtime` protocol in `runtime.py`. One
+implementation exists:
 
-- **`native`** (the default) speaks the engine's REST API directly, over
-  a unix socket or a Windows named pipe.
-- **`llm-sandbox`** is the previous backend, kept one release as an
-  escape hatch. It is selected with `HYPERBOX_RUNTIME=llm-sandbox` and
-  goes away in a future version.
+- **`native`** speaks the engine's REST API directly, over a unix socket
+  or a Windows named pipe.
+
+`llm-sandbox` was the previous backend and was removed in 0.4.0;
+`HYPERBOX_RUNTIME` is still read only so that an old value is refused
+with an explanation. The protocol remains the boundary — the point is
+that a second backend *can* be added by satisfying it — but do not assume
+one exists today.
 
 The boundary is why a second backend was possible at all. Container
 invariants shared by both — the resource read-back, network sealing, the
@@ -114,7 +117,7 @@ The order is the design, not an implementation detail:
 2. Create the container with its limits, and **read them back off the
    running container**. A mismatch destroys it and fails.
 3. Start it, on a normal network.
-4. Copy in `sync_in_dir`, if given.
+4. Copy in `sync_from`, if given.
 5. Install `packages`, if given. **No submitted code has run yet.**
 6. Detach every network, and **verify** the seal from inside with a TCP
    connection and a DNS lookup — both must fail.
@@ -125,9 +128,10 @@ property against the thing you asked; verify it against the thing that
 answered.* An engine that accepts a limit and applies nothing would
 otherwise hand back a container the server goes on describing as limited.
 
-The one exception is an environment a human built with
-`--allow-network`, which skips steps 6 and says so in the result and in
-`capabilities`. See the [security model](security.md).
+There is no exception. Until 0.4.0 an environment built with
+`--allow-network` skipped step 6; that flag is gone, so every sandbox
+reaches step 6 and is destroyed rather than handed back if the probe
+finds a route out. See the [security model](security.md).
 
 ## Running code
 

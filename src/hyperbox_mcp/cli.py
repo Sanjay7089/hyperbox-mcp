@@ -32,7 +32,6 @@ def usage() -> str:
         "    --image <ref>          Pull an existing image and register it\n"
         "    --engine docker|podman Override which engine to use\n"
         "    --no-cache             Build without reusing cached layers\n"
-        "    --allow-network        Sandboxes from it keep internet access\n"
         "  hyperbox ps              List sandboxes on file\n"
         "  hyperbox rm <id>         Destroy one sandbox\n"
         "  hyperbox pull <id> <path> <dest>\n"
@@ -249,7 +248,6 @@ def _dispatch(argv: list[str]) -> int:
         name, *opts = rest
         dockerfile = image = None
         engine_choice, no_cache = "auto", False
-        allow_network = False
         takes_value = {"--dockerfile", "--custom", "--image", "--engine"}
         while opts:
             arg = opts.pop(0)
@@ -269,7 +267,19 @@ def _dispatch(argv: list[str]) -> int:
             elif arg == "--no-cache":
                 no_cache = True
             elif arg == "--allow-network":
-                allow_network = True
+                print(
+                    "hyperbox build: --allow-network was removed in 0.4.0.\n"
+                    "\nEvery sandbox is now sealed after its packages are "
+                    "installed, with no exception an environment can grant. "
+                    "An environment built with this flag before 0.4.0 still "
+                    "works -- its sandboxes are simply sealed like every "
+                    "other.\n"
+                    "\nIf a sandbox genuinely needs the network at run time, "
+                    "say so on the issue tracker; the case is being "
+                    "reconsidered for a later release rather than left as a "
+                    "flag that quietly weakens every sandbox built with it.\n"
+                )
+                return 2
             else:
                 print(f"hyperbox build: unknown option {arg!r}\n")
                 print(usage())
@@ -280,8 +290,7 @@ def _dispatch(argv: list[str]) -> int:
             return 2
         from hyperbox_mcp.builder import run_build
 
-        return run_build(name, dockerfile, image, engine_choice, no_cache,
-                         allow_network)
+        return run_build(name, dockerfile, image, engine_choice, no_cache)
 
     print(usage())
     return 2

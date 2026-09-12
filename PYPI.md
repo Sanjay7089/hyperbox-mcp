@@ -24,7 +24,7 @@ Four tools, and nothing else:
 
 | Tool | What it does |
 |---|---|
-| `create_sandbox(language, backend, environment, packages)` | A persistent, disposable container, with any declared packages installed before it is sealed. Returns a `sandbox_id`. |
+| `create_sandbox(language, backend, environment, packages, sync_from)` | A persistent, disposable container, with any declared packages installed before it is sealed, and optionally a directory of yours copied in. Returns a `sandbox_id`. |
 | `run(sandbox_id, code, libraries, timeout)` | Executes code. Returns `{stdout, stderr, exit_code, success, timed_out}`. |
 | `run(sandbox_id, code, background=True)` | Starts something that keeps running — a server, a worker — and returns a `process_id` instead of output. |
 | `get_process_logs(sandbox_id, process_id)` | Reads what a background run has printed. |
