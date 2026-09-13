@@ -699,3 +699,93 @@ every token is read on every call. Judged worth it: this one caused an observed
 false claim to a user.
 
 **Revisit when.** Not expected.
+
+## 2026-09-13 — Real-workload verification of Phases A–D: complete
+
+**Context.** `fastapi-votify` re-run independently by the user in both Cursor
+and Antigravity, against the actual fixed code (commit `46b3c8a` and after).
+
+**Phase B — confirmed, strongly.** `Dockerfile` genuinely ends `USER votify`.
+Both clients built the environment, synced the real project, and got FastAPI
+fully running — health checks, Swagger, a real Spotify OAuth redirect. Zero
+`PROVISION_FAILED`, zero permission errors, on exactly the class of image
+Phase B exists for. `hyperbox ps` and both engines showed zero containers
+left behind after each run.
+
+**Phase C — confirmed.** A follow-up run with `.env.hyperbox` present and
+`.env`/`.env.prod` excluded showed the manifest naming both exclusions
+(`reason: "secret"`) and `/sandbox/.env` holding exactly `.env.hyperbox`'s
+content, readable by `python-dotenv` inside the sandbox as intended.
+
+**Phase A — indirectly exercised**, not stress-tested: no install in this
+workload ran long enough to hit `PROVISION_TIMEOUT_SECONDS`. Covered instead
+by the automated suite's silent-install case (`tests/verify.py`, watched
+failing on both engines before the fix).
+
+All four phases now have real-world evidence, not just synthetic tests.
+
+## 2026-09-13 — `sync_from` walks the whole tree before filtering it
+
+**Context.** The same run measured `create_sandbox` taking ~50s on a project
+with a normal `.git` history and a `.venv` — no `.hyperboxignore` was present.
+The manifest correctly listed every `.git/objects/...` path as skipped
+(695KB of JSON), and 48 of the 50 seconds were the scan, not the container.
+
+**Root cause, precisely.** `buildcontext.excluded()` already filters `.git`,
+`__pycache__`, `.venv`, `venv`, `node_modules` unconditionally
+(`ALWAYS_EXCLUDE`, buildcontext.py:21) — the exclusion logic is correct, and
+`sync_tar` does call it. The cost is upstream of that: `sync_tar`'s walk is
+`sorted(source.rglob("*"))`, which enumerates **every file on disk, including
+every loose object in `.git`,** before any filter runs. `rglob` has no way to
+prune a directory without first walking into it — unlike `os.walk`, which
+lets a caller delete entries from `dirnames` in place and skip descending
+entirely. So a correctly-excluded `.git` still costs a full stat() of every
+object in it.
+
+**Why this is not fixed now.** Explicit call: real, useful to fix, not
+blocking a release whose whole purpose is closing correctness gaps found by
+real use — this is a performance gap, discovered the same way, and deserves
+the same rigor rather than a rushed same-day patch. Recorded precisely so a
+future fix doesn't have to re-diagnose it: switch the walk to `os.walk` (or
+an equivalent that supports directory pruning) and prune any `ALWAYS_EXCLUDE`
+or `.hyperboxignore`-matched directory before descending into it, rather than
+filtering its contents after enumerating them.
+
+**Risk if unaddressed.** The user's run took 50s against a 60s-typical client
+timeout — close enough that a slightly larger repo, or `node_modules`
+present, would time out `create_sandbox` outright, and the failure would look
+like a hang rather than name its cause.
+
+**Decided.** Ship 0.4.0 as-is; land the fix early in 0.5 given the git-sync
+work already there depends on exactly this walk. Recorded in the changelog's
+0.4.1/0.5-planned notes so it isn't lost.
+
+**Revisit when.** 0.5 Slice A (git sync in) begins — it already needs its own
+walk for `git archive`, and this is the natural place to fix both at once.
+
+## 2026-09-13 — The GC lag the user measured is the documented interval, not a bug
+
+**Context.** With `HYPERBOX_TTL_SECONDS` set to 5 minutes for testing, a
+sandbox showing `expired` in `hyperbox ps` took roughly 12 minutes total idle
+time before its container actually disappeared.
+
+**Verified, not assumed.** `policy.GC_INTERVAL_SECONDS = 300.0` — a fixed
+5-minute sweep interval, independent of whatever TTL is configured. An
+already-expired row is only reclaimed on the *next* sweep tick, so worst case
+is TTL plus nearly one full interval before cleanup — with a 5-minute TTL,
+up to ~10 minutes, which is what was observed (plus scheduling slack). This
+is exactly the behaviour `06-garbage-collection.md` documents ("worst case is
+TTL plus a few minutes, not TTL exactly") and not a caching artifact of
+`hyperbox ps`, which reads the registry live on every call.
+
+**Decided.** Not a bug; not fixed now. The interval is a fixed constant
+specifically so GC has a bounded, predictable cost regardless of how many
+sandboxes exist or what TTL each was given — making it track a short TTL
+tightly would mean sweeping far more often for every user, most of whom use
+the 30-minute default. Noted per the user's own call: worth revisiting if a
+future release wants the sweep interval to scale with the shortest live TTL,
+but that is a real design tradeoff (sweep cost vs. reclaim latency), not an
+obvious win.
+
+**Revisit when.** Someone reports the default (30 min TTL, 5 min sweep) lag
+as a real problem, not just the deliberately-shortened test case here.

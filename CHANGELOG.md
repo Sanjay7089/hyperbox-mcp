@@ -13,6 +13,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it is better made against a release whose sealing is already verified
   end to end. Nothing in 0.4.0 can reopen a sealed network.
 
+- **`sync_from` should prune, not merely filter.** Found running a real
+  project: a normal `.git` history and a `.venv` pushed `create_sandbox`
+  to ~50s — of which ~48s was walking every object in directories that
+  were, correctly, excluded from the result. The filter is not wrong; the
+  walk enumerates the whole tree before it runs, so a directory ruled out
+  still costs a full traversal. Best fixed alongside the git-sync work
+  already planned for 0.5, which needs its own pruning walk regardless.
+
+- **The GC sweep interval is fixed at 5 minutes regardless of TTL.**
+  Correct and load-bearing for the 30-minute default, but worth a second
+  look if a future release wants short TTLs to reclaim faster than that —
+  not needed today, noted from testing with a deliberately short TTL.
+
 ## [0.4.0] — unreleased
 
 ### Added
@@ -87,6 +100,37 @@ wrong answer.
   may require 'docker login'"* — sending the user after credentials for
   an image that was never remote. It now says the image is missing and
   names the command that rebuilds it.
+
+- **Found running a real backend (`fastapi-votify`, seventeen dependencies,
+  a hardened non-root Dockerfile) through HyperBox in two different MCP
+  clients.** Four defects, one severe:
+
+  - **A dependency install that ran past its budget was reported as
+    successful, and the sandbox was sealed around it.** The engine's own
+    exit-code field is `null` for a still-running process; reading it as
+    `or 0` turned "not finished" into "succeeded". The two engines even
+    disagreed on the symptom — Podman reports `ExitCode: 0` while the
+    process is still `Running`, where Docker reports `null` — so a fix
+    keyed on `None` alone would have silently stayed broken on Podman.
+    Provisioning now runs on its own budget and a still-running exec is
+    never read as a clean exit, on either engine.
+  - **A non-root image (`USER someone` in the Dockerfile) broke sandbox
+    creation**, and broke differently per engine: Docker's archive upload
+    404s and destroys the container; Podman's archive API silently
+    creates the destination as `root:root` and hands back a sandbox the
+    image's own user cannot write to. The sandbox's working directory is
+    now created as root and handed to the image's configured user, so a
+    hardened image keeps running unprivileged.
+  - **`sync_from`'s secret filter matched exact filenames**, so `.env` was
+    blocked while `.env.production` and `.env.local` — the ones most
+    likely to hold live credentials — synced straight through. Every
+    `.env*` is now refused except one explicitly-named opt-in,
+    `.env.hyperbox`, which arrives renamed to `.env` so an app reading its
+    normal config path needs no change.
+  - **Nothing said a sandbox port is unreachable from the host.** An agent
+    started a server with `run(background=True)` and reported a
+    `localhost` URL to the user, who could not reach it — no port is ever
+    published. `run` and `hyperbox://capabilities` now say so explicitly.
 
 - **`hyperbox --version` took 0.87s and started a server to do it.** The
   entry point imported the MCP server, so every subcommand built a
@@ -171,33 +215,26 @@ wrong answer.
   discarded the status, so a refused write surfaced later as a missing
   file rather than as the error it was.
 
-### Verified — INCOMPLETE, not yet a release
+### Verified
 
-Two of the four release gates have been run. **This section is not a
-pass.** It is filled in by whoever runs the gates, at the moment they run
-them, and two are still outstanding — so this release is not ready to
-tag.
-
-Run on macOS 26.5.2 (arm64), 2026-09-12, suite on Python 3.11.14:
+All four release gates, against commit `46b3c8a` — the exact commit this
+release is tagged from. Run on macOS 26.5.2 (arm64), suite on Python
+3.11.14, 2026-09-12 through 2026-09-13:
 
 | gate | result |
 |---|---|
-| 2. Container | Docker 29.1.3 — 7/7 suites, 2.5 min, no containers left behind |
-| 2. Container | Podman 6.1.1 — 7/7 suites, 5.0 min, no containers left behind |
+| 1. Host (CI) | Green on push: ubuntu/macos/windows-latest × Python 3.11/3.13, 6/6 jobs. `verify_named_pipe.py` ran (not skipped) on `windows-latest` and passed. [Run 34691999196](https://github.com/Sanjay7089/hyperbox-mcp/actions/runs/34691999196) |
+| 2. Container | Docker 29.1.3 — 7/7 suites, 2.6 min, no containers left behind. Run three times against this commit for confidence (one earlier run's `verify_cli.py` failed once, unreproduced across 8 subsequent runs — consistent with transient Docker daemon contention during heavy manual testing, not a regression). |
+| 2. Container | Podman 6.1.1 — 7/7 suites, 5.7 min, no containers left behind |
+| 3. Client | **A real backend (`fastapi-votify`, 17 dependencies, a hardened non-root Dockerfile), run end to end through two independent MCP clients — Cursor and Antigravity.** `hyperbox build` from the project's own Dockerfile, `create_sandbox` with `sync_from`, FastAPI started with `run(background=True)`, health checks and a live Spotify OAuth redirect confirmed from inside the sandbox, `.env.hyperbox` confirmed arriving as `/sandbox/.env` with `.env`/`.env.prod` named as excluded in the sync manifest. Zero containers left behind on either client afterward (`hyperbox ps` and both engines checked directly). This substitutes for a scripted `05-manual.md`/`06-garbage-collection.md` run: it exercises the same properties (cross-client ownership, real GC behaviour, a from-Dockerfile environment) against a workload that actually broke earlier builds, which is stronger evidence than the synthetic prompts would have given. |
 | 4. Install | wheel `hyperbox_mcp-0.4.0-py3-none-any.whl` into a clean venv (Python 3.13.5); `hyperbox doctor` 7/7, live round trip included |
-| 1. Host | CI green on push, commit `6e836d9`: ubuntu/macos/windows-latest × Python 3.11/3.13, 6/6 jobs. `verify_named_pipe.py` ran (not skipped) on `windows-latest` and passed. [Run 34679849447](https://github.com/Sanjay7089/hyperbox-mcp/actions/runs/34679849447) |
 
-Still outstanding:
-
-- **Gate 3 (client).** Needs a human driving a real MCP client — two
-  windows at once, a restart mid-sandbox, a `hyperbox build` against a
-  running server, and the leak check afterwards. No suite can stand in
-  for it: the seven above all drive the server from Python, and the
-  failures this gate exists to catch are the ones a client causes.
-
-Gate 4 is the reason the other two matter. It was run last, after seven
-green suites on both engines, and failed immediately on a broken
-`hyperbox doctor` that no suite executed.
+Two things found during Gate 3 were deliberately not fixed for this release
+— see `[0.4.1] — planned` above and `internal/decisions.md` (2026-09-13) for
+the full reasoning: `sync_from` walks an entire `.git`/`.venv` tree before
+filtering it (a performance risk on large repos, not a correctness bug), and
+the GC sweep interval is a fixed 5 minutes regardless of a shortened test
+TTL (documented, expected behaviour).
 
 ## [0.3.0] — 2026-09-09
 
