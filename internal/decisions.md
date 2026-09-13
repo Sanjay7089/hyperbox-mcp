@@ -789,3 +789,66 @@ obvious win.
 
 **Revisit when.** Someone reports the default (30 min TTL, 5 min sweep) lag
 as a real problem, not just the deliberately-shortened test case here.
+
+## 2026-09-13 — Product framing pivots from containment to attestation; `run_safely` gains `sync_from`
+
+**Context.** Market/user research (competitive teardown of CodeRabbit, Qodo,
+Greptile TREX, TestSprite, and a 2026 developer-trust survey) validated a
+different pain point than the one HyperBox was built and marketed around.
+96% of developers don't fully trust AI-generated code; only 48% actually
+review it; 61% say it "often looks correct, but isn't." The root cause is
+structural: the same model that writes a change is the only one that reports
+whether it worked, with no independent check. HyperBox already returns
+`{stdout, stderr, exit_code, success}` from a real container process rather
+than from the agent's self-report — that property already existed, but the
+README, PYPI.md and pyproject description all led with containment
+("runs LLM-generated code... before it touches your project" / "doesn't
+wreck your machine"), not with the trust property. Security containment is
+real and load-bearing (see Threat model in CLAUDE.md) but is not why a
+developer would install this.
+
+**Options.** (1) Leave positioning as-is, treat this as a marketing-only
+question to revisit later. (2) Reposition messaging only. (3) Reposition
+messaging AND sharpen the one mechanism that already targets the new
+framing — the `run_safely` prompt, which existed but was itself framed
+around "unreviewed code" (security) rather than "don't claim success you
+haven't seen" (attestation), and only worked against a retyped snippet, not
+a real project.
+
+**Decided.** (3). Reworded `run_safely`'s description and body around
+attestation ("call this before telling the user a change works" /
+"the model that wrote this code is not a credible witness to whether it
+works"), and added an optional `sync_from` parameter so the same prompt can
+verify a real edit against the real project (wired straight through to
+`create_sandbox(sync_from=...)`, no new gate — reuses the existing
+human-opt-in root list). Reworded the top of README.md, PYPI.md and
+pyproject.toml's `description` to lead with the same framing, with
+containment kept as a named side effect rather than deleted.
+
+**Because.** The competitive teardown found "ground-truth execution as a
+concept" already contested (Greptile TREX, TestSprite both execute for
+real), but found nothing doing it locally, MCP-native, and mid-task —
+called by the agent itself before it asserts anything to the developer,
+rather than at PR/CI time after a diff already exists. That gap is real but
+not durable, and `run_safely` was the one piece of surface already aimed in
+roughly the right direction — sharpening it cost a doc/prompt change, not
+new engine work, so there was no reason to wait on the messaging-only
+option.
+
+**Costs.** The project's headline test suite (`verify_containment.py`) and
+its "It contains hostile code" section now sit slightly out of step with the
+lead pitch — still true and still worth having, but a reader hitting that
+section right after the new opening may read it as a return to the old
+framing. Not fixed in this pass; the section itself is accurate and didn't
+need touching, only its prominence might, later. `run_safely`'s `sync_from`
+plumbing has not yet been exercised end-to-end against a real container with
+a real test suite (`pytest`/`npm test`/etc.) — verified only that the prompt
+renders correctly via `Client(server.mcp)`, not that the resulting agent
+workflow actually surfaces a trustworthy pass/fail from a real project.
+
+**Revisit when.** After the section reordering is tested with real users
+(the planned Show HN / subreddit posts) — if "It contains hostile code"
+reads as a non-sequitur to a fresh reader, move or trim it. Also revisit if
+a user tries `run_safely(sync_from=...)` against a real test suite and hits
+friction — that's the first real signal on whether the prompt-level nudge is
+enough or whether this needs to become a first-class tool argument instead.

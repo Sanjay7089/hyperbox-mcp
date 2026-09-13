@@ -5,13 +5,21 @@ All notable changes to HyperBox are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.4.1] — planned
+## [0.4.1] — 2026-09-14
+
+- **`run_safely` targets attestation, not just "unreviewed code."** Reworded
+  to lead with the actual failure mode — an agent asserting success it
+  never saw — and it now takes an optional `sync_from`, so the same prompt
+  can verify a real edit against the real project instead of only a
+  retyped snippet. See `internal/decisions.md`, 2026-09-13.
+
+## Planned — not in a release yet
 
 - **Environments that keep their network.** `hyperbox build
   --allow-network` was cut from 0.4.0 rather than shipped unproven: it
   weakens the one claim the project is organised around, and the case for
   it is better made against a release whose sealing is already verified
-  end to end. Nothing in 0.4.0 can reopen a sealed network.
+  end to end. Nothing released can reopen a sealed network.
 
 - **`sync_from` should prune, not merely filter.** Found running a real
   project: a normal `.git` history and a `.venv` pushed `create_sandbox`
@@ -26,7 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   look if a future release wants short TTLs to reclaim faster than that —
   not needed today, noted from testing with a deliberately short TTL.
 
-## [0.4.0] — unreleased
+## [0.4.0] — 2026-09-13
 
 ### Added
 

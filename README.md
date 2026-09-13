@@ -1,7 +1,7 @@
 # HyperBox
 
-**An MCP server that runs LLM-generated code in a disposable container,
-so your agent can test its own work before it touches your project.**
+**An MCP server that gives your coding agent somewhere to prove a change
+actually works — before it tells you it does.**
 
 [![PyPI](https://img.shields.io/pypi/v/hyperbox-mcp.svg)](https://pypi.org/project/hyperbox-mcp/)
 [![Python](https://img.shields.io/pypi/pyversions/hyperbox-mcp.svg)](https://pypi.org/project/hyperbox-mcp/)
@@ -9,12 +9,19 @@ so your agent can test its own work before it touches your project.**
 
 ---
 
-Your agent writes code and wants to run it. By default that happens on
-your machine, against your files, with your credentials. Usually fine.
-Occasionally it is `rm -rf`, a global install that breaks another
-project, or a script that quietly talks to production.
+Your agent says "done, tests pass." Did it actually run them? The same
+model that wrote the code is also the one telling you it works — there
+is no independent check in between, which is exactly why AI-written
+diffs so often look right and aren't.
 
-HyperBox gives the agent somewhere else to run it.
+HyperBox gives the agent somewhere to actually run the change and get
+back real stdout, stderr and an exit code it didn't generate and can't
+talk its way around. As a side effect, that somewhere is also not your
+machine: it isn't run against your files, your credentials, or your
+network. Occasionally that side effect is the one that saves you — a
+stray `rm -rf`, a global install that breaks another project, a script
+that quietly talks to production — but the daily reason to use it is
+that "it works" stops being a claim you take on faith.
 
 ```mermaid
 flowchart LR
@@ -72,6 +79,9 @@ you need to keep to `/work`.
 
 ## Why use it
 
+- **The result comes from a process, not from the model.** `run` returns
+  `{stdout, stderr, exit_code, success}` off a real execution — the agent
+  can misjudge its own code, but it can't fake what the harness reports.
 - **Generated code runs outside your client's process.** No access to
   your filesystem, your project, or the container engine.
 - **Limits are server policy, not negotiable by the model** — 1 GB

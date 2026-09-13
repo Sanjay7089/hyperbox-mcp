@@ -1006,21 +1006,48 @@ async def destroy_sandbox(ctx: Context, sandbox_id: str) -> dict:
 @mcp.prompt(
     name="run_safely",
     description=(
-        "Execute code the user has not reviewed, inside a sandbox, and "
-        "report what actually happened rather than what should happen."
+        "Call this before telling the user a change works. Runs it in a "
+        "sandbox and reports the real stdout, stderr and exit_code, so "
+        "success is something you saw happen, not something you assumed."
     ),
 )
-def run_safely(code: str, language: str = "python") -> str:
-    """A prompt, not a tool: the user invokes it to opt into the safe path."""
+def run_safely(
+    code: str,
+    language: str = "python",
+    sync_from: str | None = None,
+) -> str:
+    """A prompt: invoke this before claiming code works, not only when it's unreviewed.
+
+    `sync_from`, if given, runs the code against the user's real project
+    instead of a retyped snippet — same wiring as
+    `create_sandbox(sync_from=...)`.
+    """
+    sync_arg = f", sync_from={sync_from!r}" if sync_from else ""
+    sync_note = (
+        f"This copies the real project from `{sync_from}` into the sandbox "
+        f"first, so the code below runs against the actual files and "
+        f"dependencies, not a retyped snippet. It lands at `{policy.CODE_DIR}` "
+        f"— your code's own working directory defaults elsewhere, so `cd` or "
+        f"pass `cwd={policy.CODE_DIR!r}` before invoking a test runner that "
+        f"discovers files relative to where it runs (pytest, npm test, "
+        f"go test, ...), or it will report finding nothing rather than a "
+        f"real pass or fail.\n\n"
+        if sync_from else ""
+    )
     return (
-        f"Run the following {language} code in a HyperBox sandbox rather than "
-        f"on this machine, because it has not been reviewed.\n\n"
-        f"1. create_sandbox(language='{language}')\n"
+        "The model that wrote this code is not a credible witness to "
+        "whether it works — it has every incentive to say yes. Get an "
+        "independent answer before you tell the user anything succeeded:\n\n"
+        f"{sync_note}"
+        f"1. create_sandbox(language='{language}'{sync_arg})\n"
         f"2. run(...) with the code below\n"
-        f"3. Report the ACTUAL stdout, stderr and exit_code you received. If "
-        f"it failed, read the real traceback, fix the cause, and run again.\n"
+        f"3. Report the ACTUAL stdout, stderr and exit_code you received, "
+        f"verbatim — not a paraphrase, and not what you expected to see. "
+        f"If it failed, read the real error, fix the cause, and run again.\n"
         f"4. destroy_sandbox when finished.\n\n"
-        f"Do not claim it works unless you have seen a successful run.\n\n"
+        f"Do not say it works, or that tests pass, unless this run just "
+        f"showed you exit_code 0. A claim without this run behind it is a "
+        f"guess, not a fact.\n\n"
         f"```{language}\n{code}\n```"
     )
 
