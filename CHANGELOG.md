@@ -5,6 +5,60 @@ All notable changes to HyperBox are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] — 2026-09-14
+
+### Fixed
+
+- **`create_sandbox(language="javascript", packages=[...])` installed a
+  package that `require()` then couldn't find.** `npm install --global`
+  lands in `/usr/local/lib/node_modules`, but Node never searches there on
+  its own. `NODE_PATH` is now set for javascript sandboxes specifically.
+  Regression-covered in `tests/verify.py` — proven to fail without the fix
+  and pass with it.
+
+- **Package version pinning was silently broken for every non-Python
+  language.** The validator only accepted pip syntax (`name==1.2.3`), so
+  `packages=["mime-db@1.54.0"]` (real npm syntax) was rejected, and the
+  suggested pip-style fallback passed validation but failed at the actual
+  `npm install`. `packages`/`libraries` are now validated against the
+  syntax the sandbox's own language actually uses — npm's `name@version`,
+  Go's `module@vX.Y.Z`, apt's `name=version` — with the existing
+  no-flags/no-URLs/no-paths/no-VCS-references security boundary unchanged
+  across all of them. Verified with an actually-pinned install (`mime-db`
+  confirmed at exactly `1.54.0`, not latest).
+
+### Documented (no behavior change)
+
+- `run`'s `success`/`exit_code` reflect **your own code's exit**, not a
+  subprocess you shell out to, unless you explicitly propagate it —
+  `subprocess.run(['pytest'])` with no follow-up reports `exit_code: 0`
+  even when pytest itself failed. This is the one place the "the agent
+  can't fake success" claim was quietly not true; now stated plainly in
+  `run`'s docstring with the propagation pattern for Python, Node and bash.
+- Hitting the process-count ceiling (`policy.PIDS_LIMIT`) surfaces as a
+  native OS error from your own runtime (`EAGAIN`, `BlockingIOError: [Errno
+  11]`), not a HyperBox-generated message — documented rather than
+  papered over with fragile per-language error-text matching, after
+  confirming no reliable cross-engine outside signal exists (it broke the
+  exec channel entirely on a real Podman repro).
+- No way to stop a single `run(background=True)` process short of
+  `destroy_sandbox` — documented next to the existing background-run text.
+- `sync_from` copies once, at creation — not a live mount. Editing a host
+  file afterward does not reach the sandbox. Documented in
+  `create_sandbox` and `run_safely`'s sync note.
+- Verifying a real synced project via `packages` read from its manifest
+  can still fail to even invoke the test command if a separate
+  config file (`pytest.ini`, `setup.cfg`, `tox.ini`, `jest.config`,
+  `.mocharc`) bakes in flags the manifest never mentions. Documented as
+  the first thing to check when a run fails with what looks like a
+  missing-dependency error.
+
+Found and fixed by actually running real open-source projects
+(`msiemens/tinydb`, `jshttp/mime-types`) through HyperBox end-to-end, not
+by inspection. Go and Bash/apt package syntax now validate correctly but
+have not yet been proven against a real project the way Python and
+JavaScript have — planned for a follow-up pass.
+
 ## [0.4.1] — 2026-09-14
 
 - **`run_safely` targets attestation, not just "unreviewed code."** Reworded

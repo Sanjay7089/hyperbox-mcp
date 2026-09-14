@@ -852,3 +852,43 @@ reads as a non-sequitur to a fresh reader, move or trim it. Also revisit if
 a user tries `run_safely(sync_from=...)` against a real test suite and hits
 friction — that's the first real signal on whether the prompt-level nudge is
 enough or whether this needs to become a first-class tool argument instead.
+
+## 2026-09-14 — 0.4.2 ships fixes found by running real open-source code, not just review
+
+**Context.** After the attestation-framing pivot (0.4.1), a cold dev-experience
+pass and four parallel agent runs against synthetic codebases surfaced real
+gaps. Two follow-up agents then ran genuine public repos (`msiemens/tinydb`,
+`jshttp/mime-types`) end to end through HyperBox on the fixed build, which is
+what actually found the version-pinning bug — no amount of code review
+surfaced it, only a real `npm install` of a real pinned dependency did.
+
+**Decided.** Ship all of it as 0.4.2: the NODE_PATH fix (with a regression
+test proven to fail without it), the language-aware package validator (npm
+`name@version`, Go `module@vX`, apt `name=version`, security boundary
+unchanged), and five documentation additions for gaps that don't have a safe
+code fix (the PID-limit non-signal, the subprocess exit-code trap, sync_from's
+copy-once semantics, no single-process stop, and test-runner config files
+hiding extra required packages).
+
+**Because.** The PID-limit investigation is worth recording on its own: cgroup
+`pids.events` looked like a fix at first, but reproducing the ceiling on real
+Podman broke the container's exec channel outright — the very check needed to
+detect the condition would sometimes be unable to run. Documenting the real
+failure shape (a native `EAGAIN`/`BlockingIOError`, not a HyperBox message)
+was the honest choice over shipping detection that silently doesn't work on
+one of the two supported engines. Same reasoning as the OOM explanation's own
+history: a security or clarity property described but not actually verified
+is worse than no claim at all.
+
+**Costs.** Go and Bash/apt package syntax now validate correctly but are
+verified only by targeted checks, not by a real Go or shell project running
+end to end the way Python and JavaScript now are — the asymmetry is real and
+intentional given the launch deadline, not an oversight. The deprecated
+`run(libraries=...)` install path still hardcodes `pip install` regardless of
+language (found, not fixed — it's the path already scheduled for removal;
+`create_sandbox(packages=...)` is the one this release actually hardens).
+
+**Revisit when.** A user reports a Go or Bash package install failure —
+that's the real-world equivalent of the tinydb/mime-types runs, without
+which the version-pinning bug would still be unnoticed. Also revisit if the
+deprecated `libraries=` path outlives the release meant to remove it.

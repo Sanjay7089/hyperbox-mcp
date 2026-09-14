@@ -72,6 +72,14 @@ LANGUAGES: dict[str, dict[str, Any]] = {
         "argv": ["node"],
         "canary": "console.log('MARKER');",
         "install": ["npm", "install", "--global", "--no-fund", "--no-audit"],
+        # `npm install --global` on this image (no custom prefix, no
+        # .npmrc) lands packages in /usr/local/lib/node_modules, but
+        # Node's own module resolution never looks there on its own --
+        # only NODE_PATH makes a global install reachable from code
+        # running out of /sandbox. Without this, a declared package
+        # installs cleanly and then `require()` fails as if it were
+        # never installed at all.
+        "env": {"NODE_PATH": "/usr/local/lib/node_modules"},
     },
     "bash": {
         "image": "debian:bookworm-slim",
@@ -335,7 +343,9 @@ class NativeRuntime:
                     context={"image": image},
                 )
 
-        cid = api.create_container(client, image, sandbox_id, KEEPALIVE)
+        cid = api.create_container(
+            client, image, sandbox_id, KEEPALIVE, env=spec.get("env")
+        )
         handle = SandboxHandle(
             sandbox_id=sandbox_id, language=language, backend=backend,
             meta={"container_ref": cid},

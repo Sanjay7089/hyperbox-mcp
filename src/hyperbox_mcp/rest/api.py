@@ -87,7 +87,11 @@ def host_config(product: str) -> dict:
 
 
 def create_container(
-    client: EngineClient, image: str, sandbox_id: str, command: list[str]
+    client: EngineClient,
+    image: str,
+    sandbox_id: str,
+    command: list[str],
+    env: dict[str, str] | None = None,
 ) -> str:
     """Create a labelled, limited container and return its id.
 
@@ -95,12 +99,18 @@ def create_container(
     on an image's own CMD to keep a container alive makes the sandbox's
     lifetime a property of whichever image was chosen, which breaks the
     moment someone selects a different one.
+
+    `env` carries a language's own requirements (e.g. javascript's
+    NODE_PATH, so a globally npm-installed package is actually reachable
+    from code run out of /sandbox) alongside the baseline every language
+    gets.
     """
+    merged_env = {"PYTHONUNBUFFERED": "1", **(env or {})}
     body = {
         "Image": image,
         "Cmd": command,
         "Labels": {LABEL_MANAGED: "true", LABEL_ID: sandbox_id},
-        "Env": ["PYTHONUNBUFFERED=1"],
+        "Env": [f"{key}={value}" for key, value in merged_env.items()],
         "WorkingDir": "/work",
         "HostConfig": host_config(identify(client)),
     }

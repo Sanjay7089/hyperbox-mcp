@@ -51,11 +51,72 @@ _SANDBOX_ID = re.compile(r"^[0-9a-f]{12}$")
 # no local paths, no VCS references, no environment markers. Those are
 # all legitimate pip features and all of them would let a caller fetch
 # and execute arbitrary code during the network window.
-_LIBRARY = re.compile(
+_LIBRARY_PYTHON = re.compile(
     r"^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?"       # package name
     r"(\[[A-Za-z0-9._,-]+\])?"                          # optional extras
     r"((==|>=|<=|~=|!=|<|>)[A-Za-z0-9._*+!-]+)?$"       # optional version
 )
+
+# A bare name segment, shared by the javascript and go patterns below:
+# alphanumerics plus the punctuation real registries actually use inside
+# one path component, starting and ending on an alphanumeric so a lone
+# `.`/`-`/`_` (or a leading `-`, which would otherwise read as a flag)
+# never matches.
+_NAME_SEGMENT = r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?"
+
+# npm syntax: `name`, `name@1.2.3`, `name@^1.2.3`, and scoped packages
+# `@scope/name` / `@scope/name@1.2.3`. `==` (pip's operator) is not valid
+# npm syntax at all, which is exactly the bug this table fixes — npm
+# separates name from version with `@` and spells ranges with a leading
+# `^`/`~`, not a comparison operator. No character here is one a URL,
+# `git+...` reference, or local path needs (no `:`, no `/` outside the
+# one scope separator, no leading `-` or `.`).
+_LIBRARY_JAVASCRIPT = re.compile(
+    rf"^(@{_NAME_SEGMENT}/)?{_NAME_SEGMENT}"
+    rf"(@[\^~]?{_NAME_SEGMENT})?$"
+)
+
+# `go get` syntax: a module path (domain-style segments joined by `/`,
+# e.g. `github.com/spf13/cobra`) with an optional `@version`, where a
+# real version conventionally starts with `v` (`@v1.8.0`) but `@latest`
+# and similar pseudo-versions are also legal. No scheme (`https://`) is
+# accepted — go module paths never carry one, and allowing `:` would
+# reopen exactly the URL hole this validator exists to close.
+_LIBRARY_GO = re.compile(
+    rf"^{_NAME_SEGMENT}(?:/{_NAME_SEGMENT})*"
+    rf"(@[A-Za-z0-9][A-Za-z0-9._+-]*)?$"
+)
+
+# apt syntax: `name` or `name=1.2.3-1`. apt uses `=`, never `==`, and a
+# Debian version string legitimately contains `:` (an epoch, e.g.
+# `2:8.32-4.1`) and `~` (pre-release ordering) — both excluded from the
+# name half so `pkg=1:2.0` can't be misread as two packages.
+_APT_NAME = r"[a-z0-9][a-z0-9.+-]*"
+_APT_VERSION = r"[A-Za-z0-9][A-Za-z0-9.:+~-]*"
+_LIBRARY_BASH = re.compile(rf"^{_APT_NAME}(={_APT_VERSION})?$")
+
+#: Per-language version-specifier syntax. Java is absent on purpose: its
+#: LANGUAGES entry has `install: None`, so any package name is refused
+#: downstream regardless of shape — there is no version syntax to accept.
+#: Callers for java (and anything else not listed) fall back to the
+#: python pattern below, matching this module's behaviour before it knew
+#: about languages at all.
+_LIBRARY_PATTERNS: dict[str, re.Pattern[str]] = {
+    "python": _LIBRARY_PYTHON,
+    "javascript": _LIBRARY_JAVASCRIPT,
+    "go": _LIBRARY_GO,
+    "bash": _LIBRARY_BASH,
+}
+
+#: A real, correctly-syntaxed example per language, for the error message.
+#: Showing a pip example to a caller validating an npm package name is
+#: exactly the confusion that made pinning look broken in the first place.
+_LIBRARY_EXAMPLES: dict[str, str] = {
+    "python": "'requests' or 'pandas==2.2.0'",
+    "javascript": "'lodash' or 'mime-db@1.54.0'",
+    "go": "'github.com/spf13/cobra' or 'github.com/spf13/cobra@v1.8.0'",
+    "bash": "'curl' or 'curl=7.88.1-10'",
+}
 
 
 def sandbox_id(value: object) -> str:
@@ -183,8 +244,16 @@ def code(value: object) -> str:
     return value
 
 
-def libraries(value: object) -> list[str]:
-    """Package names only — never flags, URLs, paths or VCS references."""
+def libraries(value: object, language: str = "python") -> list[str]:
+    """Package names only — never flags, URLs, paths or VCS references.
+
+    `language` picks which version-specifier syntax is accepted (pip's
+    `==`, npm's `@`, `go get`'s `@`, apt's `=`) — see `_LIBRARY_PATTERNS`.
+    It defaults to python so any caller that does not pass one keeps this
+    module's original, pip-flavoured behaviour exactly. What counts as a
+    bare name versus a flag/URL/path/VCS-reference is NOT language
+    dependent and is never broadened here, regardless of `language`.
+    """
     if value is None:
         return []
     if isinstance(value, str) or not isinstance(value, (list, tuple)):
@@ -198,6 +267,8 @@ def libraries(value: object) -> list[str]:
             f"{len(names)} libraries requested, over the server limit of "
             f"{MAX_LIBRARIES}. Install the ones you actually import."
         )
+    pattern = _LIBRARY_PATTERNS.get(language, _LIBRARY_PYTHON)
+    example = _LIBRARY_EXAMPLES.get(language, _LIBRARY_EXAMPLES["python"])
     cleaned: list[str] = []
     for item in names:
         if not isinstance(item, str):
@@ -206,14 +277,14 @@ def libraries(value: object) -> list[str]:
                 f"{type(item).__name__}."
             )
         name = item.strip()
-        if not _LIBRARY.match(name):
+        if not pattern.match(name):
             raise InvalidInput(
                 f"'{item[:64]}' is not an accepted package name. Pass a "
-                "plain name with an optional version, like 'requests' or "
-                "'pandas==2.2.0'. Installer flags, URLs, file paths and "
-                "VCS references are refused: the install step is the only "
-                "moment the sandbox has network access, and it is limited "
-                "to named packages from the default index."
+                f"plain name with an optional version, like {example}. "
+                "Installer flags, URLs, file paths and VCS references are "
+                "refused: the install step is the only moment the sandbox "
+                "has network access, and it is limited to named packages "
+                "from the default index."
             )
         cleaned.append(name)
     return cleaned

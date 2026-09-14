@@ -543,11 +543,27 @@ async def create_sandbox(
     willing to share, and only paths under an allowed directory are
     accepted. You cannot run `hyperbox init` for them — ask.
 
+    This is a ONE-TIME copy made at creation, not a live mount: editing a
+    file on the user's machine afterward does not propagate into the
+    sandbox. To pick up a later edit, either change the file inside the
+    sandbox yourself with `run()`, or `destroy_sandbox` and call
+    `create_sandbox(sync_from=...)` again.
+
     The result carries a `sync` manifest saying how many files arrived and
     naming every one that did not, with a reason: secrets like .env are
     never copied, and a .hyperboxignore is honoured. READ IT. If a file
     you expected is missing it will be named there, which is faster and
     more honest than guessing why an import failed.
+
+    Declaring `packages` from the obvious manifest (requirements.txt,
+    pyproject.toml, package.json) is necessary but not always sufficient
+    to even invoke the test command. Test-runner config in a separate
+    file — pytest.ini, setup.cfg, tox.ini, jest.config, .mocharc — can
+    bake in flags the manifest never mentions (e.g. --cov, which needs
+    pytest-cov) and that config is easy to miss because nothing points
+    you at it. If the first run against a synced project fails with what
+    looks like a missing-dependency or "unrecognized arguments" error,
+    check those config files too before assuming the manifest was wrong.
 
     Read the `hyperbox://capabilities` resource for exact limits.
     """
@@ -556,7 +572,7 @@ async def create_sandbox(
         synced_from = validate.sync_from(sync_from)
         requested = validate.backend(backend)
         environment = validate.environment(environment)
-        packages = validate.libraries(packages)
+        packages = validate.libraries(packages, language=language)
     except (InvalidInput, UnsupportedLanguageError) as exc:
         return errors.to_result(exc)
 
@@ -699,6 +715,20 @@ async def run(
     failed", so you can read the real traceback and fix the actual cause.
     Prefer this over running generated code on the user's machine.
 
+    THAT exit_code IS YOUR CODE'S OWN EXIT, NOT A SUBPROCESS YOU SHELL OUT
+    TO. If your code calls another program — a test runner, a build tool,
+    anything via subprocess/child_process/os.system/exec — and that
+    program fails, your script can still finish and exit 0, reporting
+    success: true, unless you explicitly propagate the child's code. The
+    trap: `subprocess.run(['pytest'])` with no follow-up reports exit_code
+    0 even when pytest itself exited 4 and ran zero tests, because
+    HyperBox only sees that your wrapper script completed, not what it
+    ran inside it. Propagate explicitly: in Python,
+    `sys.exit(subprocess.run([...]).returncode)`; in Node,
+    `process.exit(child.status)`; in bash, invoking the command directly
+    IS your exit code, no wrapping needed — or `exit $?` if you must wrap
+    it.
+
     Safe to call repeatedly on one sandbox_id, and that is the intended
     shape: one sandbox per task, many runs. The filesystem and installed
     packages persist between calls; in-memory variables do NOT — each run
@@ -717,11 +747,29 @@ async def run(
     `timeout` is capped by the server, must be a positive number, and may
     not be null. Output is truncated past a limit, and marked when it is.
 
+    Your code is also capped at `policy.PIDS_LIMIT` (currently 128)
+    concurrent processes. Unlike the memory limit, which HyperBox detects
+    and explains for you, hitting the process ceiling is NOT detected or
+    translated: it surfaces as a native, OS-level error from your OWN
+    code's runtime. Python raises `BlockingIOError: [Errno 11] Resource
+    temporarily unavailable`, Node throws `EAGAIN` from `spawn`, and
+    other languages report their own "resource temporarily unavailable"
+    or "cannot fork". If you see an error like that, you hit the process
+    ceiling — reduce how many processes you spawn concurrently, don't
+    debug it as an application bug.
+
     `background=True` starts the code and returns immediately with a
     `process_id` instead of output. Use it for something that is meant to
     keep running — a web server, a worker — and then `run` a normal
     foreground call in the SAME sandbox to talk to it on 127.0.0.1.
     Loopback works even though the sandbox has no route to the internet.
+
+    There is no way to stop a single background process — only
+    `destroy_sandbox` ends one. If you fix a bug in a background server
+    and need to restart it, bind the new run to a fresh port rather than
+    reusing the old one, or call `destroy_sandbox` and create a new
+    sandbox; re-running on the same port fails with "address already in
+    use".
 
     THAT PORT IS REACHABLE ONLY FROM INSIDE THIS SANDBOX. Nothing is
     published to the user's machine: they cannot open it in a browser,
@@ -745,7 +793,17 @@ async def run(
     try:
         sandbox_id = validate.sandbox_id(sandbox_id)
         code = validate.code(code)
-        libraries = validate.libraries(libraries)
+        # A plain, unlocked read: only picking which version-specifier
+        # syntax to validate against, not a decision that changes state,
+        # so it does not need the lock-then-reread discipline `execute`
+        # and `launch` use below. If the record is gone, the python
+        # pattern is as good a guess as any -- `execute`/`launch` report
+        # "no sandbox" regardless of what this validated.
+        rec_for_language = _registry.get(sandbox_id)
+        libraries = validate.libraries(
+            libraries,
+            language=rec_for_language.language if rec_for_language else "python",
+        )
         timeout = validate.timeout(timeout)
     except InvalidInput as exc:
         return errors.to_result(exc)
@@ -1031,7 +1089,15 @@ def run_safely(
         f"pass `cwd={policy.CODE_DIR!r}` before invoking a test runner that "
         f"discovers files relative to where it runs (pytest, npm test, "
         f"go test, ...), or it will report finding nothing rather than a "
-        f"real pass or fail.\n\n"
+        f"real pass or fail. This copy happens ONCE, at creation — it is "
+        f"not a live mount, so an edit made on disk after this point will "
+        f"not show up in the sandbox; edit the file inside the sandbox "
+        f"with `run()` instead, or start over with a new sync. If the "
+        f"first run fails with what looks like a missing-dependency "
+        f"error, check test-runner config (pytest.ini, setup.cfg, "
+        f"tox.ini, jest.config, .mocharc) as well as the manifest you "
+        f"read packages from — a flag baked in there (like --cov) can "
+        f"need a package the manifest never mentions.\n\n"
         if sync_from else ""
     )
     return (

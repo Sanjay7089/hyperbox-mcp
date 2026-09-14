@@ -60,6 +60,15 @@ SNIPPETS: dict[str, dict] = {
         "read": f"console.log(require('fs').readFileSync('{STATE_FILE}', 'utf8'));",
         "broken": "throw new Error('deliberately broken');",
         "spin": "while (true) {}",
+        # A package declared at create_sandbox(packages=[...]) time, not
+        # via the deprecated run(libraries=...) reopen. Distinct from
+        # "libraries"/"lib_use" above: `npm install --global` can succeed
+        # while require() still fails, because a global install and
+        # Node's module resolution path are two different things.
+        "packages": ["lodash"],
+        "packages_use": "const _ = require('lodash'); "
+                         "console.log('lodash', _.VERSION);",
+        "packages_marker": "lodash",
     },
     "ruby": {
         "hello": f"puts '{MARKER}'",
@@ -192,6 +201,32 @@ def main() -> int:
             installed.success and snip["lib_marker"] in installed.stdout,
             str(installed),
         )
+
+    # 3b. A package declared at CREATE time -- create_sandbox(packages=[...])
+    #     -- must be reachable by require()/import once the sandbox is
+    #     provisioned, not merely reported installed. This is the exact
+    #     regression that shipped for javascript: `npm install --global
+    #     lodash` finished cleanly during provisioning, but require('lodash')
+    #     in a later run() then failed with MODULE_NOT_FOUND, because npm's
+    #     global install location was never on Node's module resolution
+    #     path. A separate sandbox is created here (rather than reusing
+    #     `handle`) because packages must be declared at create(), not
+    #     bolted on afterwards.
+    if "packages" in snip:
+        pkg_handle = rt.create(
+            language=language, backend=backend, sandbox_id=new_id(),
+            packages=snip["packages"],
+        )
+        try:
+            pkg_run = rt.run(pkg_handle, snip["packages_use"])
+            check(
+                "a package declared at create_sandbox(packages=...) is "
+                "reachable by require()/import, not just installed",
+                pkg_run.success and snip["packages_marker"] in pkg_run.stdout,
+                str(pkg_run),
+            )
+        finally:
+            rt.destroy(pkg_handle)
 
     # 4. Broken run — non-zero exit, real error text, success False.
     broken = rt.run(handle, snip["broken"])

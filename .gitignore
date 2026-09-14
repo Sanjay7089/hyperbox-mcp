@@ -8,6 +8,11 @@ dist/
 build/
 .pytest_cache/
 
+# Project-scoped MCP client config: hardcodes this machine's absolute path
+# to the installed `hyperbox` executable, so it is a personal testing
+# convenience, not something another contributor's machine can use as-is.
+.mcp.json
+
 # Editor / assistant configuration is per-developer, not product material.
 .claude/
 .semantic-search/
