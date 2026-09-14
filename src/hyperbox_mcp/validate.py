@@ -264,8 +264,13 @@ def libraries(value: object, language: str = "python") -> list[str]:
     names = list(value)
     if len(names) > MAX_LIBRARIES:
         raise InvalidInput(
-            f"{len(names)} libraries requested, over the server limit of "
-            f"{MAX_LIBRARIES}. Install the ones you actually import."
+            f"{len(names)} packages requested, over the server limit of "
+            f"{MAX_LIBRARIES}.",
+            fix="Declare the frameworks and tools you import directly and "
+                "let their own dependencies come with them -- they install "
+                "as a side effect and do not count against this limit. The "
+                "limit bounds one absurd request, not how many dependencies "
+                "a real project may have.",
         )
     pattern = _LIBRARY_PATTERNS.get(language, _LIBRARY_PYTHON)
     example = _LIBRARY_EXAMPLES.get(language, _LIBRARY_EXAMPLES["python"])

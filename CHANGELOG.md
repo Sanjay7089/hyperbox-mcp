@@ -5,6 +5,69 @@ All notable changes to HyperBox are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3] — 2026-09-14
+
+Found by running four real open-source projects end to end — `pallets/click`,
+`expressjs/express`, `spf13/cast`, `rbenv/rbenv`. All four caught their change
+correctly; none would have got there unattended. Everything below is the
+scaffolding around execution, which is where every one of them stalled.
+
+### Fixed
+
+- **HyperBox wrote its own scratch files into your synced project.** The
+  submitted code file, its pid file and background logs all shared
+  `/sandbox` with whatever `sync_from` copied in. They now live in
+  `/hyperbox`, a sibling directory that a project can never collide with.
+
+  This was not cosmetic. A scratch `<hex>.go` declares `package main`, so
+  it sat beside a synced repo's own package and `go test ./...` at the
+  repo root refused to build anything at all — *every* Go project whose
+  root directory is a package was untestable in place. Java's code file is
+  always `Main.java`, silently overwriting a synced one. Nothing was ever
+  cleaned up, so the files accumulated in the caller's tree and turned up
+  in `git status`, `eslint .` and recursive test globs.
+
+  It also fixes a bug nobody had hit yet: `_running_code` identifies our
+  processes by matching `/sandbox/` in a command line, so after a sync any
+  process touching a synced path matched. A timed-out `pytest /sandbox/tests`
+  could be judged still-running and escalate to a container restart.
+
+- **A declared npm package's own dependencies were unreachable.** 0.4.2
+  installed with `npm install --global`, which puts the declared package at
+  the top of `/usr/local/lib/node_modules` but nests everything it depends
+  on underneath it, where nothing searches. `require('express')` worked
+  while the `accepts` that express itself requires did not — which reads as
+  a broken install, not a layout quirk. Packages now install locally into
+  `/hyperbox/deps`, the flat hoisted layout every Node project assumes, and
+  the install root is linked in at `/node_modules` so a project synced into
+  `/sandbox` resolves it too.
+
+- **The package limit blocked mainstream frameworks.** 25 → 64. Express
+  alone directly imports 31, so `create_sandbox` refused it outright, and
+  the refusal advised "install the ones you actually import" — which is
+  precisely what had been done. The message now names the real constraint
+  (provisioning time) and points at declaring a framework and inheriting
+  its tree.
+
+### Clearer
+
+- **`run` reports the sandbox's `language`.** Code sent to a sandbox of the
+  wrong language used to come back as a bare syntax error from an
+  interpreter the caller never knew was involved.
+- **`run` warns that a `sync_from` pass is a pass against the source as of
+  creation.** The copy is taken once; editing the host file and running
+  again returns a confident green measured on the old code. Documented
+  where the false green appears, not only at `create_sandbox`.
+- **A symlinked directory now says its whole subtree was dropped**
+  (`symlinked-directory-not-followed`), rather than reporting one skipped
+  path. A project whose `bin/` is a symlink lost every executable in it and
+  was told only that one path was skipped.
+- **`create_sandbox` documents that installing a synced project needs its
+  build backend declared too** — `flit_core`, `setuptools`, `hatchling`.
+  `pip install -e` reads `[build-system] requires` after the network is
+  already sealed, so it fails on a dependency the project's own
+  requirements never mention.
+
 ## [0.4.2] — 2026-09-14
 
 ### Fixed

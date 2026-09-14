@@ -313,10 +313,10 @@ NANO_CPUS = int(CPUS * 1_000_000_000)
 CPU_PERIOD = 100_000
 CPU_QUOTA = int(CPU_PERIOD * CPUS)
 
-#: Where a background run's log and pid live. Under CODE_DIR, not /work:
+#: Where a background run's log and pid live. Under SCRATCH_DIR, not /work:
 #: /work is a 64 MB tmpfs charged to the container's memory cgroup, so a
 #: daemon logging there spends the sandbox's RAM to do it.
-BACKGROUND_DIR = "/sandbox/.hyperbox"
+BACKGROUND_DIR = "/hyperbox/background"
 
 #: A background log is capped at this with `ulimit -f`, a shell builtin,
 #: so a process that writes past it is killed with SIGXFSZ. Piping through
@@ -357,7 +357,32 @@ TMPFS_PATHS = ("/work",)
 #:
 #: /work stays the caller's scratch space. Code running inside the sandbox
 #: writes there normally; only the archive API cannot.
+#:
+#: CODE_DIR is also where `sync_from` lands the caller's real project, and
+#: nothing of ours may be written here alongside it -- see SCRATCH_DIR.
 CODE_DIR = "/sandbox"
+
+#: Where the server's OWN per-run files go: the submitted code file, its
+#: pid file, and background logs. A sibling of CODE_DIR, never inside it.
+#:
+#: These used to share CODE_DIR, which meant HyperBox wrote into the user's
+#: synced project. That is not merely untidy:
+#:
+#:   - a scratch `<hex>.go` declares `package main` beside a repo's own
+#:     package, and `go build ./...` at the repo root then refuses to build
+#:     anything at all ("found packages main and cast");
+#:   - java's code file is always `Main.java`, so a synced Main.java was
+#:     silently overwritten;
+#:   - the files are never cleaned up, so they accumulate in the caller's
+#:     tree and show up in `git status`, `eslint .` and recursive globs;
+#:   - `_running_code` identifies our processes by path, and every process
+#:     touching a synced file matched, which made the post-timeout kill
+#:     check believe code was still running and restart the container.
+#:
+#: Separating them makes each of those impossible by construction rather
+#: than by escaping. Like CODE_DIR, it must not be under TMPFS_PATHS: the
+#: archive API writes the code file here.
+SCRATCH_DIR = "/hyperbox"
 
 #: Blocks setuid/setgid escalation inside the container. Safe on every
 #: image; unlike cap_drop it does not interfere with the workdir chown
@@ -404,7 +429,15 @@ PROVISION_TIMEOUT_SECONDS = 900.0
 DEFAULT_TIMEOUT_SECONDS = 30.0
 MAX_OUTPUT_CHARS = 20_000
 MAX_CODE_CHARS = 1024 * 1024
-MAX_LIBRARIES = 25
+#: How many packages one sandbox may declare.
+#:
+#: Was 25, which real frameworks walk straight past: express alone
+#: directly imports 31, so `create_sandbox` refused a mainstream project
+#: outright. 64 clears that with room while staying a visible ceiling on
+#: a runaway request. The real bound on install cost is
+#: PROVISION_TIMEOUT_SECONDS, not this number -- this one exists to catch
+#: a caller asking for something absurd, not to ration dependencies.
+MAX_LIBRARIES = 64
 
 # --- ownership -----------------------------------------------------------
 

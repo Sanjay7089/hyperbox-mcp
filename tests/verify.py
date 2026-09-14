@@ -52,6 +52,12 @@ SNIPPETS: dict[str, dict] = {
         "libraries": ["six"],
         "lib_use": "import six; print('six', six.__version__)",
         "lib_marker": "six",
+        # Lists what the server itself left lying in CODE_DIR. See the
+        # scratch-separation check in main().
+        "ls_code_dir": (
+            "import os\n"
+            "print('CODE_DIR:', sorted(os.listdir('/sandbox')))"
+        ),
     },
     # --- not in the runtime's map yet; kept for re-promotion ----------
     "javascript": {
@@ -227,6 +233,36 @@ def main() -> int:
             )
         finally:
             rt.destroy(pkg_handle)
+
+    # 3c. The server's own per-run files must NOT land in CODE_DIR, which
+    #     belongs to whatever the caller synced in. They used to share one
+    #     directory, and the damage was not merely cosmetic: a scratch
+    #     `<hex>.go` declaring `package main` sat beside a synced repo's
+    #     own package and `go test ./...` at the repo root then refused to
+    #     build anything ("found packages main and cast"). Java overwrote
+    #     a synced Main.java outright. Several runs here, then look: every
+    #     run adds a code file and a pid file, so a leak shows up as
+    #     growth.
+    if "ls_code_dir" in snip:
+        for _ in range(3):
+            rt.run(handle, snip["hello"])
+        listing = rt.run(handle, snip["ls_code_dir"])
+        # STATE_FILE is written by the "write" snippet earlier in this
+        # run and legitimately lives here; anything else is ours leaking.
+        state_name = STATE_FILE.rsplit("/", 1)[-1]
+        entries = listing.stdout.partition("[")[2].replace("]", "").split(",")
+        leaked = []
+        for raw_name in entries:
+            name = raw_name.strip().strip("'\"")
+            if name and name != state_name:
+                leaked.append(name)
+        check(
+            "the server's own scratch files stay out of CODE_DIR, where a "
+            "synced project lives",
+            listing.success and not leaked,
+            f"CODE_DIR held {leaked or 'nothing of ours'} after 3 runs "
+            f"| {listing.stdout.strip()}",
+        )
 
     # 4. Broken run — non-zero exit, real error text, success False.
     broken = rt.run(handle, snip["broken"])

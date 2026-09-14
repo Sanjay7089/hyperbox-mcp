@@ -23,9 +23,10 @@ was implicit:
 
   - the container is kept alive by a command WE choose, not by whatever
     CMD the image happens to carry;
-  - submitted code is written to policy.CODE_DIR, never under a tmpfs,
+  - submitted code is written to policy.SCRATCH_DIR -- never under a tmpfs,
     because the archive API cannot write through one on Docker and returns
-    200 having done nothing;
+    200 having done nothing, and never into CODE_DIR, which belongs to
+    whatever the caller synced in;
   - a timeout kills the process GROUP, so anything the code forked dies
     with it, and the kill is verified rather than assumed.
 """
@@ -71,15 +72,33 @@ LANGUAGES: dict[str, dict[str, Any]] = {
         "extension": "js",
         "argv": ["node"],
         "canary": "console.log('MARKER');",
-        "install": ["npm", "install", "--global", "--no-fund", "--no-audit"],
-        # `npm install --global` on this image (no custom prefix, no
-        # .npmrc) lands packages in /usr/local/lib/node_modules, but
-        # Node's own module resolution never looks there on its own --
-        # only NODE_PATH makes a global install reachable from code
-        # running out of /sandbox. Without this, a declared package
-        # installs cleanly and then `require()` fails as if it were
-        # never installed at all.
-        "env": {"NODE_PATH": "/usr/local/lib/node_modules"},
+        # A LOCAL install into our own prefix, not `--global`.
+        #
+        # `npm install --global` puts each package at the top of
+        # /usr/local/lib/node_modules but nests that package's own
+        # dependencies underneath it, and nothing searches those: the
+        # express a caller declared resolved, while the `accepts` express
+        # itself requires did not. From inside a real synced project that
+        # reads as a broken install rather than a layout quirk.
+        #
+        # A local install is the layout every Node project already
+        # assumes -- npm hoists the whole tree flat into one
+        # node_modules -- so a declared package AND everything it depends
+        # on end up siblings, all resolvable.
+        "install": [
+            "npm", "install", "--prefix", "/hyperbox/deps",
+            "--no-fund", "--no-audit",
+        ],
+        "env": {"NODE_PATH": "/hyperbox/deps/node_modules"},
+        # Node resolves by walking `node_modules` directories upward from
+        # the importing FILE, so NODE_PATH alone does not help a project
+        # synced into /sandbox. Linking the install root in at / puts it
+        # on the walk for code anywhere in the container. Created before
+        # the install, so it dangles until npm fills it in -- which is
+        # fine, Node resolves it at require time, not at link time.
+        "root_setup": [
+            ["ln", "-sfn", "/hyperbox/deps/node_modules", "/node_modules"],
+        ],
     },
     "bash": {
         "image": "debian:bookworm-slim",
@@ -356,7 +375,19 @@ class NativeRuntime:
             api.start_container(client, cid)
             attrs = api.inspect_container(client, cid)
             sandbox_ops.assert_policy_applied(attrs, sandbox_id)
-            self._prepare_code_dir(client, cid, attrs)
+            self._prepare_dirs(client, cid, attrs)
+            # Steps that need root, before anything of the caller's exists.
+            # Separate from `setup` on purpose: `setup` runs as the image's
+            # own user (go mod init must, or it writes a go.mod that user
+            # cannot edit), and this one cannot.
+            for step in spec.get("root_setup", []):
+                code, out, err = api.run_exec(client, cid, step, user="root")
+                if code != 0:
+                    raise errors.ProvisionError(
+                        f"Language setup step {' '.join(step)!r} failed "
+                        f"({code}): {(err or out).strip()[:200]}",
+                        context={"sandbox_id": sandbox_id, "step": step},
+                    )
             if sync_from is not None:
                 handle.meta["sync"] = self._sync_in(client, cid, sync_from)
             for step in spec.get("setup", []):
@@ -384,8 +415,18 @@ class NativeRuntime:
             raise
         return handle
 
-    def _prepare_code_dir(self, client, cid, attrs) -> None:
-        """Create CODE_DIR, and make sure the image's own user owns it.
+    def _prepare_dirs(self, client, cid, attrs) -> None:
+        """Create the two directories a sandbox needs, owned by its user.
+
+        CODE_DIR holds the caller's synced project; SCRATCH_DIR holds ours.
+        They are separate so nothing of ours is ever written into someone's
+        source tree -- see policy.SCRATCH_DIR for what that used to break.
+        """
+        for path in (policy.CODE_DIR, policy.SCRATCH_DIR):
+            self._prepare_dir(client, cid, attrs, path)
+
+    def _prepare_dir(self, client, cid, attrs, path: str) -> None:
+        """Create `path`, and make sure the image's own user owns it.
 
         `mkdir -p /sandbox` used to run as whatever the image's USER is,
         with its exit code discarded. For an image that ends in `USER
@@ -405,16 +446,16 @@ class NativeRuntime:
         for is preserved -- it simply has a directory it can write to.
         """
         code, out, err = api.run_exec(
-            client, cid, ["mkdir", "-p", policy.CODE_DIR], user="root"
+            client, cid, ["mkdir", "-p", path], user="root"
         )
         if code != 0:
             raise errors.ProvisionError(
-                f"Could not create {policy.CODE_DIR} in the container "
+                f"Could not create {path} in the container "
                 f"({code}): {(err or out).strip()[:200]}",
                 fix="The image may forbid writing at the filesystem root "
                     "even for root. Pre-create the directory in your "
-                    f"Dockerfile: RUN mkdir -p {policy.CODE_DIR}",
-                context={"path": policy.CODE_DIR},
+                    f"Dockerfile: RUN mkdir -p {path}",
+                context={"path": path},
             )
 
         image_user = str((attrs.get("Config") or {}).get("User") or "").strip()
@@ -422,16 +463,16 @@ class NativeRuntime:
             return  # runs as root already; nothing to hand over
         code, out, err = api.run_exec(
             client, cid,
-            ["chown", "-R", image_user, policy.CODE_DIR], user="root",
+            ["chown", "-R", image_user, path], user="root",
         )
         if code != 0:
             raise errors.ProvisionError(
-                f"Could not give {policy.CODE_DIR} to the image's user "
+                f"Could not give {path} to the image's user "
                 f"'{image_user}' ({code}): {(err or out).strip()[:200]}",
                 fix=f"Pre-create it in your Dockerfile instead: RUN mkdir -p "
-                    f"{policy.CODE_DIR} && chown {image_user} "
-                    f"{policy.CODE_DIR}",
-                context={"path": policy.CODE_DIR, "user": image_user},
+                    f"{path} && chown {image_user} "
+                    f"{path}",
+                context={"path": path, "user": image_user},
             )
 
     def _provision(self, handle, client, cid, spec, packages) -> None:
@@ -665,7 +706,7 @@ class NativeRuntime:
 
         run_id = uuid.uuid4().hex
         stem = spec.get("filename") or run_id
-        path = f"{policy.CODE_DIR}/{stem}.{spec['extension']}"
+        path = f"{policy.SCRATCH_DIR}/{stem}.{spec['extension']}"
         log = f"{policy.BACKGROUND_DIR}/{run_id}.log"
         api.put_file(client, cid, path, code.encode())
 
@@ -727,8 +768,8 @@ class NativeRuntime:
         # run overwrites it, which is fine: runs are serialised per sandbox
         # by the registry lock.
         stem = spec.get("filename") or run_id
-        path = f"{policy.CODE_DIR}/{stem}.{spec['extension']}"
-        pid_file = f"{policy.CODE_DIR}/{run_id}.pid"
+        path = f"{policy.SCRATCH_DIR}/{stem}.{spec['extension']}"
+        pid_file = f"{policy.SCRATCH_DIR}/{run_id}.pid"
         api.put_file(client, cid, path, code.encode())
 
         # `exec` replaces the shell, so the pid recorded IS the
@@ -815,7 +856,7 @@ class NativeRuntime:
             "    if not e.isdigit() or int(e)==me: continue\n"
             "    try: c=open('/proc/'+e+'/cmdline','rb').read().decode('utf8','replace')\n"
             "    except OSError: continue\n"
-            f"    if '{policy.CODE_DIR}/' in c: hits.append(e)\n"
+            f"    if '{policy.SCRATCH_DIR}/' in c: hits.append(e)\n"
             "print(' '.join(hits))\n"
         )
         try:

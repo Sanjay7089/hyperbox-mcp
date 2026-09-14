@@ -892,3 +892,51 @@ language (found, not fixed — it's the path already scheduled for removal;
 that's the real-world equivalent of the tinydb/mime-types runs, without
 which the version-pinning bug would still be unnoticed. Also revisit if the
 deprecated `libraries=` path outlives the release meant to remove it.
+
+## 2026-09-14 — Scratch moves to /hyperbox; npm installs locally, not globally
+
+**Context.** Four real open-source projects run end to end through published
+0.4.2 (`pallets/click`, `expressjs/express`, `spf13/cast`, `rbenv/rbenv`). All
+four completed a change→verify loop and HyperBox caught every change exactly.
+None would have completed unattended, and every failure was in the scaffolding
+around execution rather than execution itself.
+
+**Decided.** Ship 0.4.3 before announcing publicly, holding the launch for it.
+
+**Because.** `CODE_DIR` was doing two jobs — the caller's synced project and our
+own per-run files — and four separate defects fell out of that one conflation.
+The Go one is the reason the launch waits: a scratch `<hex>.go` declaring
+`package main` beside a repo's own package means `go test ./...` at the repo
+root builds nothing, so *every* Go project whose root is a package was
+untestable in place. The README advertises five languages on its front page. A
+stranger's first real attempt failing with an error that blames their own repo
+is the worst possible first contact for a product whose pitch is "you can trust
+what this tells you".
+
+Separating them into `/hyperbox` fixes it by construction rather than by
+escaping, and takes three more with it: Java no longer overwrites a synced
+`Main.java`; scratch no longer accumulates in the caller's tree; and
+`_running_code`, which identifies our processes by matching `/sandbox/` in a
+cmdline, stops matching every process that merely touches a synced file — that
+one could make a timed-out `pytest /sandbox/tests` look unkillable and escalate
+to a container restart, and had not been hit yet.
+
+The npm change is the same shape of error found one layer down. 0.4.2 fixed
+`require()` for a declared package by setting NODE_PATH at the global root, and
+that was only half the problem: `npm install --global` nests a package's own
+dependencies beneath it, where nothing searches. Installing locally into
+`/hyperbox/deps` gets npm's normal hoisted layout — the one every Node project
+already assumes — and linking that root in at `/node_modules` puts it on the
+resolution walk for code anywhere, including a project synced into `/sandbox`.
+
+**Costs.** `/hyperbox` is a container path callers can see, so it is effectively
+API from now on. `MAX_LIBRARIES` at 64 is a judgement, not a measurement: the
+real bound on install cost is `PROVISION_TIMEOUT_SECONDS`, and this only exists
+to catch an absurd request. The stale-sync false green is documented in `run`
+rather than detected, because detecting it needs a per-run re-walk of the source
+and that walk already costs ~50s on a `.git` tree — the honest fix arrives with
+0.5's incremental sync, not before.
+
+**Revisit when.** 0.5 Slice A lands: the pruning walk, symlink following, and
+real staleness detection all belong to it, and this release deliberately leaves
+all three alone.

@@ -519,6 +519,15 @@ async def create_sandbox(
     Not every language takes packages: `java` refuses them and says what to
     do instead. `hyperbox://capabilities` lists which do.
 
+    INSTALLING A SYNCED PROJECT ITSELF NEEDS ITS BUILD BACKEND DECLARED
+    HERE TOO. `pip install -e /sandbox` on a real src-layout project reads
+    that project's `[build-system] requires` — flit_core, setuptools,
+    hatchling — and there is no network left to fetch them by then, so the
+    install fails on a dependency the project's own requirements never
+    mention. Declare the backend alongside everything else: `packages=
+    ["pytest", "flit_core"]`. A test suite that imports the package by
+    name, or asserts on its version metadata, needs this.
+
     WHICH TO USE. A handful of pure-Python packages: `packages`. A heavy
     or native stack — torch, pandas, a JDK toolchain, anything that
     compiles — or one you will want again on the next task: ask the user
@@ -729,6 +738,13 @@ async def run(
     IS your exit code, no wrapping needed — or `exit $?` if you must wrap
     it.
 
+    IF THIS SANDBOX WAS CREATED WITH `sync_from`, A PASS HERE IS A PASS
+    AGAINST THE SOURCE AS IT WAS AT CREATION. The copy is taken once and
+    never refreshed, so editing the file on the user's machine and running
+    again returns a confident green measured on the old code. To verify an
+    edit you just made on the host, create a NEW sandbox — do not reuse
+    this one and trust the result.
+
     Safe to call repeatedly on one sandbox_id, and that is the intended
     shape: one sandbox per task, many runs. The filesystem and installed
     packages persist between calls; in-memory variables do NOT — each run
@@ -896,6 +912,12 @@ async def run(
         "success": result.success,
         "timed_out": result.timed_out,
     }
+    # Which language this sandbox actually runs. Without it, code sent to
+    # a sandbox of the wrong language comes back as a bare syntax error
+    # from an interpreter the caller did not know was involved -- python
+    # sent to a bash sandbox reads as nonsense rather than as a mismatch.
+    if rec_for_language is not None:
+        payload["language"] = rec_for_language.language
     if libraries:
         payload["deprecation"] = (
             "run(libraries=...) is deprecated and will be refused in a "

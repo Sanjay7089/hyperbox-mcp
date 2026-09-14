@@ -477,7 +477,7 @@ def main() -> int:
     check(
         "writing under a tmpfs mount is refused with a way out",
         len(refusals) == 2 and all(refusals),
-        f"submitted code goes to {policy.CODE_DIR}, which is not a tmpfs",
+        f"submitted code goes to {policy.SCRATCH_DIR}, which is not a tmpfs",
     )
 
     # --- 5c. `config --local` pins the checkout, not PATH -------------

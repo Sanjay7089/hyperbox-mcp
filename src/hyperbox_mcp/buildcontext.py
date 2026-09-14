@@ -158,7 +158,23 @@ def sync_tar(
             if path.is_symlink():
                 # Not followed: a link inside the tree can point anywhere,
                 # including outside every allowed root.
-                skipped.append({"path": relative, "reason": "symlink"})
+                #
+                # Say so accurately when the link is a DIRECTORY. rglob
+                # does not descend into one, so a single skip entry here
+                # silently stands in for its entire subtree -- a project
+                # whose `bin/` is a symlink loses every executable in it
+                # and is told only that one path was "skipped". Naming the
+                # reason differently is the difference between an agent
+                # noticing its entry point is missing and an agent
+                # debugging a phantom.
+                reason = "symlink"
+                try:
+                    if path.is_dir():
+                        reason = "symlinked-directory-not-followed"
+                except OSError:
+                    # Broken link: is_dir() raises rather than answering.
+                    reason = "broken-symlink"
+                skipped.append({"path": relative, "reason": reason})
                 continue
             if not path.is_file():
                 continue

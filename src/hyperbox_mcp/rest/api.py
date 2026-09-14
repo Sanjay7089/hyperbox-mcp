@@ -436,7 +436,7 @@ def put_file(client: EngineClient, cid: str, path: str, content: bytes) -> None:
     # 200 on Docker and puts the file in the image layer beneath the mount,
     # where nothing can see it; Podman writes through, so the same call
     # works on one engine and silently vanishes on the other. Measured on
-    # both. Submitted code goes to policy.CODE_DIR for this reason.
+    # both. Submitted code goes to policy.SCRATCH_DIR for this reason.
     for mount in TMPFS_PATHS:
         if directory == mount or directory.startswith(mount + "/"):
             raise errors.ProvisionError(
