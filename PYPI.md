@@ -40,6 +40,9 @@ on an official tagged image.
 
 **Declare dependencies at creation.** `packages=["requests"]` installs while
 the sandbox may still reach the network, which is then cut off for good.
+Version pins use whatever syntax your language actually ships —
+`pandas==2.2.0`, `mime-db@1.54.0`, `github.com/spf13/cobra@v1.8.0` — never
+one syntax pretending to work everywhere.
 `run(libraries=[...])` still works and returns a `deprecation` field, but it
 has to reopen the network on an already-sealed sandbox.
 
@@ -72,14 +75,16 @@ package list, and detaches again before your code runs.
 
 - **[FastMCP](https://pypi.org/project/fastmcp/)** — the MCP server layer
   (stdio, JSON-RPC).
-- **[llm-sandbox](https://pypi.org/project/llm-sandbox/)** — container
-  session management, behind a `Runtime` protocol so the execution
-  backend stays replaceable.
-- **Docker or Podman** — whichever you have running. Both are supported
-  and both pass the full acceptance suite.
+- **Docker or Podman's own REST API** — HyperBox talks to the engine
+  directly over its unix socket. No execution SDK sits underneath it, and
+  no third-party dependency ever touches the container.
+- A `Runtime` protocol still separates the MCP layer from the engine
+  calls, so a different backend could be swapped in later — but only one
+  implementation exists today, and it needs nothing beyond the engine
+  itself.
 
-Two runtime dependencies, no compiled extensions, one `py3-none-any`
-wheel for every platform.
+One real dependency (`fastmcp`), no compiled extensions, one
+`py3-none-any` wheel for every platform.
 
 ## Install
 

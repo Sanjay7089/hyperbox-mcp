@@ -69,9 +69,11 @@ on an official tagged image.
 
 **Declare dependencies at creation.** `packages=["requests"]` installs while
 the sandbox is still allowed to reach the network, and the network is then
-cut off for good. `run(libraries=[...])` still works and returns a
-`deprecation` field, but it has to reopen the network on a sandbox that was
-already sealed, so prefer `packages`.
+cut off for good. Version pins use whatever syntax your language actually
+ships — `pandas==2.2.0`, `mime-db@1.54.0`, `github.com/spf13/cobra@v1.8.0` —
+not one syntax pretending to work everywhere. `run(libraries=[...])` still
+works and returns a `deprecation` field, but it has to reopen the network on
+a sandbox that was already sealed, so prefer `packages`.
 
 Within one sandbox, the filesystem and installed packages persist between
 runs; variables do not, because each run is a fresh process. Write what
