@@ -93,7 +93,7 @@ To start from something heavier, build an environment once:
 
 ```bash
 cat > Dockerfile <<'DOCKERFILE'
-FROM ghcr.io/vndee/sandbox-python-311-bullseye
+FROM python:3.12-slim
 RUN pip install numpy pandas
 DOCKERFILE
 

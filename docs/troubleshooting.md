@@ -360,9 +360,9 @@ no longer accumulate. Starting a server runs that sweep.
 
 ## The first sandbox takes a long time
 
-It pulls the language image (`ghcr.io/vndee/sandbox-python-311-bullseye`),
-which is large. Later sandboxes reuse it. Pre-pull with
-`hyperbox doctor --pull`.
+It pulls the language's base image — `python:3.12-slim` for python,
+`node:22-slim` for javascript, and so on — which is large the first time.
+Later sandboxes reuse it. Pre-pull with `hyperbox doctor --pull`.
 
 ## `run` returns nothing useful
 

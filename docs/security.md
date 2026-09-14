@@ -89,16 +89,25 @@ So the trust boundary for an environment is whoever wrote its Dockerfile.
 HyperBox validates the environment's *name*; it does not and cannot
 inspect what the image contains.
 
-## Code runs as root inside the container
+## Code usually runs as root inside the container
 
-Deliberately, and documented rather than hidden. Two standard hardening
-measures were tried against real containers and reverted:
+Documented rather than hidden, and narrower than it used to be.
 
-- **A non-root user** makes the container unusable. The execution backend
-  provisions a virtualenv under `/sandbox` during setup, which needs root
-  in these images; as uid 1000 every subsequent exec fails with 127.
-- **`cap_drop: ALL`** breaks it even as root: without `CAP_DAC_OVERRIDE`
-  the backend cannot read the file it just copied into `/sandbox`.
+**The default language images declare no `USER`,** so code in them runs as
+root — root inside the container, not on your machine.
+
+**An environment built from an image that DOES declare a `USER` runs as
+that user.** HyperBox creates `/sandbox` and `/hyperbox` as root and then
+hands them to the image's user, so a hardened Dockerfile keeps the
+hardening it asked for and still has somewhere to write. Getting there
+required doing it in that order: `mkdir` at the filesystem root fails for
+a non-root user, and the two engines then diverge — Docker's archive
+upload 404s so creation fails, while Podman creates the directory as
+`root:root` and creation *succeeds*, handing back a sandbox whose own user
+cannot write to it.
+
+**`cap_drop: ALL`** was tried and reverted: without `CAP_DAC_OVERRIDE`
+the server cannot read back the file it just copied in.
 
 That root is confined by the container boundary, `no-new-privileges`, and
 the resource limits above. It is not root on your machine. An image built
