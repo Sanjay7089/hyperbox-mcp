@@ -46,7 +46,7 @@ dependencies = [
 [project.urls]
 Homepage = "https://github.com/Sanjay7089/hyperbox-mcp"
 Repository = "https://github.com/Sanjay7089/hyperbox-mcp"
-Documentation = "https://github.com/Sanjay7089/hyperbox-mcp/tree/main/docs"
+Documentation = "https://sanjay7089.github.io/hyperbox-mcp/"
 Issues = "https://github.com/Sanjay7089/hyperbox-mcp/issues"
 Changelog = "https://github.com/Sanjay7089/hyperbox-mcp/blob/main/CHANGELOG.md"
 

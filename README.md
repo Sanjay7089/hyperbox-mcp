@@ -7,6 +7,10 @@ actually works — before it tells you it does.**
 [![Python](https://img.shields.io/pypi/pyversions/hyperbox-mcp.svg)](https://pypi.org/project/hyperbox-mcp/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
+**[hyperbox docs →](https://sanjay7089.github.io/hyperbox-mcp/)** — the
+architecture, the network model and what the boundary does and does not
+cover, on one page.
+
 ---
 
 Your agent says "done, tests pass." Did it actually run them? The same

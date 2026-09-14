@@ -211,5 +211,8 @@ hyperbox logs            Show the server log
 
 ---
 
-MIT licensed. Source, full documentation and issue tracker:
+Docs — architecture, network model and where the boundary sits:
+**[sanjay7089.github.io/hyperbox-mcp](https://sanjay7089.github.io/hyperbox-mcp/)**
+
+MIT licensed. Source and issue tracker:
 **[github.com/Sanjay7089/hyperbox-mcp](https://github.com/Sanjay7089/hyperbox-mcp)**
